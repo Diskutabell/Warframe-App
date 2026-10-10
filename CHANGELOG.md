@@ -22,6 +22,9 @@ version's results exactly, checked against its own output.
   ones and the session's best picks in platinum.
 - **Mastery progress:** item mastery points earned and left, per category, and what the levelled
   gear alone is worth in mastery rank.
+- **Foundry: parts and gear.** Besides equipment it lists everything else with a recipe - amp, zaw,
+  kitgun, K-drive and companion parts, ciphers, restores, specters, forma, lenses - with the
+  blueprint and every resource checked against your inventory, and a "Buildable at MR n" filter.
 - Foundry timers count down to the minute; the Market page sorts spare parts by platinum, ducats or
   ducats per platinum next to the price check.
 

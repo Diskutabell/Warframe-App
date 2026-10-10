@@ -30,7 +30,8 @@ pub const MASTERY_FILES: [&str; 11] = [
     "Pets",
     "Misc",
 ];
-const EXTRA_FILES: [&str; 2] = ["Relics", "Resources"];
+/// "Gear" holds what the foundry builds for the gear wheel: ciphers, restores, specters, bait.
+const EXTRA_FILES: [&str; 3] = ["Relics", "Resources", "Gear"];
 const WEAPON_CATEGORIES: [&str; 6] = ["Primary", "Secondary", "Melee", "Arch-Gun", "Arch-Melee", "SentinelWeapons"];
 pub const REFINEMENTS: [&str; 4] = ["Intact", "Exceptional", "Flawless", "Radiant"];
 /// WFCD publishes several times a week. A day-old copy is revalidated with its ETag, which costs
@@ -120,6 +121,30 @@ pub struct Relic {
     pub image: Option<String>,
 }
 
+/// One thing a build consumes: its blueprint or a resource.
+#[derive(Clone, Debug)]
+pub struct CraftNeed {
+    pub uid: String,
+    pub name: String,
+    pub count: i64,
+    pub image: Option<String>,
+}
+
+/// Something the foundry builds that gives no mastery by itself: the parts of modular gear (amps,
+/// zaws, kitguns, K-drives, companions), gear such as ciphers and restores, forma, lenses.
+#[derive(Clone, Debug)]
+pub struct Craft {
+    pub uid: String,
+    pub name: String,
+    /// WFCD's type: "Amp", "Zaw Component", "Gear", ...
+    pub kind: String,
+    pub image: Option<String>,
+    pub mastery_req: i64,
+    /// How many one build makes (ciphers 1, small restores 50).
+    pub quantity: i64,
+    pub needs: Vec<CraftNeed>,
+}
+
 #[derive(Default)]
 pub struct Catalog {
     pub items: IndexMap<String, Item>,
@@ -131,6 +156,8 @@ pub struct Catalog {
     /// Relic uid -> (base name, refinement).
     pub relic_uids: HashMap<String, (String, String)>,
     pub names: HashMap<String, String>,
+    /// Builds that give no mastery, by kind and name.
+    pub crafts: Vec<Craft>,
     pub loaded_at: Option<f64>,
 }
 
@@ -509,7 +536,64 @@ pub fn build(raw: &IndexMap<String, Value>) -> Catalog {
         p.vaulted = !p.relics.is_empty() && p.relics.iter().all(|r| r.vaulted);
     }
 
-    Catalog { items, parts, part_alias: alias, relics, relic_uids, names, loaded_at: None }
+    // Everything else with a recipe. WFCD lists the blueprint and the resources as components;
+    // a blueprint has no entry of its own, so it gets a plain name.
+    let mut images: HashMap<&str, &str> = HashMap::new();
+    for (fname, data) in raw {
+        if fname == "Relics" {
+            continue;
+        }
+        for x in data.as_array().into_iter().flatten() {
+            if let (Some(uid), Some(img)) = (str_of(&x["uniqueName"]), str_of(&x["imageName"])) {
+                images.insert(uid, img);
+            }
+        }
+    }
+    let mut crafts: Vec<Craft> = Vec::new();
+    for (fname, data) in raw {
+        if fname == "Relics" {
+            continue;
+        }
+        for x in data.as_array().into_iter().flatten() {
+            let (Some(uid), Some(name)) = (str_of(&x["uniqueName"]), str_of(&x["name"])) else { continue };
+            if items.contains_key(uid) || crafts.iter().any(|c| c.uid == uid) {
+                continue;
+            }
+            let needs: Vec<CraftNeed> = x["components"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|c| {
+                    let cuid = str_of(&c["uniqueName"])?;
+                    let known = names.get(cuid).cloned();
+                    let name = known.unwrap_or_else(|| {
+                        if cuid.ends_with("Blueprint") { "Blueprint".to_string() } else { camel_name(cuid) }
+                    });
+                    Some(CraftNeed {
+                        uid: cuid.to_string(),
+                        name,
+                        count: c.get("itemCount").and_then(Value::as_i64).filter(|&n| n != 0).unwrap_or(1),
+                        image: images.get(cuid).map(|s| s.to_string()),
+                    })
+                })
+                .collect();
+            if needs.is_empty() {
+                continue;
+            }
+            crafts.push(Craft {
+                uid: uid.to_string(),
+                name: name.to_string(),
+                kind: str_of(&x["type"]).unwrap_or(fname).to_string(),
+                image: str_of(&x["imageName"]).map(str::to_owned),
+                mastery_req: x["masteryReq"].as_i64().unwrap_or(0),
+                quantity: x["buildQuantity"].as_i64().filter(|&n| n > 0).unwrap_or(1),
+                needs,
+            });
+        }
+    }
+    crafts.sort_by(|a, b| (&a.kind, &a.name).cmp(&(&b.kind, &b.name)));
+
+    Catalog { items, parts, part_alias: alias, relics, relic_uids, names, crafts, loaded_at: None }
 }
 
 impl Catalog {

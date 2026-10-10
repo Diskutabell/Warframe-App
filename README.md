@@ -55,7 +55,7 @@ sed "s|/path/to/warframeproject|$PWD|" warframeproject.desktop > ~/.local/share/
 | Relics | Your relics with their value (chance-weighted platinum), the drops you still need, and which can be cracked now |
 | Fissures | Live fissures (normal, Steel Path, Void Storms) with the best relic you own for each; the bell watches a tier and mission |
 | World | Cycles, Baro Ki'Teer, sortie, archon hunt, Steel Path, Nightwave, Darvo, reset timers |
-| Foundry | What is building and when it is done; everything you could build from the parts you hold |
+| Foundry | What is building and when it is done; everything you could build from what you hold - equipment, and parts and gear (amp, zaw and kitgun parts, ciphers, restores, forma); can hide what needs a higher MR than yours |
 | Market | Your spare prime parts in platinum and ducats; a price check for anything on warframe.market |
 | Settings | Sources, memory scan, notifications, overlays, hotkeys, files |
 

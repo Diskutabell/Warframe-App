@@ -209,7 +209,11 @@ fn get_api(s: &Arc<State>, path: &str, q: &HashMap<String, String>) -> Result<Va
         "primes" => s.view().primes(),
         "foundry" => {
             let v = s.view();
-            json!({"pending": v.pending_foundry(), "items": v.craftable()})
+            let mut items = v.craftable();
+            if let Some(list) = items.as_array_mut() {
+                list.extend(v.crafts());
+            }
+            json!({"pending": v.pending_foundry(), "items": items})
         }
         "relics" => s.view().relics(q.get("owned").is_some_and(|v| v == "1")),
         "trade" => s.trade(),

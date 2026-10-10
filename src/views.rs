@@ -406,6 +406,36 @@ impl View {
         Value::Array(out.into_iter().map(|(_, _, row)| row).collect())
     }
 
+    /// Builds that give no mastery (modular parts, gear, forma...), with the blueprint and every
+    /// resource checked against the inventory. Closest to buildable first.
+    pub fn crafts(&self) -> Vec<Value> {
+        let mut out: Vec<(f64, Value)> = self
+            .cat
+            .crafts
+            .iter()
+            .map(|c| {
+                let parts: Vec<Value> = c
+                    .needs
+                    .iter()
+                    .map(|n| {
+                        json!({"name": n.name, "need": n.count, "have": self.count(&n.uid),
+                               "image": gamedata::image_url(n.image.as_deref())})
+                    })
+                    .collect();
+                let met = parts.iter().filter(|p| p["have"].as_i64() >= p["need"].as_i64()).count();
+                let row = json!({
+                    "uid": c.uid, "name": c.name, "category": c.kind, "craft": true,
+                    "image": gamedata::image_url(c.image.as_deref()), "masteryReq": c.mastery_req,
+                    "quantity": c.quantity, "held": self.count(&c.uid),
+                    "have": met, "need": parts.len(), "buildable": met == parts.len(), "parts": parts,
+                });
+                (-(met as f64 / parts.len() as f64), row)
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.total_cmp(&b.0));
+        out.into_iter().map(|(_, row)| row).collect()
+    }
+
     /// What is in the foundry now, soonest first.
     pub fn pending_foundry(&self) -> Value {
         let mut rows: Vec<Value> = self
