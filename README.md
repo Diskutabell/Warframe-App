@@ -185,6 +185,7 @@ changes what tesseract reads.
 
 | Problem | Fix |
 |---|---|
+| A dock or launcher still starts the old version after an update | It stored the full `/nix/store/...` path of the old build when the app was pinned. Point it at `warframeproject` (or `~/.nix-profile/bin/warframeproject`), or pin the app again. |
 | The window stays empty | Start it from a terminal (`./run.sh`) and read the output. `WARFRAMEPROJECT_DEBUG=1` enables the web inspector. |
 | The overlay appears behind the game | Settings → *Keep the overlays above the game with*: try the other option, then restart. Run Warframe borderless or fullscreen through the compositor, not exclusive fullscreen. |
 | "Port 8642 is in use" | Something else uses it. Change `"port"` in settings.json or pass `--port` (and re-install the hotkeys). |

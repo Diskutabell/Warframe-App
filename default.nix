@@ -29,10 +29,12 @@ pkgs.rustPlatform.buildRustPackage {
     gappsWrapperArgs+=(--prefix PATH : ${pkgs.lib.makeBinPath runtime.tools})
   '';
 
+  # The menu entry names the command, not its store path: docks and launchers copy the Exec line
+  # when the app is pinned, and a store path would keep starting the old build after every update.
   postInstall = ''
     install -Dm644 warframeproject.desktop $out/share/applications/warframeproject.desktop
     substituteInPlace $out/share/applications/warframeproject.desktop \
-      --replace-fail "Exec=/path/to/warframeproject/run.sh" "Exec=$out/bin/warframeproject"
+      --replace-fail "Exec=/path/to/warframeproject/run.sh" "Exec=warframeproject"
   '';
 
   meta = {
