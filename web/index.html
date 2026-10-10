@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>warframeproject</title>
+<link rel="stylesheet" href="fonts.css">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<aside class="rail">
+  <button class="search-trigger" id="openPalette" type="button">
+    <span data-icon="search"></span><span>Search</span><kbd>Ctrl K</kbd>
+  </button>
+  <nav aria-label="Sections" id="nav"></nav>
+  <div class="rail-status" id="railStatus"></div>
+</aside>
+<main id="view" tabindex="-1"></main>
+<div class="drawer-scrim" id="scrim" hidden></div>
+<aside class="drawer" id="drawer" aria-label="Details" hidden></aside>
+<div class="palette" id="palette" hidden>
+  <div class="palette-box" role="dialog" aria-label="Search">
+    <div class="palette-input"><span data-icon="search"></span>
+      <input id="paletteInput" type="search" placeholder="Items, parts, relics, pages…" autocomplete="off" spellcheck="false">
+      <kbd>Esc</kbd></div>
+    <ul class="palette-results" id="paletteResults" role="listbox"></ul>
+  </div>
+</div>
+<div id="toasts" role="status" aria-live="polite"></div>
+<input type="file" id="filePick" accept=".json,application/json" hidden>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

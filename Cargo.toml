@@ -1,0 +1,31 @@
+[package]
+name = "warframeproject"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Warframe companion for Linux: mastery, prime sets, relics, reward-screen prices and riven grades"
+publish = false
+
+[dependencies]
+anyhow = "1"
+async-channel = "2"
+clap = { version = "4", features = ["derive"] }
+# GTK 3 family. webkit2gtk 2.0.2 and gtk-layer-shell 0.8 both pin gtk 0.18, so 0.18 it is - the
+# newer gtk 0.19 cannot be mixed in until those two move.
+gtk = "0.18"
+# v0_6: keyboard modes and is_supported(); nixpkgs ships gtk-layer-shell 0.10.
+gtk-layer-shell = { version = "0.8", features = ["v0_6"] }
+webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
+image = { version = "0.25", default-features = false, features = ["png", "pnm"] }
+indexmap = { version = "2", features = ["serde"] }
+memchr = "2"
+regex = "1"
+rust-embed = "8"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+tiny_http = "0.12"
+ureq = "3"
+
+[profile.release]
+lto = "thin"
+strip = true

@@ -1,0 +1,306 @@
+//! Account data that does not come from game memory.
+//!
+//! * The public profile (getProfileViewingData): what the in-game profile screen shows other
+//!   players - mastery XP per item and the display name. It needs only the account id.
+//! * An inventory.json: the raw inventory payload, from a file the user imports, a watched file,
+//!   or a memory scan. Parsed locally, never uploaded.
+
+use std::time::Duration;
+
+use anyhow::Result;
+use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::config::Platform;
+use crate::{UserError, net, now};
+
+fn profile_host(platform: Platform) -> &'static str {
+    match platform {
+        Platform::Pc => "https://api.warframe.com",
+        Platform::Ps4 => "https://api-ps4.warframe.com",
+        Platform::Xb1 => "https://api-xb1.warframe.com",
+        Platform::Swi => "https://api-swi.warframe.com",
+    }
+}
+
+/// Equipment arrays in the inventory; each entry is one owned copy.
+const EQUIPMENT_KEYS: [&str; 18] = [
+    "Suits",
+    "LongGuns",
+    "Pistols",
+    "Melee",
+    "SpaceSuits",
+    "SpaceGuns",
+    "SpaceMelee",
+    "Sentinels",
+    "SentinelWeapons",
+    "KubrowPets",
+    "MoaPets",
+    "Hoverboards",
+    "MechSuits",
+    "OperatorAmps",
+    "SpecialItems",
+    "CrewShipWeapons",
+    "CrewShipHarnesses",
+    "KubrowPetEggs",
+];
+/// Stackable arrays: ItemType + ItemCount.
+const COUNTED_KEYS: [&str; 7] =
+    ["MiscItems", "Recipes", "RawUpgrades", "Consumables", "FlavourItems", "LevelKeys", "ShipDecorations"];
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Profile {
+    pub name: Option<String>,
+    /// DE's profile does not actually serve this (checked 2026-10-02); kept for imported files.
+    pub mastery_rank: Option<i64>,
+    pub xp: IndexMap<String, i64>,
+    pub fetched: f64,
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+/// Fetches the public profile. The caller enforces the cooldown: DE temporarily IP-blocks game
+/// login for clients that query profiles too often.
+pub fn fetch_profile(account_id: &str, platform: Platform) -> Result<Profile> {
+    let url = format!("{}/cdn/getProfileViewingData.php?playerId={account_id}", profile_host(platform));
+    let resp = net::get(&url, &[("Accept", "application/json")], Duration::from_secs(20))
+        .map_err(|e| UserError::new(format!("Could not reach DE's profile service: {e}")))?;
+    match resp.status {
+        200..=299 => {}
+        403 => {
+            return Err(UserError::new(
+                "DE's server refused the request (403). This happens when it is called too often or from \
+                 some VPN/VPS addresses. Wait a while, or use 'Import profile file'.",
+            )
+            .into());
+        }
+        400 | 409 => return Err(UserError::new("The account id was not accepted. Check it in Settings.").into()),
+        code => return Err(UserError::new(format!("Profile request failed with HTTP {code}.")).into()),
+    }
+    let data: Value = serde_json::from_slice(&resp.body)
+        .map_err(|_| UserError::new("The profile service returned something that is not JSON."))?;
+    parse_profile(&data)
+}
+
+fn find_key<'a>(obj: &'a Value, key: &str, depth: usize) -> Option<&'a Value> {
+    if depth > 6 {
+        return None;
+    }
+    match obj {
+        Value::Object(map) => {
+            if let Some(v) = map.get(key) {
+                return Some(v);
+            }
+            map.values().find_map(|v| find_key(v, key, depth + 1).filter(|v| !v.is_null()))
+        }
+        Value::Array(items) => items.iter().take(5).find_map(|v| find_key(v, key, depth + 1).filter(|v| !v.is_null())),
+        _ => None,
+    }
+}
+
+pub fn parse_profile(data: &Value) -> Result<Profile> {
+    if !data.is_object() {
+        return Err(UserError::new("Profile data is not a JSON object.").into());
+    }
+    let res = match data.get("Results").and_then(Value::as_array) {
+        Some(list) => list.first().unwrap_or(data),
+        None => data,
+    };
+    let xpinfo = find_key(res, "XPInfo", 0).or_else(|| find_key(data, "XPInfo", 0));
+    let mut xp = IndexMap::new();
+    for e in xpinfo.and_then(Value::as_array).into_iter().flatten() {
+        if let Some(t) = e["ItemType"].as_str().filter(|t| !t.is_empty()) {
+            xp.insert(t.to_string(), int(&e["XP"]));
+        }
+    }
+    if xp.is_empty() {
+        return Err(UserError::new("No mastery data (XPInfo) found in the profile JSON.").into());
+    }
+    let name = res["DisplayName"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| find_key(res, "DisplayName", 0).and_then(Value::as_str).map(str::to_owned));
+    let mastery_rank = [res.get("PlayerLevel"), find_key(res, "PlayerLevel", 0), find_key(data, "PlayerLevel", 0)]
+        .into_iter()
+        .flatten()
+        .find(|v| !v.is_null())
+        .and_then(Value::as_i64);
+    Ok(Profile { name, mastery_rank, xp, fetched: now(), source: None })
+}
+
+/// An integer from a JSON number or numeric string; anything else counts as 0.
+fn int(v: &Value) -> i64 {
+    match v {
+        Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)).unwrap_or(0),
+        Value::String(s) => s.trim().parse().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Equipment {
+    pub count: i64,
+    pub xp: i64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct FoundryEntry {
+    pub recipe: Option<String>,
+    /// When it finishes, epoch seconds.
+    pub done: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Currencies {
+    pub platinum: Option<i64>,
+    pub credits: Option<i64>,
+    pub endo: Option<i64>,
+    pub ducats: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Inventory {
+    pub counts: IndexMap<String, i64>,
+    pub equipment: IndexMap<String, Equipment>,
+    pub xp: IndexMap<String, i64>,
+    pub foundry: Vec<FoundryEntry>,
+    pub currencies: Currencies,
+    pub mods: i64,
+    pub mastery_rank: Option<i64>,
+    pub synced_at: Option<f64>,
+    pub imported: f64,
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+/// Epoch seconds from a Mongo ObjectId (its first four bytes are a unix timestamp), or the
+/// number a memory scan already resolved it to.
+fn oid_time(v: &Value) -> Option<f64> {
+    if let Some(n) = v.as_f64() {
+        return (n > 0.0).then_some(n);
+    }
+    let oid = v.get("$oid").unwrap_or(v).as_str()?;
+    i64::from_str_radix(oid.get(..8)?, 16).ok().map(|t| t as f64)
+}
+
+/// Epoch seconds from DE's date field: Mongo extended JSON, or a bare number in ms or seconds.
+fn date(v: &Value) -> Option<f64> {
+    if let Some(n) = v.as_f64() {
+        return Some(if n > 1e11 { n / 1000.0 } else { n });
+    }
+    let d = v.get("$date")?;
+    let n = d.get("$numberLong").unwrap_or(d);
+    let ms = match n {
+        Value::String(s) => s.parse::<i64>().ok()? as f64,
+        Value::Number(x) => x.as_f64()?,
+        _ => return None,
+    };
+    Some(ms / 1000.0)
+}
+
+/// Turns an inventory payload into counts, equipment, foundry and currencies.
+pub fn parse_inventory(data: &Value) -> Result<Inventory> {
+    // Some tools wrap the payload, sometimes as a JSON string.
+    let unwrapped;
+    let data = match data.get("InventoryJson") {
+        Some(Value::String(s)) => {
+            unwrapped = serde_json::from_str::<Value>(s)
+                .map_err(|_| UserError::new("InventoryJson holds a string that is not JSON."))?;
+            &unwrapped
+        }
+        Some(inner) => inner,
+        None => data,
+    };
+    if !data.is_object() || !["MiscItems", "Suits", "Recipes"].iter().any(|k| data.get(k).is_some()) {
+        return Err(UserError::new("This does not look like a Warframe inventory (no MiscItems/Suits/Recipes).").into());
+    }
+    let array = |key: &str| data[key].as_array().map(Vec::as_slice).unwrap_or(&[]).iter();
+    let mut counts = IndexMap::new();
+    for key in COUNTED_KEYS {
+        for e in array(key) {
+            if let Some(t) = e["ItemType"].as_str().filter(|t| !t.is_empty()) {
+                *counts.entry(t.to_string()).or_insert(0) += int(&e["ItemCount"]);
+            }
+        }
+    }
+    let mut equipment: IndexMap<String, Equipment> = IndexMap::new();
+    for key in EQUIPMENT_KEYS {
+        for e in array(key) {
+            if let Some(t) = e["ItemType"].as_str().filter(|t| !t.is_empty()) {
+                let eq = equipment.entry(t.to_string()).or_default();
+                eq.count += 1;
+                eq.xp = eq.xp.max(int(&e["XP"]));
+            }
+        }
+    }
+    let xp = array("XPInfo")
+        .filter_map(|e| e["ItemType"].as_str().filter(|t| !t.is_empty()).map(|t| (t.to_string(), int(&e["XP"]))))
+        .collect();
+    let foundry = array("PendingRecipes")
+        .map(|e| FoundryEntry { recipe: e["ItemType"].as_str().map(str::to_owned), done: date(&e["CompletionDate"]) })
+        .collect();
+    let mods = array("Upgrades").count() as i64 + array("RawUpgrades").map(|e| int(&e["ItemCount"])).sum::<i64>();
+    Ok(Inventory {
+        counts,
+        equipment,
+        xp,
+        foundry,
+        currencies: Currencies {
+            platinum: data["PremiumCredits"].as_i64(),
+            credits: data["RegularCredits"].as_i64(),
+            endo: data["FusionPoints"].as_i64(),
+            ducats: data["PrimeTokens"].as_i64(),
+        },
+        mods,
+        mastery_rank: data["PlayerLevel"].as_i64(),
+        synced_at: oid_time(&data["LastInventorySync"]),
+        imported: now(),
+        source: None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn profile_keeps_xp_and_tolerates_nesting() {
+        let p = parse_profile(&json!({"Results": [{"DisplayName": "Tenno\u{e000}",
+            "LoadOutInventory": {"XPInfo": [{"ItemType": "/A", "XP": 900000}, {"ItemType": "/B", "XP": "12"}]}}]}))
+        .unwrap();
+        assert_eq!(p.xp["/A"], 900_000);
+        assert_eq!(p.xp["/B"], 12);
+        assert_eq!(p.name.as_deref(), Some("Tenno\u{e000}"));
+        assert_eq!(p.mastery_rank, None);
+        assert!(parse_profile(&json!({"Results": [{}]})).is_err());
+    }
+
+    #[test]
+    fn inventory_counts_dates_and_currencies() {
+        let inv = parse_inventory(&json!({
+            "MiscItems": [{"ItemType": "/P", "ItemCount": 3}, {"ItemType": "/P", "ItemCount": 2}],
+            "Suits": [{"ItemType": "/Ash", "XP": 10}, {"ItemType": "/Ash", "XP": 900000}],
+            "PendingRecipes": [{"ItemType": "/R", "CompletionDate": {"$date": {"$numberLong": "1791032114000"}}}],
+            "PremiumCredits": 0, "LastInventorySync": {"$oid": "5f1e2d3c4b5a69788796a5b4"}
+        }))
+        .unwrap();
+        assert_eq!(inv.counts["/P"], 5);
+        assert_eq!(inv.equipment["/Ash"].count, 2);
+        assert_eq!(inv.equipment["/Ash"].xp, 900_000);
+        assert_eq!(inv.foundry[0].done, Some(1_791_032_114.0));
+        assert_eq!(inv.currencies.platinum, Some(0), "a real 0 must survive");
+        assert_eq!(inv.synced_at, Some(0x5f1e2d3c as f64));
+        assert!(parse_inventory(&json!({"Foo": 1})).is_err());
+    }
+
+    #[test]
+    fn inventory_wrapped_as_a_string() {
+        let inv =
+            parse_inventory(&json!({"InventoryJson": "{\"Recipes\": [{\"ItemType\": \"/X\", \"ItemCount\": 1}]}"}))
+                .unwrap();
+        assert_eq!(inv.counts["/X"], 1);
+    }
+}

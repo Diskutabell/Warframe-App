@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=warframeproject
+Comment=Warframe companion: mastery, prime sets, relics, reward prices, riven grades
+Exec=/path/to/warframeproject/run.sh
+Icon=applications-games
+Terminal=false
+Categories=Game;Utility;
+StartupWMClass=warframeproject
