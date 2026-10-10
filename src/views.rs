@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use crate::difflib::py_round;
 use crate::gamedata::{self, Catalog, ComponentKind, Item, Relic};
 use crate::market::Market;
-use crate::sources::{Inventory, Profile};
+use crate::sources::{Inventory, Profile, Progress};
 use crate::state::Manual;
 
 pub const ERAS: [&str; 5] = ["Lith", "Meso", "Neo", "Axi", "Requiem"];
@@ -85,6 +85,46 @@ pub fn rank_for(points: i64) -> (i64, i64, i64) {
     (30 + legendary, 2_250_000 + 147_500 * legendary, 2_250_000 + 147_500 * (legendary + 1))
 }
 
+/// One rank of any intrinsic gives 1,500 mastery points (wiki.warframe.com/w/Mastery_Rank).
+const INTRINSIC_XP: i64 = 1500;
+
+/// Mastery points that do not come from gear.
+#[derive(Debug, Default, PartialEq)]
+pub struct OtherMastery {
+    /// Nodes and junctions.
+    pub star_chart: i64,
+    /// The same nodes and junctions again, for those done on the Steel Path.
+    pub steel_path: i64,
+    pub railjack: i64,
+    pub drifter: i64,
+}
+
+impl OtherMastery {
+    pub fn total(&self) -> i64 {
+        self.star_chart + self.steel_path + self.railjack + self.drifter
+    }
+}
+
+pub fn other_mastery(cat: &Catalog, progress: &Progress) -> OtherMastery {
+    let mut m = OtherMastery::default();
+    for (tag, tier) in &progress.nodes {
+        let xp = cat.node_mastery(tag);
+        m.star_chart += xp;
+        if *tier >= 1 {
+            m.steel_path += xp;
+        }
+    }
+    for (skill, rank) in &progress.intrinsics {
+        let xp = (*rank).max(0) * INTRINSIC_XP;
+        if skill.starts_with("LPS_DRIFT_") {
+            m.drifter += xp;
+        } else {
+            m.railjack += xp;
+        }
+    }
+    m
+}
+
 fn farm_hint(parts: &[PartView]) -> Value {
     let hints: Vec<Value> = parts
         .iter()
@@ -153,6 +193,20 @@ impl View {
             best = best.max(i.xp.get(uid).copied().unwrap_or(0)).max(i.equipment.get(uid).map_or(0, |e| e.xp));
         }
         best
+    }
+
+    /// Star chart and intrinsics: from the profile and, when an imported file had them, the
+    /// inventory. `None` when no source has told us yet.
+    pub fn progress(&self) -> Option<Progress> {
+        let sources = [
+            self.profile.as_ref().and_then(|p| p.progress.as_ref()),
+            self.inv.as_ref().and_then(|i| i.progress.as_ref()),
+        ];
+        let mut merged: Option<Progress> = None;
+        for p in sources.into_iter().flatten() {
+            merged.get_or_insert_with(Progress::default).merge(p);
+        }
+        merged
     }
 
     pub fn owned(&self, uid: &str) -> Option<i64> {
@@ -292,8 +346,10 @@ impl View {
                "setsStarted": started, "mods": self.inv.as_ref().map_or(0, |i| i.mods), "stacks": counts.len()})
     }
 
-    /// Item mastery: points from levelled gear (star chart and intrinsics are not in the data, so
-    /// the real total is higher), the rank they reach, and progress per category.
+    /// Mastery XP as the game's profile shows it: gear, star chart, Steel Path and intrinsics,
+    /// with the rank that total reaches (the rank held can be lower: every rank needs its test).
+    /// `points`/`possible`/`byCategory` are the gear alone. `lacks` says what is not counted yet:
+    /// "profile" (no star chart or intrinsics read so far) or "starChart" (no node table).
     pub fn mastery_progress(&self) -> Value {
         let (mut points, mut possible) = (0i64, 0i64);
         let mut by_cat: IndexMap<&str, (i64, i64, i64, i64)> = IndexMap::new();
@@ -310,9 +366,20 @@ impl View {
             e.3 += m;
         }
         by_cat.sort_by(|_, a, _, b| b.1.cmp(&a.1));
-        let (rank, floor, next) = rank_for(points);
+        let progress = self.progress();
+        let other = progress.as_ref().map(|p| other_mastery(&self.cat, p)).unwrap_or_default();
+        let lacks = match &progress {
+            None => Some("profile"),
+            Some(_) if self.cat.node_xp.is_empty() => Some("starChart"),
+            Some(_) => None,
+        };
+        let total = points + other.total();
+        let (rank, floor, next) = rank_for(total);
         json!({
-            "points": points, "possible": possible, "rank": rank, "rankFloor": floor, "nextAt": next,
+            "points": points, "possible": possible,
+            "total": total, "lacks": lacks, "rank": rank, "rankFloor": floor, "nextAt": next,
+            "sources": {"gear": points, "starChart": other.star_chart, "steelPath": other.steel_path,
+                        "railjack": other.railjack, "drifter": other.drifter},
             "byCategory": by_cat.iter().map(|(c, (m, t, p, x))| json!({"category": c, "mastered": m, "total": t, "points": p, "possible": x}))
                 .collect::<Vec<_>>(),
         })
@@ -764,6 +831,31 @@ mod tests {
         assert_eq!(rank_for(1_960_000), (28, 1_960_000, 2_102_500));
         assert_eq!(rank_for(2_250_000), (30, 2_250_000, 2_397_500));
         assert_eq!(rank_for(2_397_500), (31, 2_397_500, 2_545_000), "Legendary 1");
+    }
+
+    #[test]
+    fn mastery_outside_the_arsenal() {
+        let cat = Catalog {
+            node_xp: gamedata::node_xp_table(&json!({
+                "SolNode27": {"masteryExp": 63}, "SolNode1": {"masteryExp": 24},
+                "SolNode94": {"masteryExp": 0}, "EarthToVenusJunction": {"masteryExp": 0}})),
+            ..Catalog::default()
+        };
+        assert_eq!(cat.node_xp.len(), 2, "only nodes that give XP are kept");
+        let progress = Progress {
+            // SolNode1 and the junction were also done on the Steel Path; SolNode94 gives nothing;
+            // an event node is not in the table.
+            nodes: IndexMap::from(
+                [("SolNode27", 0), ("SolNode1", 1), ("SolNode94", 0), ("EarthToVenusJunction", 1), ("EventNode25", 0)]
+                    .map(|(tag, tier)| (tag.to_string(), tier)),
+            ),
+            intrinsics: IndexMap::from(
+                [("LPS_PILOTING", 7), ("LPS_COMMAND", 4), ("LPS_DRIFT_RIDING", 2)].map(|(k, v)| (k.to_string(), v)),
+            ),
+        };
+        let m = other_mastery(&cat, &progress);
+        assert_eq!(m, OtherMastery { star_chart: 63 + 24 + 1000, steel_path: 24 + 1000, railjack: 16_500, drifter: 3000 });
+        assert_eq!(m.total(), 21_611);
     }
 
     #[test]

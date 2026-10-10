@@ -7,8 +7,9 @@ const ICONS = ["platinum", "ducats", "endo", "credits"];
 
 function hero(S) {
   const m = S.mastery || {};
-  // From an imported inventory, else the log's badge (a band such as 16-18 for higher ranks).
-  // Levelled gear proves nothing: bundles hand out mastery-locked gear early.
+  // The rank held: from an imported inventory, else the log's badge (a band such as 16-18 for
+  // higher ranks). XP proves nothing about it: every rank needs its test, and bundles hand out
+  // mastery-locked gear early.
   const mr = S.masteryRank;
   const top = S.masteryRankMax ?? mr;
   const shown = mr == null ? "?" : top !== mr ? `${mr}-${top}` : `${mr}`;
@@ -19,11 +20,25 @@ function hero(S) {
     ["endo", "Endo", cur.endo], ["credits", "Credits", cur.credits]]
     .filter(([, , v]) => v != null)
     .map(([k, label, v]) => `<div class="cur"><img class="ci" alt="" src="icons/${ICONS.includes(k) ? k : "platinum"}.png"><div><b>${fmt(v)}</b><span>${label}</span></div></div>`).join("");
-  // Item points are only part of the total (the star chart and intrinsics count too), so they
-  // put a floor under the rank the account has earned - not under the rank it holds.
-  const ahead = mr != null && m.rank > top;
   const rankName = (r) => (r > 30 ? `Legendary ${r - 30}` : `MR ${r}`);
   const ringTitle = mr == null ? "Mastery rank: not known yet (it comes from the game log)" : "Mastery rank";
+  // m.total is the mastery XP of the game's profile screen: gear, star chart, Steel Path and
+  // intrinsics. m.rank is the rank that much XP reaches once the tests are passed.
+  const src = m.sources || {};
+  const breakdown = [["Gear", src.gear], ["Star chart", src.starChart], ["Steel Path", src.steelPath],
+    ["Railjack intrinsics", src.railjack], ["Drifter intrinsics", src.drifter]]
+    .filter(([, v]) => v).map(([label, v]) => `${label} ${fmt(v)}`).join(" · ");
+  const toNext = `<b>${fmt((m.nextAt || 0) - (m.total || 0))}</b> more for ${rankName((m.rank || 0) + 1)}`;
+  let hint = "";
+  if (m.lacks === "profile") {
+    hint = `This is gear only. The star chart and intrinsics are added once your profile has been read (link the account in Settings).`;
+  } else if (m.lacks === "starChart") {
+    hint = `The star chart is not counted yet: its data could not be downloaded.`;
+  } else if (mr == null || m.rank > top) {
+    hint = `Your mastery XP is enough for <b>${rankName(m.rank)}</b>${mr != null ? `; you hold MR ${shown}` : ""}. ${toNext}.`;
+  } else if (m.rank === top) {
+    hint = `${toNext}.`;
+  }
   return `<div class="card hero">
     <div class="mr-ring" title="${ringTitle}">
       <svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="50" fill="none" stroke="#1e2c38" stroke-width="8"/>
@@ -36,13 +51,14 @@ function hero(S) {
       <div class="facts">
         <span><b>${fmt(S.mastered)}</b>of ${fmt(S.total)} mastered</span>
         <span><b>${fmt(S.total - S.mastered)}</b>to go</span>
-        <span><b>${fmt(m.points)}</b>item mastery</span>
+        <span title="${esc(breakdown)}"><b>${fmt(m.total)}${m.lacks ? "+" : ""}</b>mastery XP</span>
       </div>
       <div class="row" style="margin-top:10px;max-width:560px">
         <div class="bar grow"><i style="width:${(share * 100).toFixed(1)}%"></i></div>
         <span class="muted num" style="font-size:12.5px">${(share * 100).toFixed(1)}% of all item mastery · ${fmt((m.possible || 0) - (m.points || 0))} points left in gear</span>
       </div>
-      ${ahead || (mr == null && m.rank > 0) ? `<div class="hint">${icon("mastery")}<span>Your levelled gear alone is worth <b>${rankName(m.rank)}</b>${mr != null ? `; you are MR ${shown}` : "; the star chart and intrinsics add more"}.</span></div>` : ""}
+      ${hint ? `<div class="hint">${icon("mastery")}<span>${hint}</span></div>` : ""}
+      ${breakdown && !m.lacks ? `<div class="muted num" style="font-size:12.5px;margin-top:6px">${esc(breakdown)}</div>` : ""}
     </div>
     ${purse ? `<div class="purse">${purse}</div>` : ""}
   </div>`;

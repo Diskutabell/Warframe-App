@@ -113,7 +113,8 @@ made when the app starts and the saved profile is older than the refresh interva
 |---|---|---|
 | WFCD warframe-items | Every item, prime part, relic and drop table | GitHub, cached; rechecked daily (a no-change check costs a few bytes) |
 | `EE.log` | Your account id, name and mastery rank badge; when the reward screen opens; when a mission ends | Plain file read of Warframe's own log in the Proton prefix |
-| DE public profile | Mastery XP for every item you have levelled | `getProfileViewingData.php`, what the in-game profile screen shows |
+| DE public profile | Mastery XP for every item you have levelled, the star chart nodes you have completed, your intrinsic ranks | `getProfileViewingData.php`, what the in-game profile screen shows |
+| warframe-public-export-plus | The mastery XP of each star chart node | GitHub, cached; rechecked daily |
 | Reward-screen OCR | The 1-4 items on the fissure reward screen | Screenshot, tesseract, fuzzy matching (the WFInfo approach) |
 | Manual tracking | Part and relic counts, "mark as mastered" | +/- and the button in an item's side panel |
 | `inventory.json` import | The exact inventory: parts, relics, plat, ducats, endo, foundry | A file you import, or one that is watched (Settings) |
@@ -123,8 +124,10 @@ Prices come from warframe.market's public API; fissures, the world timers and tr
 from api.warframestat.us.
 
 Your **mastery rank** comes from `EE.log`, where the squad overlay loads your rank badge: exact for
-low ranks, a band such as 16-18 above. DE's profile leaves the rank out. The Overview also shows
-what your levelled gear alone is worth.
+low ranks, a band such as 16-18 above. DE's profile leaves the rank out. Your **mastery XP** is the
+total the in-game profile shows: gear, star chart, Steel Path and intrinsics, all read from your
+profile. The Overview shows it with the rank it is enough for, which can be above the rank you
+hold, since every rank needs its test.
 
 ### The memory scan
 
@@ -202,7 +205,8 @@ debug builds (`cargo run`) read it from disk, so a reload shows an edit.
 
 - The profile only says what you have levelled, not what you own. Part and relic counts need manual
   tracking, an import or a memory scan.
-- Item mastery leaves out the star chart and intrinsics, so the totals shown are a floor.
+- Mastery XP counts the star chart and intrinsics only once your profile has been read (a linked
+  account, or an imported profile file). Until then the total is gear only and marked with a `+`.
 - The reward-screen reader is tuned for the default UI theme (names in light blue); other themes fall
   back to plain contrast and read less reliably.
 - Fan project, not affiliated with Digital Extremes.

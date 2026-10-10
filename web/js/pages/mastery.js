@@ -34,7 +34,7 @@ export default {
     const cats = (app.state.mastery?.byCategory || []);
     const allCats = [...new Set(data.map((r) => r.category))].sort();
     view.innerHTML = `<div class="page">
-      <div class="page-head"><div><h1>Mastery</h1><p>${fmt(app.state.mastered)} of ${fmt(app.state.total)} mastered · ${fmt(app.state.mastery?.points)} of ${fmt(app.state.mastery?.possible)} item mastery points</p></div></div>
+      <div class="page-head"><div><h1>Mastery</h1><p>${fmt(app.state.mastered)} of ${fmt(app.state.total)} mastered · ${fmt(app.state.mastery?.total)}${app.state.mastery?.lacks ? "+" : ""} mastery XP · ${fmt(app.state.mastery?.points)} of ${fmt(app.state.mastery?.possible)} from gear</p></div></div>
       <div class="tiles" style="margin-bottom:16px">${cats.map((c) => `<div class="tile" style="cursor:pointer" data-cat="${esc(c.category)}">
           <div class="row spread"><span class="muted" style="font-size:12.5px">${esc(c.category)}</span><span class="num" style="font-size:12.5px">${c.mastered}/${c.total}</span></div>
           <div class="bar thin" style="margin-top:8px"><i style="width:${(100 * c.mastered / Math.max(1, c.total)).toFixed(1)}%"></i></div></div>`).join("")}</div>

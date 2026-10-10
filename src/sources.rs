@@ -55,9 +55,64 @@ pub struct Profile {
     /// DE's profile does not actually serve this (checked 2026-10-02); kept for imported files.
     pub mastery_rank: Option<i64>,
     pub xp: IndexMap<String, i64>,
+    /// Star chart and intrinsics. `None` in a profile saved before the app read them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<Progress>,
     pub fetched: f64,
     #[serde(default)]
     pub source: Option<String>,
+}
+
+/// What gives mastery besides gear: the star chart nodes completed and the intrinsic ranks.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Progress {
+    /// Node tag ("SolNode27", "EarthToVenusJunction") -> 0 once completed, 1 once completed on
+    /// the Steel Path as well.
+    pub nodes: IndexMap<String, i64>,
+    /// Intrinsic ("LPS_PILOTING", "LPS_DRIFT_COMBAT") -> its rank.
+    pub intrinsics: IndexMap<String, i64>,
+}
+
+impl Progress {
+    /// Both sources only ever grow, so the higher value of each entry is the current one.
+    pub fn merge(&mut self, other: &Progress) {
+        for (tag, tier) in &other.nodes {
+            let mine = self.nodes.entry(tag.clone()).or_insert(*tier);
+            *mine = (*mine).max(*tier);
+        }
+        for (skill, rank) in &other.intrinsics {
+            let mine = self.intrinsics.entry(skill.clone()).or_insert(*rank);
+            *mine = (*mine).max(*rank);
+        }
+    }
+}
+
+/// Reads `Missions` and `PlayerSkills`, which DE's profile and a raw inventory carry in the same
+/// form (seen in the user's profile, 2026-10-10: `{"Tag": "SolNode27", "Completes": 2}`, with
+/// `"Tier": 1` on a node done on the Steel Path, and `{"LPS_PILOTING": 7, "LPP_SPACE": 29267}`).
+/// `None` when neither key is there, as in a memory scan, which keeps neither.
+fn progress_from(data: &Value) -> Option<Progress> {
+    let missions = data.get("Missions").and_then(Value::as_array);
+    let skills = data.get("PlayerSkills").and_then(Value::as_object);
+    if missions.is_none() && skills.is_none() {
+        return None;
+    }
+    let mut progress = Progress::default();
+    for m in missions.into_iter().flatten() {
+        let Some(tag) = m["Tag"].as_str().filter(|t| !t.is_empty()) else { continue };
+        let tier = int(&m["Tier"]);
+        if int(&m["Completes"]) > 0 || tier > 0 {
+            let best = progress.nodes.entry(tag.to_string()).or_insert(tier);
+            *best = (*best).max(tier);
+        }
+    }
+    for (skill, rank) in skills.into_iter().flatten() {
+        // LPS_* are the ranks; LPP_* are the points not spent yet.
+        if skill.starts_with("LPS_") {
+            progress.intrinsics.insert(skill.clone(), int(rank));
+        }
+    }
+    Some(progress)
 }
 
 /// Fetches the public profile. The caller enforces the cooldown: DE temporarily IP-blocks game
@@ -127,7 +182,7 @@ pub fn parse_profile(data: &Value) -> Result<Profile> {
         .flatten()
         .find(|v| !v.is_null())
         .and_then(Value::as_i64);
-    Ok(Profile { name, mastery_rank, xp, fetched: now(), source: None })
+    Ok(Profile { name, mastery_rank, xp, progress: progress_from(res), fetched: now(), source: None })
 }
 
 /// An integer from a JSON number or numeric string; anything else counts as 0.
@@ -169,6 +224,10 @@ pub struct Inventory {
     pub currencies: Currencies,
     pub mods: i64,
     pub mastery_rank: Option<i64>,
+    /// Star chart and intrinsics, when the payload has them (an imported file does, a memory
+    /// scan does not).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<Progress>,
     pub synced_at: Option<f64>,
     pub imported: f64,
     #[serde(default)]
@@ -255,6 +314,7 @@ pub fn parse_inventory(data: &Value) -> Result<Inventory> {
         },
         mods,
         mastery_rank: data["PlayerLevel"].as_i64(),
+        progress: progress_from(data),
         synced_at: oid_time(&data["LastInventorySync"]),
         imported: now(),
         source: None,
@@ -276,6 +336,41 @@ mod tests {
         assert_eq!(p.name.as_deref(), Some("Tenno\u{e000}"));
         assert_eq!(p.mastery_rank, None);
         assert!(parse_profile(&json!({"Results": [{}]})).is_err());
+    }
+
+    #[test]
+    fn profile_reads_the_star_chart_and_intrinsics() {
+        let p = parse_profile(&json!({"Results": [{
+            "LoadOutInventory": {"XPInfo": [{"ItemType": "/A", "XP": 1}]},
+            "Missions": [{"Tag": "SolNode27", "Completes": 2}, {"Tag": "SolNode1", "Completes": 5, "Tier": 1},
+                         {"Tag": "SolNode9", "Completes": 0}, {"Completes": 3}],
+            "PlayerSkills": {"LPP_SPACE": 29267, "LPS_PILOTING": 7, "LPS_DRIFT_COMBAT": 2}}]}))
+        .unwrap();
+        let progress = p.progress.expect("the profile has both sections");
+        assert_eq!(progress.nodes, IndexMap::from([("SolNode27".to_string(), 0), ("SolNode1".to_string(), 1)]));
+        assert_eq!(
+            progress.intrinsics,
+            IndexMap::from([("LPS_PILOTING".to_string(), 7), ("LPS_DRIFT_COMBAT".to_string(), 2)]),
+            "unspent points (LPP_) are not ranks"
+        );
+        // A profile saved before these were read has neither, and says so rather than "nothing done".
+        let old = parse_profile(&json!({"Results": [{"LoadOutInventory": {"XPInfo": [{"ItemType": "/A", "XP": 1}]}}]}));
+        assert_eq!(old.unwrap().progress, None);
+    }
+
+    #[test]
+    fn progress_merges_to_the_higher_value() {
+        let mut a = Progress {
+            nodes: IndexMap::from([("N1".to_string(), 1), ("N2".to_string(), 0)]),
+            intrinsics: IndexMap::from([("LPS_GUNNERY".to_string(), 3)]),
+        };
+        a.merge(&Progress {
+            nodes: IndexMap::from([("N1".to_string(), 0), ("N2".to_string(), 1), ("N3".to_string(), 0)]),
+            intrinsics: IndexMap::from([("LPS_GUNNERY".to_string(), 5), ("LPS_COMMAND".to_string(), 1)]),
+        });
+        assert_eq!(a.nodes.values().copied().collect::<Vec<_>>(), [1, 1, 0]);
+        assert_eq!(a.intrinsics["LPS_GUNNERY"], 5);
+        assert_eq!(a.intrinsics["LPS_COMMAND"], 1);
     }
 
     #[test]

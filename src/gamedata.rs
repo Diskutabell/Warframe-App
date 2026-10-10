@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, anyhow};
@@ -16,6 +16,17 @@ use crate::{config, net, now};
 
 const BASE_URL: &str = "https://raw.githubusercontent.com/WFCD/warframe-items/master/data/json/";
 pub const IMG_URL: &str = "https://cdn.warframestat.us/img/";
+/// The star chart, exported from the game's own files: the only source found that has the mastery
+/// XP of each node (`masteryExp`). WFCD has no node data. Its nodes add up to 14,569, the total
+/// the wiki gives for all missions (checked 2026-10-10).
+const REGIONS_URL: &str =
+    "https://raw.githubusercontent.com/calamity-inc/warframe-public-export-plus/senpai/ExportRegions.json";
+/// A junction gives 1,000 mastery points (wiki.warframe.com/w/Mastery_Rank); the export lists
+/// every junction with 0.
+const JUNCTION_XP: i64 = 1000;
+/// The Plexus gives mastery like a warframe (6,000 at rank 30) but is in none of WFCD's files.
+/// The profile lists its XP under the Railjack harness.
+pub const PLEXUS_UID: &str = "/Lotus/Types/Game/CrewShip/RailJack/DefaultHarness";
 
 pub const MASTERY_FILES: [&str; 11] = [
     "Warframes",
@@ -158,6 +169,9 @@ pub struct Catalog {
     pub names: HashMap<String, String>,
     /// Builds that give no mastery, by kind and name.
     pub crafts: Vec<Craft>,
+    /// Star chart node tag ("SolNode27") -> the mastery XP its first completion gives. Empty
+    /// until the region export has been downloaded once.
+    pub node_xp: HashMap<String, i64>,
     pub loaded_at: Option<f64>,
 }
 
@@ -168,17 +182,34 @@ pub fn image_url(image: Option<&str>) -> Option<String> {
 /// Downloads (or revalidates) every file and builds the catalog.
 pub fn load(force: bool) -> Result<Catalog> {
     let names: Vec<&str> = MASTERY_FILES.iter().chain(EXTRA_FILES.iter()).copied().collect();
-    let raw: Vec<Result<Value>> = std::thread::scope(|s| {
+    let regions_path = config::dirs().cache.join("regions.json");
+    let (raw, regions): (Vec<Result<Value>>, Result<Value>) = std::thread::scope(|s| {
         let jobs: Vec<_> = names.iter().map(|n| s.spawn(move || download(n, force))).collect();
-        jobs.into_iter().map(|j| j.join().unwrap_or_else(|_| Err(anyhow!("download thread panicked")))).collect()
+        let regions = s.spawn(|| download_to(REGIONS_URL, &regions_path, force));
+        let panicked = || Err(anyhow!("download thread panicked"));
+        (
+            jobs.into_iter().map(|j| j.join().unwrap_or_else(|_| panicked())).collect(),
+            regions.join().unwrap_or_else(|_| panicked()),
+        )
     });
     let mut files = IndexMap::new();
     for (name, data) in names.into_iter().zip(raw) {
         files.insert(name.to_string(), data.with_context(|| format!("Could not download game data ({name})"))?);
     }
     let mut catalog = build(&files);
+    // The app works without the star chart: only the mastery total is then short of it.
+    match regions {
+        Ok(raw) => catalog.node_xp = node_xp_table(&raw),
+        Err(e) => eprintln!("star chart data unavailable, mastery will leave it out: {e:#}"),
+    }
     catalog.loaded_at = Some(now());
     Ok(catalog)
+}
+
+/// Node tag -> mastery XP, for the nodes that give any.
+pub fn node_xp_table(regions: &Value) -> HashMap<String, i64> {
+    let nodes = regions.as_object().into_iter().flatten();
+    nodes.filter_map(|(tag, node)| Some((tag.clone(), node["masteryExp"].as_i64().filter(|xp| *xp > 0)?))).collect()
 }
 
 fn cache_path(name: &str) -> PathBuf {
@@ -186,11 +217,16 @@ fn cache_path(name: &str) -> PathBuf {
 }
 
 fn download(name: &str, force: bool) -> Result<Value> {
-    let path = cache_path(name);
+    download_to(&format!("{BASE_URL}{name}.json"), &cache_path(name), force)
+}
+
+/// Fetches a JSON file into the cache. A copy younger than `MAX_AGE` is used as it is, an older
+/// one is revalidated with its ETag, and when the source cannot be reached the old copy will do.
+fn download_to(url: &str, path: &Path, force: bool) -> Result<Value> {
     let etag_path = path.with_extension("etag");
     let age =
-        fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| SystemTime::now().duration_since(t).ok());
-    let cached = || -> Result<Value> { Ok(serde_json::from_slice(&fs::read(&path)?)?) };
+        fs::metadata(path).and_then(|m| m.modified()).ok().and_then(|t| SystemTime::now().duration_since(t).ok());
+    let cached = || -> Result<Value> { Ok(serde_json::from_slice(&fs::read(path)?)?) };
     if !force && age.is_some_and(|a| a < MAX_AGE) {
         if let Ok(v) = cached() {
             return Ok(v);
@@ -201,18 +237,17 @@ fn download(name: &str, force: bool) -> Result<Value> {
     if let (Some(tag), true) = (&etag, path.exists()) {
         headers.push(("If-None-Match", tag.as_str()));
     }
-    let url = format!("{BASE_URL}{name}.json");
-    match net::get(&url, &headers, Duration::from_secs(60)) {
+    match net::get(url, &headers, Duration::from_secs(60)) {
         Ok(resp) if resp.status == 304 => {
             // Unchanged upstream: mark the copy fresh again.
-            if let Ok(f) = fs::File::options().append(true).open(&path) {
+            if let Ok(f) = fs::File::options().append(true).open(path) {
                 let _ = f.set_modified(SystemTime::now());
             }
             cached()
         }
         Ok(resp) if (200..300).contains(&resp.status) => {
             let data: Value = serde_json::from_slice(&resp.body)?;
-            config::write_atomic(&path, &resp.body)?;
+            config::write_atomic(path, &resp.body)?;
             match resp.etag {
                 Some(tag) => {
                     let _ = fs::write(&etag_path, tag);
@@ -454,6 +489,16 @@ pub fn build(raw: &IndexMap<String, Value>) -> Catalog {
         }
     }
 
+    items.entry(PLEXUS_UID.to_string()).or_insert_with(|| Item {
+        uid: PLEXUS_UID.to_string(),
+        name: "Plexus".to_string(),
+        category: "Misc".to_string(),
+        kind: "Plexus".to_string(),
+        max_rank: 30,
+        xp_factor: 1000.0,
+        ..Item::default()
+    });
+
     // Resolve components into parts, required items and resources.
     let mut parts: IndexMap<String, Part> = IndexMap::new();
     let mut alias: HashMap<String, String> = HashMap::new();
@@ -593,10 +638,28 @@ pub fn build(raw: &IndexMap<String, Value>) -> Catalog {
     }
     crafts.sort_by(|a, b| (&a.kind, &a.name).cmp(&(&b.kind, &b.name)));
 
-    Catalog { items, parts, part_alias: alias, relics, relic_uids, names, crafts, loaded_at: None }
+    Catalog {
+        items,
+        parts,
+        part_alias: alias,
+        relics,
+        relic_uids,
+        names,
+        crafts,
+        node_xp: HashMap::new(),
+        loaded_at: None,
+    }
 }
 
 impl Catalog {
+    /// Mastery XP for completing a star chart node once. Steel Path gives the same again.
+    pub fn node_mastery(&self, tag: &str) -> i64 {
+        if tag.ends_with("Junction") {
+            return JUNCTION_XP;
+        }
+        self.node_xp.get(tag).copied().unwrap_or(0)
+    }
+
     pub fn name_of(&self, uid: &str) -> String {
         if let Some(it) = self.items.get(uid) {
             return it.name.clone();
@@ -689,6 +752,17 @@ mod tests {
         assert_eq!(c.items["/V"].max_rank, 40);
         assert_eq!(Catalog::rank_from_xp(&c.items["/K"], 450_000), 30);
         assert_eq!(Catalog::rank_from_xp(&c.items["/V"], 1_600_000), 40);
+    }
+
+    #[test]
+    fn mastery_wfcd_does_not_list() {
+        let c = build(&raw(&[]));
+        let plexus = &c.items[PLEXUS_UID];
+        assert_eq!((plexus.name.as_str(), plexus.max_rank, plexus.xp_factor), ("Plexus", 30, 1000.0));
+        assert_eq!(Catalog::rank_from_xp(plexus, 1_146_166), 30, "the XP in the user's profile");
+        // Junctions are in the region export with 0; the wiki gives 1,000 each.
+        assert_eq!(c.node_mastery("EarthToVenusJunction"), 1000);
+        assert_eq!(c.node_mastery("SolNode27"), 0, "unknown until the region export is loaded");
     }
 
     #[test]

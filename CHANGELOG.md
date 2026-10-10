@@ -20,13 +20,16 @@ version's results exactly, checked against its own output.
   tier, mission and kind), Baro's arrival, finished foundry builds.
 - **Reward history:** every reward screen read is kept with its prices; the Overview shows the last
   ones and the session's best picks in platinum.
-- **Mastery progress:** item mastery points earned and left, per category, and what the levelled
-  gear alone is worth in mastery rank.
+- **Mastery progress:** item mastery points earned and left, per category.
 - **Foundry: parts and gear.** Besides equipment it lists everything else with a recipe - amp, zaw,
   kitgun, K-drive and companion parts, ciphers, restores, specters, forma, lenses - with the
   blueprint and every resource checked against your inventory, and a "Buildable at MR n" filter.
 - **Pins:** the star in any details panel (and on parts-and-gear cards in the Foundry) pins it to
   the Overview with what is still missing.
+- **Full mastery XP.** The Overview shows the same total as the in-game profile - gear, star chart
+  nodes and junctions, Steel Path, Railjack and Drifter intrinsics - with the rank that much XP is
+  enough for and what the next rank takes, instead of an estimate from gear alone. The Plexus is
+  now counted as the masterable item it is.
 - **More timers on the World page:** bounty rotations, Prime Resurgence, events, the Circuit's
   weekly choices, Deep and Temporal Archimedea, alerts and invasions with their rewards.
 - **Cut-short memory captures are refused.** The game sometimes holds only the tail of the
