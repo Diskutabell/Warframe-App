@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::io::Read;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
@@ -15,6 +15,7 @@ use tiny_http::{Header, Method, Request, Response, Server};
 
 use crate::UserError;
 use crate::memscan::ScanError;
+use crate::art;
 use crate::state::State;
 
 #[derive(RustEmbed)]
@@ -30,6 +31,7 @@ pub fn bind(port: u16) -> Result<Arc<Server>> {
 /// Answers requests on `workers` threads. Scans block their thread for a second or two, so a
 /// handful of workers keeps the UI responsive meanwhile.
 pub fn serve(server: Arc<Server>, state: Arc<State>, workers: usize) {
+    start_art_threads();
     for i in 0..workers {
         let (server, state) = (Arc::clone(&server), Arc::clone(&state));
         std::thread::Builder::new()
@@ -108,6 +110,64 @@ fn respond(req: Request, code: u16, body: Vec<u8>, ctype: &str) {
     let _ = req.respond(resp);
 }
 
+/// One request for art that has to be downloaded first.
+struct ArtJob {
+    req: Request,
+    url: String,
+    size: u32,
+}
+
+/// Art that is not cached yet is downloaded on threads of its own. A page full of new icons would
+/// otherwise occupy every worker, and a hotkey scan would wait behind the downloads.
+static ART_JOBS: OnceLock<async_channel::Sender<ArtJob>> = OnceLock::new();
+const ART_THREADS: usize = 4;
+
+fn start_art_threads() {
+    let (tx, rx) = async_channel::unbounded::<ArtJob>();
+    if ART_JOBS.set(tx).is_err() {
+        return; // already running
+    }
+    for i in 0..ART_THREADS {
+        let rx = rx.clone();
+        std::thread::Builder::new()
+            .name(format!("art-{i}"))
+            .spawn(move || {
+                while let Ok(job) = rx.recv_blocking() {
+                    respond_art(job.req, art::get(&job.url, job.size));
+                }
+            })
+            .expect("spawning an art thread");
+    }
+}
+
+/// `/api/art?u=<url>&s=<px>`: item art scaled to the size the page draws it at (see `art.rs`).
+fn serve_art(req: Request, query: &HashMap<String, String>) {
+    let url = query.get("u").cloned().unwrap_or_default();
+    let size = query.get("s").and_then(|s| s.parse().ok()).unwrap_or(96);
+    if let Some(found) = art::cached(&url, size) {
+        return respond_art(req, Ok(found));
+    }
+    match ART_JOBS.get() {
+        // Dropping the request (the channel never closes in practice) just closes the connection.
+        Some(jobs) => drop(jobs.send_blocking(ArtJob { req, url, size })),
+        None => respond_art(req, art::get(&url, size)),
+    }
+}
+
+/// A scaled image never changes, so the page may keep it for a day. A miss is a plain 404 and the
+/// page hides the slot.
+fn respond_art(req: Request, found: Result<art::Art>) {
+    match found {
+        Ok(found) => {
+            let resp = Response::from_data(found.bytes)
+                .with_header(Header::from_bytes("Content-Type", found.content_type).expect("static header"))
+                .with_header(Header::from_bytes("Cache-Control", "max-age=86400").expect("static header"));
+            let _ = req.respond(resp);
+        }
+        Err(_) => respond(req, 404, Vec::new(), "text/plain; charset=utf-8"),
+    }
+}
+
 fn respond_json(req: Request, code: u16, body: &Value) {
     respond(req, code, serde_json::to_vec(body).unwrap_or_default(), "application/json");
 }
@@ -143,6 +203,9 @@ fn handle(state: &Arc<State>, mut req: Request) {
     let (path, query) = split_url(req.url());
     match req.method() {
         Method::Get | Method::Head => {
+            if path == "/api/art" {
+                return serve_art(req, &query);
+            }
             if let Some(api) = path.strip_prefix("/api/") {
                 match get_api(state, api, &query) {
                     Ok(v) => respond_json(req, 200, &v),

@@ -16,7 +16,7 @@ gtk = "0.18"
 # v0_6: keyboard modes and is_supported(); nixpkgs ships gtk-layer-shell 0.10.
 gtk-layer-shell = { version = "0.8", features = ["v0_6"] }
 webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
-image = { version = "0.25", default-features = false, features = ["png", "pnm"] }
+image = { version = "0.25", default-features = false, features = ["png", "pnm", "webp"] }
 indexmap = { version = "2", features = ["serde"] }
 memchr = "2"
 regex = "1"

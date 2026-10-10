@@ -38,6 +38,12 @@ version's results exactly, checked against its own output.
 
 ### Fixed
 
+- **Parts that cannot be traded had no icon.** Part icons came only from warframe.market, which
+  lists tradable parts, so every ordinary warframe, weapon, archwing and sentinel part drew as an
+  empty slot. They now get the generic icon of their slot (chassis, neuroptics, barrel, blueprint...).
+- **Pixelated item art.** The window shrank 512 px pictures into small slots itself and they came
+  out pixelated. The app now scales each picture once to the size it is drawn at and keeps it in
+  its cache, so art also loads instantly and works without a connection.
 - **EE.log lines cut in two.** The game flushes its log mid-line (9 of 10 reads on a live log), and
   each half was handled as a line: triggers and account-id lines could be missed, and a cut inside
   `Logged in <name>` unlinked the account for the session. Partial lines now wait for their end.

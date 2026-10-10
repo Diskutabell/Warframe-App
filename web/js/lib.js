@@ -123,9 +123,9 @@ export function hydrateIcons(root = document) {
 }
 
 // ------------------------------------------------------------------ item art
-// Art comes from cdn.warframestat.us and warframe.market. A dropped request used to leave a
-// permanent hole, so retry twice with a short backoff; warframe.market answers 200 with an HTML
-// page for missing art, which decodes to nothing - hide those too.
+// Art comes from cdn.warframestat.us and warframe.market through the engine, which scales it to
+// the slot (src/art.rs). A dropped request used to leave a permanent hole, so retry twice with a
+// short backoff; art the source does not have is a 404, and the slot is hidden.
 window.imgFail = (el) => {
   const n = (+el.dataset.try || 0) + 1;
   if (n > 2) { el.style.visibility = "hidden"; return; }
@@ -133,9 +133,13 @@ window.imgFail = (el) => {
   const base = el.src.replace(/[?&]_r=\d+$/, "");
   setTimeout(() => { el.src = base + (base.includes("?") ? "&" : "?") + "_r=" + n; }, 400 * n);
 };
-window.imgDone = (el) => { if (el.naturalWidth < 24) el.style.visibility = "hidden"; };
+window.imgDone = (el) => { if (!el.naturalWidth) el.style.visibility = "hidden"; };
+/** The engine's copy of an image, scaled for a slot `px` CSS pixels wide (see src/art.rs). */
+export const artUrl = (src, px) => `api/art?s=${Math.ceil(px * (window.devicePixelRatio || 1))}&u=${encodeURIComponent(src)}`;
+// The picture area of each .art size in css/app.css: the box minus its 1 px border.
+const ART_PX = { sm: 30, lg: 70, xl: 102 };
 export const art = (src, cls = "") => (src
-  ? `<img class="art ${cls}" loading="lazy" alt="" src="${esc(src)}" onerror="imgFail(this)" onload="imgDone(this)">`
+  ? `<img class="art ${cls}" loading="lazy" alt="" src="${esc(artUrl(src, ART_PX[cls] || 42))}" onerror="imgFail(this)" onload="imgDone(this)">`
   : `<div class="art ${cls}"></div>`);
 
 export const STATUS = { mastered: "Mastered", leveling: "Leveling", missing: "Not levelled" };

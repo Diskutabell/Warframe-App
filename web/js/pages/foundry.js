@@ -1,6 +1,6 @@
 // Foundry: what is building, and everything you could build with the parts you hold.
 
-import { $, act, api, art, countdown, esc, fmt, icon, statusPill } from "../lib.js";
+import { $, act, artUrl, api, art, countdown, esc, fmt, icon, statusPill } from "../lib.js";
 import * as drawer from "../drawer.js";
 
 const st = { q: "", cat: "", show: "buildable", kind: "", myMr: false };
@@ -46,7 +46,7 @@ export default {
           ${art(r.image, "lg")}
           <div class="body"><div class="row"><span class="name grow">${esc(r.name)}</span>${r.craft ? `<button class="ghost icon pin ${r.pinned ? "on" : ""}" data-pin="${esc(r.uid)}" title="${r.pinned ? "Unpin from the Overview" : "Pin to the Overview"}" style="padding:2px">${icon("star")}</button>` : ""}${r.masteryReq ? `<span class="faint" style="font-size:12px">MR ${r.masteryReq}</span>` : ""}</div>
             <div class="pips">${r.parts.map((p) => `<span class="pip ${p.have >= p.need ? "ok" : ""}" title="${esc(p.name)} - own ${fmt(p.have)} of ${fmt(p.need)}">
-              ${p.image ? `<img alt="" src="${esc(p.image)}" onerror="this.remove()">` : p.have >= p.need ? icon("check") : ""}${!r.craft && p.have > 1 ? `<b>${p.have}</b>` : ""}</span>`).join("")}</div>
+              ${p.image ? `<img alt="" src="${esc(artUrl(p.image, 24))}" onerror="this.remove()">` : p.have >= p.need ? icon("check") : ""}${!r.craft && p.have > 1 ? `<b>${p.have}</b>` : ""}</span>`).join("")}</div>
             <div class="meta"><span>${r.have}/${r.need} ${r.craft ? "needs met" : "parts"}</span>${r.craft
                 ? `<span class="pill">${esc(r.category)}</span>${r.held ? `<span class="pill lotus">have ${fmt(r.held)}</span>` : ""}${r.quantity > 1 ? `<span class="faint">makes ${r.quantity}</span>` : ""}`
                 : statusPill(r.status)}

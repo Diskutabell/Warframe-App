@@ -15,7 +15,7 @@ use crate::{net, now};
 
 const API: &str = "https://api.warframe.market/v2";
 /// WFCD has no art for individual prime parts; warframe.market has a 128 px glyph for most.
-const ASSETS: &str = "https://warframe.market/static/assets/";
+pub const ASSETS: &str = "https://warframe.market/static/assets/";
 /// warframe.market asks for at most 3 requests a second; this is shared by every caller.
 const MIN_INTERVAL: Duration = Duration::from_millis(400);
 const ITEMS_MAX_AGE: f64 = 86400.0;
@@ -334,5 +334,58 @@ impl Market {
             .take(15)
             .map(|(slug, it)| (slug.clone(), it.name.clone().unwrap_or_default(), it.ducats))
             .collect()
+    }
+}
+
+/// A generic slot glyph (chassis, barrel, blueprint...) for a part warframe.market does not list,
+/// which is every part that cannot be traded. `category` is the WFCD category of the item the part
+/// builds; the slot is read off the end of the part's uid (`TenguHelmetComponent`,
+/// `StrunWraithBarrel`, `IronframeBlueprint`). The file names were checked against the site
+/// (2026-10-10); it answers 200 with an HTML page for a glyph it does not have.
+pub fn slot_glyph(category: &str, uid: &str) -> Option<String> {
+    const WEAPON: &[&str] = &[
+        "aegis", "barrel", "blade", "chassis", "disc", "engine", "gauntlet", "grip", "guard", "handle", "head",
+        "heatsink", "hilt", "limb", "link", "motor", "receiver", "rivet", "stock", "string",
+    ];
+    let (folder, slots): (&str, &[&str]) = match category {
+        "Warframes" => ("warframe", &["chassis", "helmet", "systems"]),
+        "Archwing" => ("archwing", &["chassis", "systems", "wings"]),
+        "Sentinels" => ("sentinel", &["carapace", "cerebrum", "systems"]),
+        "Primary" | "Secondary" | "Melee" | "Arch-Gun" | "Arch-Melee" | "SentinelWeapons" => ("weapon", WEAPON),
+        _ => ("", &[]),
+    };
+    let last = uid.rsplit('/').next().unwrap_or("").to_ascii_lowercase();
+    let blueprint = last.ends_with("blueprint");
+    let stem = last.trim_end_matches("blueprint").trim_end_matches("component");
+    match slots.iter().find(|s| stem.ends_with(**s)) {
+        Some(slot) => Some(format!("{ASSETS}sub_icons/{folder}/generic_{slot}_128x128.png")),
+        None if blueprint => Some(format!("{ASSETS}sub_icons/blueprint_128x128.png")),
+        None => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slot_glyphs_for_parts_the_market_does_not_list() {
+        let g = |c, u: &str| slot_glyph(c, u).map(|s| s.trim_start_matches(ASSETS).to_string());
+        let wf = "/Lotus/Types/Recipes/WarframeRecipes/";
+        assert_eq!(
+            g("Warframes", &format!("{wf}IronframeHelmetComponent")).unwrap(),
+            "sub_icons/warframe/generic_helmet_128x128.png"
+        );
+        assert_eq!(g("Warframes", &format!("{wf}IronframeBlueprint")).unwrap(), "sub_icons/blueprint_128x128.png");
+        assert_eq!(
+            g("Primary", "/Lotus/Types/Recipes/Weapons/WeaponParts/StrunWraithBarrel").unwrap(),
+            "sub_icons/weapon/generic_barrel_128x128.png"
+        );
+        assert_eq!(
+            g("Archwing", "/Lotus/Types/Recipes/ArchwingRecipes/StandardArchwingWingsComponent").unwrap(),
+            "sub_icons/archwing/generic_wings_128x128.png"
+        );
+        // A shared clan-research part has no slot of its own: the caller falls back to the item's art.
+        assert_eq!(g("Primary", "/Lotus/Types/Items/Research/EnergyComponent"), None);
     }
 }

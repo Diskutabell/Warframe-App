@@ -204,7 +204,7 @@ impl View {
                     price: slug.as_deref().and_then(|s| self.price(Some(s), request_price)),
                     ducats: self.market.ducats(slug.as_deref()),
                     vaulted: p.is_some_and(|p| p.vaulted),
-                    image: self.market.image(slug.as_deref()),
+                    image: self.image_for(&c.uid),
                     relics: p.map(|p| p.relics.iter().take(6).cloned().collect()).unwrap_or_default(),
                     slug,
                 }
@@ -242,9 +242,12 @@ impl View {
             if let Some(img) = self.market.image(slug.as_deref()) {
                 return Some(img);
             }
-            if let Some(img) =
-                part.items.iter().filter_map(|o| self.cat.items.get(o)).find_map(|it| it.image.as_deref())
-            {
+            // Parts that cannot be traded are not on warframe.market: draw the slot's generic glyph.
+            let owners = || part.items.iter().filter_map(|o| self.cat.items.get(o));
+            if let Some(img) = owners().find_map(|it| crate::market::slot_glyph(&it.category, canon)) {
+                return Some(img);
+            }
+            if let Some(img) = owners().find_map(|it| it.image.as_deref()) {
                 return gamedata::image_url(Some(img));
             }
         }

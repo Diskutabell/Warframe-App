@@ -1,6 +1,6 @@
 // Prime sets: each set, its parts, and how close it is.
 
-import { $, api, art, esc, fmt, plat, statusPill } from "../lib.js";
+import { $, api, artUrl, art, esc, fmt, plat, statusPill } from "../lib.js";
 import * as drawer from "../drawer.js";
 
 const st = { q: "", show: "started", unvaulted: false, unmastered: false };
@@ -8,7 +8,7 @@ const SHOW = [["started", "In progress"], ["complete", "Complete"], ["missing", 
 
 function pips(parts) {
   return parts.flatMap((p) => Array.from({ length: p.need }, (_, i) =>
-    `<span class="pip ${i < p.have ? "ok" : ""}" title="${esc(p.name)} - own ${p.have} of ${p.need}">${p.image ? `<img alt="" src="${esc(p.image)}" onerror="this.remove()">` : ""}${i === 0 && p.have > p.need ? `<b>${p.have}</b>` : ""}</span>`)).join("");
+    `<span class="pip ${i < p.have ? "ok" : ""}" title="${esc(p.name)} - own ${p.have} of ${p.need}">${p.image ? `<img alt="" src="${esc(artUrl(p.image, 24))}" onerror="this.remove()">` : ""}${i === 0 && p.have > p.need ? `<b>${p.have}</b>` : ""}</span>`)).join("");
 }
 
 export default {

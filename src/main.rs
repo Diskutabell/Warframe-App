@@ -3,6 +3,7 @@
 //! The engine (data sources, OCR, prices) serves a loopback-only HTTP API; the desktop shell shows
 //! the web UI in a native window and draws the in-game overlays.
 
+mod art;
 mod clock;
 mod compositor;
 mod config;

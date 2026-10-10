@@ -1,6 +1,6 @@
 // Relics: what you hold, what each is worth, and which can be cracked right now.
 
-import { $, api, art, era, esc, fmt, icon, plat } from "../lib.js";
+import { $, api, artUrl, art, era, esc, fmt, icon, plat } from "../lib.js";
 import * as drawer from "../drawer.js";
 
 const st = { owned: true, era: "", q: "", sort: "ev", unvaulted: false };
@@ -44,7 +44,7 @@ export default {
             <div class="row"><span class="name grow">${esc(r.name)}</span>${era(r.era)}</div>
             <div class="pips">${r.rewards.map((x) => `<span class="pip ${x.have > 0 ? "ok" : ""} ${x.needed > x.have ? "want" : ""}"
               title="${esc(x.name)} - ${esc(x.rarity || "")} · ${x.price != null ? x.price + "p" : "no price"} · own ${x.have}${x.needed > x.have ? " · needed" : ""}">
-              ${x.image ? `<img alt="" src="${esc(x.image)}" onerror="this.remove()">` : ""}</span>`).join("")}</div>
+              ${x.image ? `<img alt="" src="${esc(artUrl(x.image, 24))}" onerror="this.remove()">` : ""}</span>`).join("")}</div>
             <div class="meta"><span>${plat(r.ev.Radiant)} radiant · ${plat(r.ev.Intact)} intact</span>
               ${r.needsCount ? `<span class="pill lotus">${r.needsCount} needed</span>` : ""}
               ${isOpen(r) ? `<span class="pill lotus">${icon("fissures")} open now</span>` : ""}

@@ -255,7 +255,7 @@ input[type=number] { width: 90px; }
 .icard .name { font: 700 16px/1.15 var(--display); letter-spacing: .02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pips { display: flex; gap: 5px; flex-wrap: wrap; }
 .pip { position: relative; width: 30px; height: 30px; border-radius: 5px; background: #0d151c; border: 1px solid var(--line); display: grid; place-items: center; }
-.pip img { width: 24px; height: 24px; opacity: .35; filter: grayscale(1); }
+.pip img { width: 24px; height: 24px; object-fit: contain; opacity: .35; filter: grayscale(1); }
 .pip.ok { border-color: rgba(111, 195, 189, .55); background: #102326; }
 .pip.ok img { opacity: 1; filter: none; }
 .pip.want { box-shadow: inset 0 0 0 1px rgba(212, 178, 106, .5); }
