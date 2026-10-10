@@ -284,6 +284,60 @@ fn riven_class(kind: Option<&str>, product: Option<&str>, category: &str) -> &'s
     }
 }
 
+/// Splits an internal part name into what it belongs to and its slot as players know it:
+/// "IronframeHelmet" -> ("ironframe", "Neuroptics"), "FuraxWraithLeftGauntlet" ->
+/// ("furaxwraith", "Left Gauntlet"). `None` for a name that ends in no slot.
+fn split_slot(stem: &str) -> Option<(String, String)> {
+    const SLOTS: [(&str, &str); 33] = [
+        ("helmet", "Neuroptics"),
+        ("chassis", "Chassis"),
+        ("systems", "Systems"),
+        ("barrel", "Barrel"),
+        ("receiver", "Receiver"),
+        ("stock", "Stock"),
+        ("blade", "Blade"),
+        ("handle", "Handle"),
+        ("hilt", "Hilt"),
+        ("grip", "Grip"),
+        ("string", "String"),
+        ("limb", "Limb"),
+        ("link", "Link"),
+        ("gauntlet", "Gauntlet"),
+        ("glove", "Glove"),
+        ("guard", "Guard"),
+        ("head", "Head"),
+        ("disc", "Disc"),
+        ("wings", "Wings"),
+        ("carapace", "Carapace"),
+        ("cerebrum", "Cerebrum"),
+        ("harness", "Harness"),
+        ("heatsink", "Heatsink"),
+        ("motor", "Motor"),
+        ("engine", "Engine"),
+        ("pouch", "Pouch"),
+        ("stars", "Stars"),
+        ("ornament", "Ornament"),
+        ("aegis", "Aegis"),
+        ("rivet", "Rivet"),
+        ("hook", "Hook"),
+        ("chain", "Chain"),
+        ("core", "Core"),
+    ];
+    let lower = stem.to_ascii_lowercase();
+    let lower = lower.strip_suffix("item").unwrap_or(&lower);
+    let (end, slot) = SLOTS.iter().find(|(end, _)| lower.ends_with(end))?;
+    let mut base = &lower[..lower.len() - end.len()];
+    let mut label = slot.to_string();
+    for (side, word) in [("left", "Left"), ("right", "Right"), ("upper", "Upper"), ("lower", "Lower")] {
+        if let Some(rest) = base.strip_suffix(side) {
+            base = rest;
+            label = format!("{word} {slot}");
+            break;
+        }
+    }
+    Some((base.strip_suffix("part").unwrap_or(base).to_string(), label))
+}
+
 /// "/Lotus/.../AshPrimeHelmetBlueprint" -> "Ash Prime Neuroptics".
 pub fn camel_name(uid: &str) -> String {
     let leaf = uid.rsplit('/').next().unwrap_or(uid);
@@ -515,6 +569,31 @@ pub fn build(raw: &IndexMap<String, Value>) -> Catalog {
         ..Item::default()
     });
 
+    // Each item's own blueprint, by its internal name ("ironframe" for Hildryn). Parts are named
+    // after the item whose blueprint shares their internal name - not always the item that needs
+    // them: Chroma takes a Volt helmet, Pride a blade of Wrath.
+    let mut own_blueprint: HashMap<String, String> = HashMap::new();
+    for (uid, comps) in &raw_components {
+        let blueprints: Vec<&str> = comps
+            .keys()
+            .filter(|c| c.contains("/Recipes/"))
+            .filter_map(|c| c.rsplit('/').next().and_then(|leaf| leaf.strip_suffix("Blueprint")))
+            .collect();
+        // The only blueprint is the item's own; among several, the one that names no slot.
+        let own = match blueprints.as_slice() {
+            [one] => Some(*one),
+            many => many.iter().copied().find(|stem| split_slot(stem).is_none()),
+        };
+        if let Some(stem) = own {
+            own_blueprint.insert(uid.clone(), stem.to_ascii_lowercase());
+        }
+    }
+    let owners: Vec<(String, String)> = own_blueprint
+        .iter()
+        .filter_map(|(uid, stem)| Some((stem.clone(), items.get(uid)?.name.clone())))
+        .collect();
+    let related = |base: &str, blueprint: &str| !base.is_empty() && (blueprint.starts_with(base) || base.starts_with(blueprint));
+
     // Resolve components into parts, required items and resources.
     let mut parts: IndexMap<String, Part> = IndexMap::new();
     let mut alias: HashMap<String, String> = HashMap::new();
@@ -538,13 +617,31 @@ pub fn build(raw: &IndexMap<String, Value>) -> Catalog {
                 _ => cuid.clone(),
             };
             let info = part_info.get(&canonical);
+            // A part without a relic has no display name in the data, and its uid uses the game's
+            // internal names (Hildryn is "Ironframe", the Brakk a "GrineerHandShotgun"). So name
+            // it after the item it belongs to: "Hildryn Chassis", "Hildryn Blueprint".
             let leaf = canonical.rsplit('/').next().unwrap_or("");
-            let default_name = if canonical.ends_with("Blueprint")
-                && leaf.replace("Blueprint", "") == uid.rsplit('/').next().unwrap_or("")
-            {
+            let stem = leaf.trim_end_matches("Blueprint").trim_end_matches("Component");
+            let is_blueprint = canonical.ends_with("Blueprint");
+            let mine = own_blueprint.get(uid);
+            let is_own_blueprint = is_blueprint && mine.is_some_and(|bp| *bp == stem.to_ascii_lowercase());
+            let default_name = if is_own_blueprint || (is_blueprint && stem == uid.rsplit('/').next().unwrap_or("")) {
+                format!("{item_name} Blueprint")
+            } else if let Some(name) = names.get(&canonical) {
+                name.clone()
+            } else if let Some((base, slot)) = split_slot(stem) {
+                let owner = match mine {
+                    Some(bp) if related(&base, bp) => Some(item_name.as_str()),
+                    // Someone else's part: only the item whose blueprint has exactly this name. A
+                    // looser match made Broken War's "War Blade" a Gunsen ("Warfan") blade.
+                    Some(_) => owners.iter().find(|(bp, _)| *bp == base).map(|(_, name)| name.as_str()),
+                    None => Some(item_name.as_str()),
+                };
+                owner.map_or_else(|| camel_name(&canonical), |o| format!("{o} {slot}"))
+            } else if is_blueprint && mine.is_none() {
                 format!("{item_name} Blueprint")
             } else {
-                names.get(&canonical).cloned().unwrap_or_else(|| camel_name(&canonical))
+                camel_name(&canonical)
             };
             let pname = info.map(|i| i.0.clone()).filter(|n| !n.is_empty()).unwrap_or(default_name);
             let part = parts.entry(canonical.clone()).or_insert_with(|| Part {
@@ -794,6 +891,74 @@ mod tests {
         assert_eq!(c.items["/V"].max_rank, 40);
         assert_eq!(Catalog::rank_from_xp(&c.items["/K"], 450_000), 30);
         assert_eq!(Catalog::rank_from_xp(&c.items["/V"], 1_600_000), 40);
+    }
+
+    #[test]
+    fn parts_without_a_relic_are_named_after_their_item() {
+        let r = "/Lotus/Types/Recipes/WarframeRecipes/";
+        let c = build(&raw(&[
+            (
+                "Warframes",
+                json!([{"uniqueName": "/Lotus/Powersuits/IronFrame/IronFrame", "name": "Hildryn", "masterable": true,
+                        "components": [{"uniqueName": format!("{r}IronframeBlueprint")},
+                                       {"uniqueName": format!("{r}IronframeHelmetComponent")},
+                                       {"uniqueName": format!("{r}IronframeChassisComponent")}]}]),
+            ),
+            (
+                "Primary",
+                json!([{"uniqueName": "/Lotus/Weapons/Tenno/Rifle/Rifle", "name": "Braton", "masterable": true,
+                        "components": [{"uniqueName": "/Lotus/Types/Recipes/Weapons/BratonBlueprint"}]},
+                       {"uniqueName": "/Lotus/Weapons/Grineer/Pistols/HandShotgun", "name": "Brakk", "masterable": true,
+                        "components": [{"uniqueName": "/Lotus/Types/Recipes/Weapons/WeaponParts/GrineerHandShotgunBarrel"}]}]),
+            ),
+        ]));
+        let names = |uid: &str| c.items[uid].components.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
+        assert_eq!(
+            names("/Lotus/Powersuits/IronFrame/IronFrame"),
+            ["Hildryn Blueprint", "Hildryn Neuroptics", "Hildryn Chassis"]
+        );
+        assert_eq!(names("/Lotus/Weapons/Tenno/Rifle/Rifle"), ["Braton Blueprint"]);
+        assert_eq!(names("/Lotus/Weapons/Grineer/Pistols/HandShotgun"), ["Brakk Barrel"]);
+    }
+
+    #[test]
+    fn a_part_of_another_item_keeps_that_items_name() {
+        let r = "/Lotus/Types/Recipes/";
+        let c = build(&raw(&[
+            (
+                "Warframes",
+                json!([{"uniqueName": "/Lotus/Powersuits/Dragon/Dragon", "name": "Chroma", "masterable": true,
+                        "components": [{"uniqueName": format!("{r}WarframeRecipes/ChromaBlueprint")},
+                                       {"uniqueName": format!("{r}WarframeRecipes/ChromaHelmetComponent")},
+                                       {"uniqueName": format!("{r}WarframeRecipes/VOLTHelmetComponent")}]},
+                       {"uniqueName": "/Lotus/Powersuits/Volt/Volt", "name": "Volt", "masterable": true,
+                        "components": [{"uniqueName": format!("{r}WarframeRecipes/VoltBlueprint")},
+                                       {"uniqueName": format!("{r}WarframeRecipes/VOLTHelmetComponent")}]},
+                       {"uniqueName": "/Lotus/Powersuits/Volt/VoltPrime", "name": "Volt Prime", "masterable": true,
+                        "components": [{"uniqueName": format!("{r}WarframeRecipes/VoltPrimeBlueprint")}]}]),
+            ),
+            (
+                "Melee",
+                json!([{"uniqueName": "/Lotus/Weapons/Tenno/Melee/Swords/StalkerTwoSmallSword", "name": "Broken War", "masterable": true,
+                        "components": [{"uniqueName": format!("{r}Weapons/BrokenWarBlueprint")},
+                                       {"uniqueName": format!("{r}Weapons/WeaponParts/WarBlade")}]},
+                       {"uniqueName": "/Lotus/Weapons/Tenno/Melee/Warfan/WarfanWeapon", "name": "Gunsen", "masterable": true,
+                        "components": [{"uniqueName": format!("{r}Weapons/WarfanBlueprint")}]},
+                       {"uniqueName": "/Lotus/Weapons/Tenno/Melee/Fist/FuraxWraith", "name": "Furax Wraith", "masterable": true,
+                        "components": [{"uniqueName": format!("{r}Weapons/FuraxWraithBlueprint")},
+                                       {"uniqueName": format!("{r}Weapons/WeaponParts/FuraxWraithLeftGauntlet")},
+                                       {"uniqueName": format!("{r}Weapons/WeaponParts/FuraxWraithRightGauntlet")}]}]),
+            ),
+        ]));
+        let names = |uid: &str| c.items[uid].components.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names("/Lotus/Powersuits/Dragon/Dragon"), ["Chroma Blueprint", "Chroma Neuroptics", "Volt Neuroptics"]);
+        assert_eq!(names("/Lotus/Powersuits/Volt/Volt"), ["Volt Blueprint", "Volt Neuroptics"]);
+        // No item's blueprint is called "War": the part keeps its own name.
+        assert_eq!(names("/Lotus/Weapons/Tenno/Melee/Swords/StalkerTwoSmallSword"), ["Broken War Blueprint", "War Blade"]);
+        assert_eq!(
+            names("/Lotus/Weapons/Tenno/Melee/Fist/FuraxWraith"),
+            ["Furax Wraith Blueprint", "Furax Wraith Left Gauntlet", "Furax Wraith Right Gauntlet"]
+        );
     }
 
     #[test]

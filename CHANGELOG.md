@@ -46,6 +46,9 @@ version's results exactly, checked against its own output.
 
 ### Fixed
 
+- **Internal names on ordinary parts.** Parts that do not come from relics showed the game's
+  internal names ("Ironframe Chassis" for Hildryn's chassis, a bare "Braton" for its blueprint).
+  They are now named after their item: "Hildryn Chassis", "Braton Blueprint", "Brakk Barrel".
 - **Thin, hard-to-read small labels** ("CETUS", "RANK", "PLATINUM"): now in the heavier display
   face and a brighter grey.
 - **Parts that cannot be traded had no icon.** Part icons came only from warframe.market, which
