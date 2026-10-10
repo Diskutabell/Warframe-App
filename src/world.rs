@@ -95,6 +95,35 @@ pub fn baro(raw: &Value) -> Value {
     })
 }
 
+/// "3x Forma, 10,000 credits" from a worldstate reward.
+fn reward_text(r: &Value) -> String {
+    let mut out: Vec<String> =
+        r["items"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+    for c in r["countedItems"].as_array().into_iter().flatten() {
+        let name = c["type"].as_str().unwrap_or("");
+        match c["count"].as_i64() {
+            Some(n) if n > 1 => out.push(format!("{n}x {name}")),
+            _ => out.push(name.to_string()),
+        }
+    }
+    if let Some(cr) = r["credits"].as_i64().filter(|&c| c > 0) {
+        out.push(format!("{cr} credits"));
+    }
+    out.join(", ")
+}
+
+/// "AckAndBrunt" -> "Ack And Brunt": the Circuit lists its choices by internal name.
+fn spaced(name: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if i > 0 && c.is_uppercase() {
+            out.push(' ');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Everything the world panel shows.
 pub fn summary(platform: Platform) -> Value {
     let (raw, err) = worldstate(platform);
@@ -143,6 +172,41 @@ pub fn summary(platform: Platform) -> Value {
             "item": d["item"], "price": d["salePrice"], "originalPrice": d["originalPrice"], "discount": d["discount"],
             "stock": d["total"], "sold": d["sold"], "expiry": d["expiry"]})),
         "resets": {"daily": clock::iso(clock::next_daily_reset(t)), "weekly": clock::iso(clock::next_weekly_reset(t))},
+        "alerts": raw["alerts"].as_array().into_iter().flatten()
+            .map(|a| json!({"type": a["mission"]["type"], "node": a["mission"]["node"], "faction": a["mission"]["faction"],
+                            "what": a["mission"]["description"], "reward": reward_text(&a["mission"]["reward"]),
+                            "expiry": a["expiry"]}))
+            .collect::<Vec<_>>(),
+        "invasions": raw["invasions"].as_array().into_iter().flatten().filter(|i| i["completed"] != true)
+            .map(|i| json!({"node": i["node"], "what": i["desc"], "completion": i["completion"],
+                            "attacker": i["attacker"]["faction"], "attackerReward": reward_text(&i["attacker"]["reward"]),
+                            "defender": i["defender"]["faction"], "defenderReward": reward_text(&i["defender"]["reward"])}))
+            .collect::<Vec<_>>(),
+        // The open worlds' bounty boards rotate together; one timer per board.
+        "bounties": raw["syndicateMissions"].as_array().into_iter().flatten()
+            .filter(|s| s["jobs"].as_array().is_some_and(|j| !j.is_empty()))
+            .map(|s| json!({"syndicate": s["syndicate"], "jobs": s["jobs"].as_array().map_or(0, Vec::len), "expiry": s["expiry"]}))
+            .collect::<Vec<_>>(),
+        "circuit": raw["duviriCycle"]["choices"].as_array().into_iter().flatten()
+            .map(|c| json!({"steel": c["category"] == "hard",
+                            "choices": c["choices"].as_array().into_iter().flatten().filter_map(Value::as_str).map(spaced).collect::<Vec<_>>()}))
+            .collect::<Vec<_>>(),
+        // The type arrives as spaced-out internal text: "C T_ L A B" is the labs, "C T_ H E X" Hollvania.
+        "archimedea": raw["archimedeas"].as_array().into_iter().flatten()
+            .map(|a| {
+                let key: String = a["typeKey"].as_str().unwrap_or("").chars().filter(|c| !c.is_whitespace()).collect();
+                let name = match key.as_str() { "CT_LAB" => "Deep Archimedea", "CT_HEX" => "Temporal Archimedea", _ => "Archimedea" };
+                json!({"name": name, "expiry": a["expiry"],
+                       "missions": a["missions"].as_array().into_iter().flatten()
+                           .map(|m| json!({"type": m["missionType"], "faction": m["faction"], "deviation": m["deviation"]["name"]}))
+                           .collect::<Vec<_>>()})
+            })
+            .collect::<Vec<_>>(),
+        "events": raw["events"].as_array().into_iter().flatten()
+            .map(|e| json!({"name": e["description"], "node": e["node"], "expiry": e["expiry"],
+                            "score": e["currentScore"], "goal": e["maximumScore"]}))
+            .collect::<Vec<_>>(),
+        "varzia": {"location": raw["vaultTrader"]["location"], "expiry": raw["vaultTrader"]["expiry"]},
         "error": err,
     })
 }
@@ -150,6 +214,14 @@ pub fn summary(platform: Platform) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rewards_and_circuit_names_read_naturally() {
+        let r =
+            json!({"items": ["Orokin Catalyst"], "countedItems": [{"type": "Fieldron", "count": 3}], "credits": 10000});
+        assert_eq!(reward_text(&r), "Orokin Catalyst, 3x Fieldron, 10000 credits");
+        assert_eq!(spaced("AckAndBrunt"), "Ack And Brunt");
+    }
 
     #[test]
     fn watch_keys_tell_the_kinds_apart() {

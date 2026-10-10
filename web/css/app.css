@@ -271,6 +271,8 @@ input[type=number] { width: 90px; }
 .fis .node { font-size: 13px; color: var(--muted); }
 .fis .mine { font-size: 13px; color: var(--text-2); }
 .fis .mine.none { color: var(--faint); }
+.pin.on, .pin.on .ic { color: var(--gold); }
+.pin.on .ic { fill: var(--gold); }
 .watch { color: var(--faint); }
 .watch.on { color: var(--gold); }
 .watch.on .ic { fill: var(--gold); }

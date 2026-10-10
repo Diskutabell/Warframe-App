@@ -39,6 +39,7 @@ export async function open(key, push = true) {
       ${stack.length > 1 ? `<button class="ghost" data-back>${icon("back")} Back</button>` : ""}
       <span class="grow"></span>
       ${market ? `<a class="btn ghost" href="https://warframe.market/items/${esc(market)}" target="_blank" rel="noopener">${icon("link")} warframe.market</a>` : ""}
+      <button class="ghost icon pin ${x.pinned ? "on" : ""}" data-pin title="${x.pinned ? "Unpin from the Overview" : "Pin to the Overview"}">${icon("star")}</button>
       <button class="ghost icon" data-close title="Close (Esc)">${icon("x")}</button>
     </div>${body}`;
   hydrateIcons(d);
@@ -142,6 +143,9 @@ function wire(d, x) {
       if (await act("manual/count", { uid: b.dataset.count, count })) { changed(); open(stack[stack.length - 1], false); }
     };
   }
+  d.querySelector("[data-pin]").onclick = async () => {
+    if (await act("manual/pin", { uid: x.key, pinned: !x.pinned }, x.pinned ? "Unpinned" : "Pinned to the Overview")) { changed(); open(stack[stack.length - 1], false); }
+  };
   const m = d.querySelector("[data-mastered]");
   if (m) m.onclick = async () => {
     if (await act("manual/mastered", { uid: x.uid, mastered: m.dataset.mastered === "1" }, "Saved")) { changed(); open(stack[stack.length - 1], false); }

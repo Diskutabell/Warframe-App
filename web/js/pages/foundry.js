@@ -1,6 +1,6 @@
 // Foundry: what is building, and everything you could build with the parts you hold.
 
-import { $, api, art, countdown, esc, fmt, icon, statusPill } from "../lib.js";
+import { $, act, api, art, countdown, esc, fmt, icon, statusPill } from "../lib.js";
 import * as drawer from "../drawer.js";
 
 const st = { q: "", cat: "", show: "buildable", kind: "", myMr: false };
@@ -44,7 +44,7 @@ export default {
       $("#cnt").textContent = `${fmt(rows.length)} items`;
       $("#grid").innerHTML = rows.slice(0, 300).map((r) => `<div class="icard ${r.buildable ? "done" : ""}" ${r.craft ? `style="cursor:default"` : `data-uid="${esc(r.uid)}"`}>
           ${art(r.image, "lg")}
-          <div class="body"><div class="row"><span class="name grow">${esc(r.name)}</span>${r.masteryReq ? `<span class="faint" style="font-size:12px">MR ${r.masteryReq}</span>` : ""}</div>
+          <div class="body"><div class="row"><span class="name grow">${esc(r.name)}</span>${r.craft ? `<button class="ghost icon pin ${r.pinned ? "on" : ""}" data-pin="${esc(r.uid)}" title="${r.pinned ? "Unpin from the Overview" : "Pin to the Overview"}" style="padding:2px">${icon("star")}</button>` : ""}${r.masteryReq ? `<span class="faint" style="font-size:12px">MR ${r.masteryReq}</span>` : ""}</div>
             <div class="pips">${r.parts.map((p) => `<span class="pip ${p.have >= p.need ? "ok" : ""}" title="${esc(p.name)} - own ${fmt(p.have)} of ${fmt(p.need)}">
               ${p.image ? `<img alt="" src="${esc(p.image)}" onerror="this.remove()">` : p.have >= p.need ? icon("check") : ""}${!r.craft && p.have > 1 ? `<b>${p.have}</b>` : ""}</span>`).join("")}</div>
             <div class="meta"><span>${r.have}/${r.need} ${r.craft ? "needs met" : "parts"}</span>${r.craft
@@ -64,6 +64,13 @@ export default {
     }
     const my = $("#mymr");
     if (my) my.onchange = (e) => { st.myMr = e.target.checked; draw(); };
+    $("#grid").addEventListener("click", async (e) => {
+      const b = e.target.closest("[data-pin]");
+      if (!b) return;
+      e.stopPropagation();
+      const row = d.items.find((r) => r.uid === b.dataset.pin);
+      if (row && await act("manual/pin", { uid: row.uid, pinned: !row.pinned }, row.pinned ? "Unpinned" : "Pinned to the Overview")) { row.pinned = !row.pinned; draw(); }
+    });
     view.querySelector(".page").onclick = (e) => { const c = e.target.closest("[data-uid]"); if (c && c.dataset.uid) drawer.open(c.dataset.uid); };
   },
 };

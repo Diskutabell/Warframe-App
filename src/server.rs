@@ -253,6 +253,7 @@ fn post_api(s: &Arc<State>, path: &str, b: &Value) -> Result<Option<Value>> {
         }
         "inventory/clear" => s.clear_inventory(),
         "manual/count" => s.set_manual_count(&uid()?, b["count"].as_f64().map(|c| c as i64))?,
+        "manual/pin" => s.set_pinned(&uid()?, b["pinned"].as_bool().unwrap_or(false))?,
         "manual/mastered" => s.set_manual_mastered(&uid()?, b["mastered"].as_bool().unwrap_or(false))?,
         "rewards/scan" => return Ok(Some(serde_json::to_value(&*s.scan_rewards(Duration::ZERO))?)),
         "window/show" => s.show_window(),

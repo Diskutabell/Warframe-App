@@ -54,14 +54,15 @@ sed "s|/path/to/warframeproject|$PWD|" warframeproject.desktop > ~/.local/share/
 | Prime sets | Each set's parts, what you hold and the set price |
 | Relics | Your relics with their value (chance-weighted platinum), the drops you still need, and which can be cracked now |
 | Fissures | Live fissures (normal, Steel Path, Void Storms) with the best relic you own for each; the bell watches a tier and mission |
-| World | Cycles, Baro Ki'Teer, sortie, archon hunt, Steel Path, Nightwave, Darvo, reset timers |
+| World | Cycles, Baro Ki'Teer, sortie, archon hunt, bounties, the Circuit, Archimedea, alerts, invasions, Steel Path, Nightwave, Darvo, reset timers |
 | Foundry | What is building and when it is done; everything you could build from what you hold - equipment, and parts and gear (amp, zaw and kitgun parts, ciphers, restores, forma); can hide what needs a higher MR than yours |
 | Market | Your spare prime parts in platinum and ducats; a price check for anything on warframe.market |
 | Settings | Sources, memory scan, notifications, overlays, hotkeys, files |
 
 **Ctrl+K** (or `/`) searches items, parts, relics and pages; **1-9** switch pages; **Esc** closes.
 Any item, part or relic opens in a side panel with its parts, the relics that drop them (open
-fissures first), prices, and where to correct a count or mark an item as mastered by hand.
+fissures first), prices, and where to correct a count or mark an item as mastered by hand. The star
+there pins it to the Overview.
 
 **Notifications** (Settings, all off by default): a watched fissure opening, Baro arriving, a
 foundry build finishing, and every reward screen. They need `notify-send`.
@@ -138,6 +139,8 @@ memory. Here it is a last resort:
   only holds the whole inventory for a while after it syncs. There is no manual scan.
 - Only known inventory fields are kept. The same memory holds your session token; it is discarded
   unread.
+- A capture that lost sections your inventory normally has is refused, so a half-read never makes
+  items vanish; the last complete inventory stays until a whole one is read.
 - Whether Linux allows it is up to the kernel. With `kernel.yama.ptrace_scope` 1 (the usual
   default) a program may read another's memory if it started it, or if that program runs in a user
   namespace you own - as Warframe does inside Steam's sandbox on NixOS, where the scan works at

@@ -27,6 +27,32 @@ function render(w) {
         <div style="font:700 20px/1.2 var(--display)">${esc(w.archon?.boss || "")}</div>
         <div class="list" style="margin-top:6px">${missions(w.archon?.missions || [])}</div></div>
     </div>
+    <div class="grid cols-3" style="margin-top:16px">
+      <div class="card"><div class="card-head"><h2>Bounties</h2></div><div class="list">
+        ${(w.bounties || []).map((b) => `<div class="list-row"><span class="grow">${esc(b.syndicate)} <span class="faint">· ${b.jobs} bounties</span></span><span class="muted">new in ${countdown(b.expiry)}</span></div>`).join("") || `<div class="muted">None listed.</div>`}
+        ${w.varzia?.expiry ? `<div class="list-row"><span class="grow">Prime Resurgence <span class="faint">· ${esc(w.varzia.location || "")}</span></span><span class="muted">rotates in ${countdown(w.varzia.expiry)}</span></div>` : ""}
+        ${(w.events || []).map((e) => `<div class="list-row"><div class="main"><div class="t">${esc(e.name)}</div><div class="s">${esc(e.node || "")}${e.goal ? ` · ${fmt(e.score)} / ${fmt(e.goal)}` : ""}</div></div><span class="muted">${countdown(e.expiry, "ending")}</span></div>`).join("")}
+      </div></div>
+      <div class="card"><div class="card-head"><h2>The Circuit</h2><span class="grow"></span><span class="muted">${countdown(w.resets?.weekly)}</span></div>
+        ${(w.circuit || []).map((c) => `<div style="margin-bottom:10px"><div class="muted" style="font-size:12.5px;margin-bottom:5px">${c.steel ? "Steel Path: Incarnon adapters" : "Normal: Warframes"}</div>
+          <div class="chips" style="margin:0">${c.choices.map((x) => `<span class="chip" style="cursor:default">${esc(x)}</span>`).join("")}</div></div>`).join("") || `<div class="muted">Not listed.</div>`}
+      </div>
+      <div class="card"><div class="card-head"><h2>Archimedea</h2></div>
+        ${(w.archimedea || []).map((a) => `<div style="margin-bottom:10px"><div class="row"><span class="grow" style="font:700 17px/1.2 var(--display)">${esc(a.name)}</span><span class="muted">${countdown(a.expiry)}</span></div>
+          <div class="muted" style="font-size:13px">${a.missions.map((m) => `${esc(m.type)}${m.deviation ? ` (${esc(m.deviation)})` : ""}`).join(" · ")}</div></div>`).join("") || `<div class="muted">Not listed.</div>`}
+      </div>
+    </div>
+    <div class="grid cols-2" style="margin-top:16px">
+      <div class="card"><div class="card-head"><h2>Alerts <span class="count">${(w.alerts || []).length}</span></h2></div><div class="list">
+        ${(w.alerts || []).map((a) => `<div class="list-row"><div class="main"><div class="t">${esc(a.reward || a.what || "")}</div>
+          <div class="s">${esc(a.type)} · ${esc(a.node)} · ${esc(a.faction)}</div></div><span class="muted">${countdown(a.expiry, "ending")}</span></div>`).join("") || `<div class="muted">No alerts.</div>`}
+      </div></div>
+      <div class="card"><div class="card-head"><h2>Invasions <span class="count">${(w.invasions || []).length}</span></h2></div><div class="list">
+        ${(w.invasions || []).map((i) => `<div class="list-row"><div class="main"><div class="t">${esc(i.node)}</div>
+          <div class="s" style="white-space:normal">${esc(i.attacker)}${i.attackerReward ? `: ${esc(i.attackerReward)}` : ""} <span class="faint">vs</span> ${esc(i.defender)}${i.defenderReward ? `: ${esc(i.defenderReward)}` : ""}</div></div>
+          <span class="muted num">${Math.round(i.completion)}%</span></div>`).join("") || `<div class="muted">No invasions.</div>`}
+      </div></div>
+    </div>
     <div class="grid cols-2" style="margin-top:16px">
       <div class="card"><div class="card-head"><h2>Nightwave${nw.season != null ? ` <span class="count">season ${esc(nw.season)}</span>` : ""}</h2></div>
         <div class="list">${challenges.map((c) => `<div class="list-row">

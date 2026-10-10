@@ -14,8 +14,10 @@ use std::os::unix::fs::FileExt;
 use std::sync::LazyLock;
 use std::time::Instant;
 
+use indexmap::IndexMap;
 use memchr::memmem;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 const MARKER: &[u8] = b"\"LastInventorySync\"";
@@ -258,6 +260,63 @@ fn extract_blob(mem: &fs::File, (start_lim, end_lim): (u64, u64), hit: u64) -> O
     None
 }
 
+/// Which top-level sections this account's captures normally hold.
+///
+/// The game reuses the head of the inventory text, so a capture can start anywhere inside it and
+/// simply lack the sections before that point. Applying such a capture makes everything in those
+/// sections drop to zero until the next good one. A section seen in nearly every capture so far is
+/// expected; a capture without one is refused.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Sections {
+    /// Captures applied so far.
+    pub captures: u32,
+    /// Section -> how many of those captures had it.
+    pub seen: IndexMap<String, u32>,
+    /// Captures refused in a row.
+    #[serde(default)]
+    pub refused: u32,
+}
+
+impl Sections {
+    /// A few captures are needed before anything is expected.
+    const MIN_CAPTURES: u32 = 3;
+    /// After this many refusals in a row the account itself must have changed: start over.
+    const MAX_REFUSED: u32 = 4;
+
+    /// The expected sections `capture` lacks. Empty means it can be applied.
+    pub fn missing(&self, capture: &Value) -> Vec<String> {
+        if self.captures < Self::MIN_CAPTURES {
+            return Vec::new();
+        }
+        self.seen
+            .iter()
+            // Expected: present in at least nine captures out of ten.
+            .filter(|(_, n)| **n * 10 >= self.captures * 9)
+            .filter(|(key, _)| capture.get(key.as_str()).is_none())
+            .map(|(key, _)| key.clone())
+            .collect()
+    }
+
+    /// Records an applied capture.
+    pub fn learn(&mut self, capture: &Value) {
+        self.captures += 1;
+        self.refused = 0;
+        for key in capture.as_object().into_iter().flat_map(|o| o.keys()) {
+            *self.seen.entry(key.clone()).or_insert(0) += 1;
+        }
+    }
+
+    /// Records a refusal; true when it is time to forget what was learned and accept again.
+    pub fn refuse(&mut self) -> bool {
+        self.refused += 1;
+        if self.refused >= Self::MAX_REFUSED {
+            *self = Sections::default();
+            return true;
+        }
+        false
+    }
+}
+
 pub struct ScanInfo {
     /// How long the read took, to a tenth of a second.
     pub seconds: f64,
@@ -316,6 +375,29 @@ pub fn scan_inventory(pid: u32, progress: impl Fn(f64)) -> Result<(Value, ScanIn
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_capture_that_lost_a_usual_section_is_refused() {
+        let whole = json!({"MiscItems": [], "Recipes": [], "Suits": [], "LastInventorySync": 1});
+        let mut s = Sections::default();
+        assert!(s.missing(&json!({})).is_empty(), "nothing is expected before a few captures");
+        for _ in 0..3 {
+            s.learn(&whole);
+        }
+        // The head went missing: Suits and what came before it are gone.
+        let cut = json!({"Recipes": [], "LastInventorySync": 2});
+        assert_eq!(s.missing(&cut), ["MiscItems", "Suits"]);
+        assert!(s.missing(&whole).is_empty());
+        // A section seen once (the rarely surviving PlayerLevel) is not expected.
+        let mut with_level = whole.clone();
+        with_level["PlayerLevel"] = json!(0);
+        s.learn(&with_level);
+        assert!(s.missing(&whole).is_empty());
+        // Refused again and again, the account must have changed: learn afresh.
+        assert!(!s.refuse() && !s.refuse() && !s.refuse());
+        assert!(s.refuse());
+        assert!(s.missing(&cut).is_empty());
+    }
 
     #[test]
     fn sanitise_keeps_inventory_and_drops_secrets() {

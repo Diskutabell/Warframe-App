@@ -425,6 +425,7 @@ impl View {
                 let met = parts.iter().filter(|p| p["have"].as_i64() >= p["need"].as_i64()).count();
                 let row = json!({
                     "uid": c.uid, "name": c.name, "category": c.kind, "craft": true,
+                    "pinned": self.manual.pinned.contains(&c.uid),
                     "image": gamedata::image_url(c.image.as_deref()), "masteryReq": c.mastery_req,
                     "quantity": c.quantity, "held": self.count(&c.uid),
                     "have": met, "need": parts.len(), "buildable": met == parts.len(), "parts": parts,
@@ -434,6 +435,40 @@ impl View {
             .collect();
         out.sort_by(|a, b| a.0.total_cmp(&b.0));
         out.into_iter().map(|(_, row)| row).collect()
+    }
+
+    /// The pinned things with what is still missing for each, in the order they were pinned.
+    pub fn pinned(&self) -> Vec<Value> {
+        let needed = self.needed_parts();
+        self.manual
+            .pinned
+            .iter()
+            .filter_map(|key| {
+                if let Some(it) = self.cat.items.get(key) {
+                    let parts = self.part_views(it, false);
+                    let have: i64 = parts.iter().map(|p| p.have.min(p.need)).sum();
+                    let need: i64 = parts.iter().map(|p| p.need).sum();
+                    return Some(json!({"key": key, "kind": "item", "name": it.name, "open": true,
+                        "image": gamedata::image_url(it.image.as_deref()), "status": self.item_status(it).status,
+                        "have": have, "need": need, "unit": "parts"}));
+                }
+                if let Some(p) = self.cat.parts.get(key) {
+                    return Some(json!({"key": key, "kind": "part", "name": p.name, "open": true,
+                        "image": self.image_for(key), "have": self.count(key),
+                        "need": needed.get(key).copied().unwrap_or(0), "unit": "held"}));
+                }
+                if let Some(rel) = self.cat.relics.get(key) {
+                    let total: i64 = rel.uids.values().map(|u| self.count(u)).sum();
+                    return Some(json!({"key": key, "kind": "relic", "name": format!("{key} Relic"), "open": true,
+                        "image": gamedata::image_url(rel.image.as_deref()), "have": total, "need": 0, "unit": "held"}));
+                }
+                let c = self.cat.crafts.iter().find(|c| &c.uid == key)?;
+                let met = c.needs.iter().filter(|n| self.count(&n.uid) >= n.count).count();
+                Some(json!({"key": key, "kind": "build", "name": c.name, "open": false,
+                    "image": gamedata::image_url(c.image.as_deref()), "have": met, "need": c.needs.len(),
+                    "unit": "needs met"}))
+            })
+            .collect()
     }
 
     /// What is in the foundry now, soonest first.

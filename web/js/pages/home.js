@@ -125,6 +125,17 @@ const card = (title, body, link, id) => `<div class="card"><div class="card-head
 
 let lastScreens = null;
 
+function pinned(S) {
+  return `<div class="list">${(S.pinned || []).map((p) => {
+    const done = p.need > 0 && p.have >= p.need;
+    return `<div class="list-row ${p.open ? "click" : ""}" ${p.open ? `data-part="${esc(p.key)}"` : ""}>${art(p.image, "sm")}
+      <div class="main"><div class="t">${esc(p.name)}</div>
+        ${p.need > 0 && p.unit !== "held" ? `<div class="bar thin lotus" style="margin-top:5px"><i style="width:${Math.min(100, (100 * p.have) / p.need).toFixed(0)}%"></i></div>` : ""}</div>
+      <span class="${done ? "lotus" : "muted"} num" style="font-size:13px">${p.unit === "held" ? `${fmt(p.have)} held${p.need ? ` · need ${p.need}` : ""}` : `${p.have}/${p.need} ${esc(p.unit)}`}</span>
+    </div>`;
+  }).join("")}</div>`;
+}
+
 function wire(view) {
   for (const el of view.querySelectorAll("[data-relic]")) el.onclick = () => el.dataset.relic && drawer.open(el.dataset.relic);
   for (const el of view.querySelectorAll("[data-part]")) el.onclick = () => drawer.open(el.dataset.part);
@@ -149,6 +160,7 @@ export default {
           ${card("Collection", collection(S), "primes", "collection")}
         </div>
         <div class="stack">
+          <div id="pinnedCard" ${S.pinned?.length ? "" : "hidden"}>${card("Pinned", pinned(S), null, "pinned")}</div>
           ${card("World", worldCard(world), "world", "world")}
           ${card("Foundry", foundry(S), "foundry", "foundry")}
           ${card("Activity", activity(S), null, "activity")}
@@ -169,7 +181,10 @@ export default {
     $("#foundry").innerHTML = foundry(S);
     $("#activity").innerHTML = activity(S);
     $("#collection").innerHTML = collection(S);
+    $("#pinnedCard").hidden = !S.pinned?.length;
+    $("#pinned").innerHTML = pinned(S);
     wire($("#foundry"));
+    wire($("#pinned"));
     if (S.session?.screens !== lastScreens) {
       lastScreens = S.session?.screens;
       const hist = await api("history").catch(() => null);

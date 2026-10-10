@@ -46,6 +46,9 @@ pub struct Manual {
     /// uid -> when it was marked
     #[serde(default)]
     pub mastered: IndexMap<String, f64>,
+    /// Pinned to the Overview: item, part or build uids, and relic names.
+    #[serde(default)]
+    pub pinned: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -119,6 +122,9 @@ pub struct MemscanStatus {
     pub last: Option<Value>,
     #[serde(skip)]
     last_attempt: f64,
+    /// How many sections the capture behind the current inventory had.
+    #[serde(skip)]
+    last_keys: usize,
     /// The game process that refused access; it is not asked again, a restarted game is.
     #[serde(skip)]
     denied_pid: Option<u32>,
@@ -476,22 +482,7 @@ impl State {
             None => Err(ScanError::NotRunning),
         };
         let retry = match result {
-            Ok((obj, info)) => {
-                let imported = self.import_inventory(&obj, "memory scan");
-                let mut st = lock(&self.memscan);
-                match imported {
-                    Ok(inv) => {
-                        st.state = "ok";
-                        st.detail = None;
-                        st.last = Some(json!({"t": now(), "stacks": inv.counts.len(), "seconds": info.seconds}));
-                    }
-                    Err(e) => {
-                        st.state = "error";
-                        st.detail = Some(e.to_string());
-                    }
-                }
-                false
-            }
+            Ok((obj, info)) => self.apply_capture(&obj, info.seconds),
             Err(e) => {
                 let mut st = lock(&self.memscan);
                 st.detail = Some(e.to_string());
@@ -512,6 +503,52 @@ impl State {
             lock(&self.memscan).last_attempt = f64::NEG_INFINITY;
             self.schedule_memscan(Duration::from_secs(if retries > 1 { 30 } else { 90 }), retries - 1);
         }
+    }
+
+    /// Applies a memory capture unless it is cut short or already applied. True asks for a retry.
+    fn apply_capture(&self, obj: &Value, seconds: f64) -> bool {
+        let file = data_file("memscan_sections.json");
+        let mut sections: memscan::Sections = config::read_json(&file).unwrap_or_default();
+        let missing = sections.missing(obj);
+        if !missing.is_empty() && !sections.refuse() {
+            let _ = config::write_json(&file, &sections);
+            let mut st = lock(&self.memscan);
+            st.state = if st.last.is_some() { "ok" } else { "idle" };
+            st.detail = Some(format!(
+                "The game held only part of the inventory just now ({} missing), so the last complete one is kept.",
+                missing.join(", ")
+            ));
+            return true;
+        }
+        // The same sync, read again with nothing new in it: leave the inventory and the log alone.
+        let keys = obj.as_object().map_or(0, |o| o.len());
+        let sync = obj["LastInventorySync"].as_f64();
+        let current = lock(&self.data).inventory.as_ref().and_then(|i| i.synced_at);
+        {
+            let mut st = lock(&self.memscan);
+            if sync.is_some() && sync == current && keys <= st.last_keys {
+                st.state = "ok";
+                st.detail = None;
+                return false;
+            }
+        }
+        let imported = self.import_inventory(obj, "memory scan");
+        let mut st = lock(&self.memscan);
+        match imported {
+            Ok(inv) => {
+                sections.learn(obj);
+                let _ = config::write_json(&file, &sections);
+                st.state = "ok";
+                st.detail = None;
+                st.last_keys = keys;
+                st.last = Some(json!({"t": now(), "stacks": inv.counts.len(), "seconds": seconds}));
+            }
+            Err(e) => {
+                st.state = "error";
+                st.detail = Some(e.to_string());
+            }
+        }
+        false
     }
 
     fn confirm(self: &Arc<Self>, id: &str, name: Option<String>, source: &str) {
@@ -707,6 +744,15 @@ impl State {
         config::write_json(&data_file("manual.json"), &d.manual)
     }
 
+    pub fn set_pinned(&self, key: &str, pinned: bool) -> Result<()> {
+        let mut d = lock(&self.data);
+        d.manual.pinned.retain(|k| k != key);
+        if pinned {
+            d.manual.pinned.push(key.to_string());
+        }
+        config::write_json(&data_file("manual.json"), &d.manual)
+    }
+
     pub fn set_account_id(self: &Arc<Self>, raw: &str) -> Result<()> {
         let acc = raw.trim().trim_matches('"').to_lowercase();
         if acc.len() != 24 || !acc.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
@@ -833,6 +879,7 @@ impl State {
             "mastery": v.mastery_progress(),
             "currencies": currencies, "foundry": v.pending_foundry(),
             "collection": v.collection(),
+            "pinned": v.pinned(),
             "session": {"since": self.started, "screens": screens, "bestValue": best_value},
             "sources": {
                 "eeLog": {"path": log, "active": active, "searching": eelog::searching() && log.is_none()},
@@ -896,7 +943,11 @@ impl State {
             .filter(|f| f["storm"] != true)
             .filter_map(|f| f["tier"].as_str().map(str::to_owned))
             .collect();
-        self.view().detail(key, &open).ok_or_else(|| UserError::new(format!("Nothing is called {key}.")).into())
+        let view = self.view();
+        let mut v = view.detail(key, &open).ok_or_else(|| UserError::new(format!("Nothing is called {key}.")))?;
+        let pinned = v["key"].as_str().is_some_and(|k| view.manual.pinned.iter().any(|p| p == k));
+        v["pinned"] = json!(pinned);
+        Ok(v)
     }
 
     pub fn history(&self) -> Value {

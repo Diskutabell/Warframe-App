@@ -25,6 +25,14 @@ version's results exactly, checked against its own output.
 - **Foundry: parts and gear.** Besides equipment it lists everything else with a recipe - amp, zaw,
   kitgun, K-drive and companion parts, ciphers, restores, specters, forma, lenses - with the
   blueprint and every resource checked against your inventory, and a "Buildable at MR n" filter.
+- **Pins:** the star in any details panel (and on parts-and-gear cards in the Foundry) pins it to
+  the Overview with what is still missing.
+- **More timers on the World page:** bounty rotations, Prime Resurgence, events, the Circuit's
+  weekly choices, Deep and Temporal Archimedea, alerts and invasions with their rewards.
+- **Cut-short memory captures are refused.** The game sometimes holds only the tail of the
+  inventory; applying that made whole sections drop to zero until the next read. The app learns
+  which sections your captures normally have and keeps the last complete inventory instead. A
+  capture of a sync that is already applied is skipped.
 - Foundry timers count down to the minute; the Market page sorts spare parts by platinum, ducats or
   ducats per platinum next to the price check.
 
