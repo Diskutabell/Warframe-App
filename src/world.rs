@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 
 use crate::clock;
 use crate::config::Platform;
+use crate::gamedata::Catalog;
 use crate::{net, now};
 
 const API: &str = "https://api.warframestat.us/{platform}?language=en";
@@ -211,9 +212,80 @@ pub fn summary(platform: Platform) -> Value {
     })
 }
 
+/// Adds pictures to a summary for what the world state only names: Circuit picks, rewards,
+/// Darvo's deal, Baro's stock. Changes `circuit[].choices` from names to `{name, image}` and
+/// gives alerts a `rewards` list (`{name, count, image}`) next to the plain text.
+pub fn add_art(w: &mut Value, cat: &Catalog) {
+    // `w[key]` on a mutable value would create the key; these only look.
+    fn list<'a>(w: &'a mut Value, key: &str) -> impl Iterator<Item = &'a mut Value> {
+        w.get_mut(key).and_then(Value::as_array_mut).into_iter().flatten()
+    }
+    let art = |name: &Value| name.as_str().and_then(|n| cat.art_by_name(n));
+    for group in list(w, "circuit") {
+        let choices: Vec<Value> =
+            group["choices"].as_array().into_iter().flatten().map(|n| json!({"name": n, "image": art(n)})).collect();
+        group["choices"] = json!(choices);
+    }
+    for key in ["steelPath", "darvo"] {
+        if w[key].is_object() {
+            let name = if key == "darvo" { w[key]["item"].clone() } else { w[key]["reward"].clone() };
+            w[key]["image"] = json!(art(&name));
+        }
+    }
+    for item in w.get_mut("baro").map(|baro| list(baro, "inventory")).into_iter().flatten() {
+        item["image"] = json!(art(&item["item"]));
+    }
+    for alert in list(w, "alerts") {
+        // "Fieldron, Fieldron, 10000 credits" -> Fieldron x2, 10000 credits.
+        let mut rewards: Vec<(String, i64)> = Vec::new();
+        for name in alert["reward"].as_str().unwrap_or("").split(", ").filter(|n| !n.is_empty()) {
+            match rewards.iter_mut().find(|(n, _)| n == name) {
+                Some((_, count)) => *count += 1,
+                None => rewards.push((name.to_string(), 1)),
+            }
+        }
+        alert["rewards"] = rewards
+            .iter()
+            .map(|(name, count)| json!({"name": name, "count": count, "image": cat.art_by_name(name)}))
+            .collect();
+    }
+    for inv in list(w, "invasions") {
+        inv["attackerImage"] = json!(art(&inv["attackerReward"]));
+        inv["defenderImage"] = json!(art(&inv["defenderReward"]));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pictures_are_added_by_name() {
+        let cat = Catalog {
+            art: [("soma", "soma.png"), ("fieldron", "f.png")].map(|(k, v)| (k.to_string(), v.to_string())).into(),
+            ..Catalog::default()
+        };
+        let mut w = json!({
+            "circuit": [{"steel": true, "choices": ["Soma", "Unknown Thing"]}],
+            "darvo": {"item": "Soma"}, "steelPath": {"reward": "3x Fieldron"},
+            "alerts": [{"reward": "Fieldron, Fieldron, 10000 credits"}],
+            "invasions": [{"attackerReward": "", "defenderReward": "Soma Blueprint"}]});
+        add_art(&mut w, &cat);
+        let url = |v: &Value| v.as_str().map(|u| u.rsplit('/').next().unwrap_or("").to_string());
+        assert_eq!(w["circuit"][0]["choices"][0]["name"], "Soma");
+        assert_eq!(url(&w["circuit"][0]["choices"][0]["image"]).as_deref(), Some("soma.png"));
+        assert_eq!(w["circuit"][0]["choices"][1]["image"], Value::Null);
+        assert_eq!(url(&w["darvo"]["image"]).as_deref(), Some("soma.png"));
+        assert_eq!(url(&w["steelPath"]["image"]).as_deref(), Some("f.png"));
+        assert_eq!(w["alerts"][0]["rewards"][0], json!({"name": "Fieldron", "count": 2, "image": w["steelPath"]["image"]}));
+        assert_eq!(w["alerts"][0]["rewards"][1]["name"], "10000 credits");
+        assert_eq!(w["invasions"][0]["attackerImage"], Value::Null);
+        assert_eq!(url(&w["invasions"][0]["defenderImage"]).as_deref(), Some("soma.png"));
+        // A summary that is only an error stays as it is.
+        let mut failed = json!({"error": "offline"});
+        add_art(&mut failed, &cat);
+        assert_eq!(failed, json!({"error": "offline"}));
+    }
 
     #[test]
     fn rewards_and_circuit_names_read_naturally() {

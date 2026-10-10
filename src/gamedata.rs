@@ -169,6 +169,8 @@ pub struct Catalog {
     pub names: HashMap<String, String>,
     /// Builds that give no mastery, by kind and name.
     pub crafts: Vec<Craft>,
+    /// Display name (as `art_key` spells it) -> image file, for everything in the WFCD files.
+    pub art: HashMap<String, String>,
     /// Star chart node tag ("SolNode27") -> the mastery XP its first completion gives. Empty
     /// until the region export has been downloaded once.
     pub node_xp: HashMap<String, i64>,
@@ -371,6 +373,20 @@ pub fn build(raw: &IndexMap<String, Value>) -> Catalog {
         for x in data.as_array().into_iter().flatten() {
             if let (Some(uid), Some(name)) = (str_of(&x["uniqueName"]), str_of(&x["name"])) {
                 names.insert(uid.to_string(), name.to_string());
+            }
+        }
+    }
+
+    // Pictures by name, for things the world state only names. The files come in catalog order,
+    // so a weapon wins over a resource that happens to share its name.
+    let mut art: HashMap<String, String> = HashMap::new();
+    for (fname, data) in raw {
+        if fname == "Relics" {
+            continue;
+        }
+        for x in data.as_array().into_iter().flatten() {
+            if let (Some(name), Some(img)) = (str_of(&x["name"]), str_of(&x["imageName"])) {
+                art.entry(art_key(name)).or_insert_with(|| img.to_string());
             }
         }
     }
@@ -646,12 +662,38 @@ pub fn build(raw: &IndexMap<String, Value>) -> Catalog {
         relic_uids,
         names,
         crafts,
+        art,
         node_xp: HashMap::new(),
         loaded_at: None,
     }
 }
 
+/// A name reduced to what both spellings share: the world state writes "Ack And Brunt" for the
+/// catalog's "Ack & Brunt".
+pub fn art_key(name: &str) -> String {
+    let lower = name.to_lowercase();
+    lower.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty() && *w != "and").collect()
+}
+
 impl Catalog {
+    /// A picture for something known only by its display name: a reward, a Circuit pick, Darvo's
+    /// deal. A leading count goes ("3x Forma"), and a part falls back to the thing it builds
+    /// ("Dera Vandal Blueprint", "Twin Vipers Wraith Barrel") by dropping words from the end.
+    pub fn art_by_name(&self, name: &str) -> Option<String> {
+        let mut words: Vec<&str> = name.split_whitespace().collect();
+        let is_count = |w: &str| w.trim_end_matches(['x', 'X']).parse::<u32>().is_ok();
+        if words.len() > 1 && is_count(words[0]) {
+            words.remove(0);
+        }
+        while !words.is_empty() {
+            if let Some(img) = self.art.get(&art_key(&words.join(" "))) {
+                return image_url(Some(img));
+            }
+            words.pop();
+        }
+        None
+    }
+
     /// Mastery XP for completing a star chart node once. Steel Path gives the same again.
     pub fn node_mastery(&self, tag: &str) -> i64 {
         if tag.ends_with("Junction") {
@@ -752,6 +794,22 @@ mod tests {
         assert_eq!(c.items["/V"].max_rank, 40);
         assert_eq!(Catalog::rank_from_xp(&c.items["/K"], 450_000), 30);
         assert_eq!(Catalog::rank_from_xp(&c.items["/V"], 1_600_000), 40);
+    }
+
+    #[test]
+    fn pictures_by_display_name() {
+        let c = build(&raw(&[
+            ("Melee", json!([{"uniqueName": "/AB", "name": "Ack & Brunt", "masterable": true, "imageName": "ack.png"}])),
+            ("Primary", json!([{"uniqueName": "/DV", "name": "Dera Vandal", "masterable": true, "imageName": "dera.png"}])),
+            ("Resources", json!([{"uniqueName": "/F", "name": "Forma", "imageName": "forma.png"}])),
+        ]));
+        let art = |name| c.art_by_name(name).map(|u| u.trim_start_matches(IMG_URL).to_string());
+        assert_eq!(art("Ack And Brunt").as_deref(), Some("ack.png"), "the Circuit's spelling");
+        assert_eq!(art("Dera Vandal Blueprint").as_deref(), Some("dera.png"));
+        assert_eq!(art("Dera Vandal Barrel").as_deref(), Some("dera.png"));
+        assert_eq!(art("3x Forma").as_deref(), Some("forma.png"));
+        assert_eq!(art("Conquera Kuaka Floof"), None);
+        assert_eq!(art("10000 credits"), None);
     }
 
     #[test]

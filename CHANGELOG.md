@@ -30,6 +30,11 @@ version's results exactly, checked against its own output.
   nodes and junctions, Steel Path, Railjack and Drifter intrinsics - with the rank that much XP is
   enough for and what the next rank takes, instead of an estimate from gear alone. The Plexus is
   now counted as the masterable item it is.
+- **The game's own art.** The Overview shows your mastery rank as the game's badge. The World page
+  is rebuilt around pictures: the open-world cycles over shots of each place, Baro, Nora and Teshin,
+  the archon, faction emblems, syndicate sigils on the bounties, warframe and weapon art for the
+  Circuit, reward art and coloured progress bars for invasions. Fissures show relic and faction
+  icons; the details panel shows resource art.
 - **More timers on the World page:** bounty rotations, Prime Resurgence, events, the Circuit's
   weekly choices, Deep and Temporal Archimedea, alerts and invasions with their rewards.
 - **Cut-short memory captures are refused.** The game sometimes holds only the tail of the
@@ -41,6 +46,8 @@ version's results exactly, checked against its own output.
 
 ### Fixed
 
+- **Thin, hard-to-read small labels** ("CETUS", "RANK", "PLATINUM"): now in the heavier display
+  face and a brighter grey.
 - **Parts that cannot be traded had no icon.** Part icons came only from warframe.market, which
   lists tradable parts, so every ordinary warframe, weapon, archwing and sentinel part drew as an
   empty slot. They now get the generic icon of their slot (chassis, neuroptics, barrel, blueprint...).

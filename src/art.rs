@@ -1,6 +1,6 @@
 //! Item art for the UI, scaled by the engine.
 //!
-//! The sources serve 512 px (WFCD) and 128 px (warframe.market) images. Shrunk to a 24-72 px slot
+//! The sources serve 512 px (WFCD, browse.wf) and 128 px (warframe.market) images. Shrunk to a 24-72 px slot
 //! by WebKitGTK they came out pixelated (the user's screenshot, 2026-10-10). So the UI asks `/api/art?u=<url>&s=<px>` instead: the image is fetched once, scaled
 //! with a proper filter and kept in the cache directory (`art/`), which also makes art work
 //! offline.
@@ -17,10 +17,14 @@ use image::{ImageFormat, Rgba32FImage};
 
 use crate::{config, gamedata, market, net};
 
+/// Textures from the game's own interface (mastery badges, faction and syndicate emblems,
+/// portraits, location shots), served by path: `GAME_ART` + "Icons/BaroKiTeer.png".
+pub const GAME_ART: &str = "https://browse.wf/Lotus/Interface/";
 /// The only places art is fetched from: the endpoint must not become a proxy for any URL.
-const SOURCES: [&str; 2] = [gamedata::IMG_URL, market::ASSETS];
+const SOURCES: [&str; 3] = [gamedata::IMG_URL, market::ASSETS, GAME_ART];
 const MIN_SIZE: u32 = 16;
-const MAX_SIZE: u32 = 256;
+/// The sources' pictures are 512 px at most; card backgrounds use them whole.
+const MAX_SIZE: u32 = 512;
 /// How long a failed download is remembered before the source is asked again.
 const RETRY_AFTER: Duration = Duration::from_secs(600);
 /// A cached image older than this is fetched again: art does change now and then.

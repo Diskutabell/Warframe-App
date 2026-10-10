@@ -932,7 +932,9 @@ impl State {
     }
 
     pub fn world(&self) -> Value {
-        world::summary(self.settings().platform)
+        let mut w = world::summary(self.settings().platform);
+        world::add_art(&mut w, &self.view().cat);
+        w
     }
 
     /// Everything about one item, part or relic, with which relic farms are open right now.

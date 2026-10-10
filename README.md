@@ -115,6 +115,7 @@ made when the app starts and the saved profile is older than the refresh interva
 | `EE.log` | Your account id, name and mastery rank badge; when the reward screen opens; when a mission ends | Plain file read of Warframe's own log in the Proton prefix |
 | DE public profile | Mastery XP for every item you have levelled, the star chart nodes you have completed, your intrinsic ranks | `getProfileViewingData.php`, what the in-game profile screen shows |
 | warframe-public-export-plus | The mastery XP of each star chart node | GitHub, cached; rechecked daily |
+| browse.wf | The game's own interface art: mastery badges, faction and syndicate emblems, portraits, pictures of the open worlds | Fetched once per picture, scaled and kept in the cache |
 | Reward-screen OCR | The 1-4 items on the fissure reward screen | Screenshot, tesseract, fuzzy matching (the WFInfo approach) |
 | Manual tracking | Part and relic counts, "mark as mastered" | +/- and the button in an item's side panel |
 | `inventory.json` import | The exact inventory: parts, relics, plat, ducats, endo, foundry | A file you import, or one that is watched (Settings) |

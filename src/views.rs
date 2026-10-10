@@ -789,7 +789,8 @@ impl View {
                     json!({"uid": c.uid, "name": c.name, "count": c.count, "status": status})
                 }).collect::<Vec<_>>(),
                 "resources": it.components.iter().filter(|c| c.kind == ComponentKind::Resource)
-                    .map(|c| json!({"name": c.name, "count": c.count})).collect::<Vec<_>>(),
+                    .map(|c| json!({"name": c.name, "count": c.count, "image": self.cat.art_by_name(&c.name)}))
+                    .collect::<Vec<_>>(),
                 "disposition": it.disposition.map(|d| py_round(d, 3)), "dots": it.dispo_dots,
             });
             st.merge_into(&mut v);

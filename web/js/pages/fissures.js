@@ -1,6 +1,7 @@
 // Fissures: what is open, which of your relics fit, and the ones you watch.
 
 import { $, act, api, countdown, era, esc, fmt, icon, plat } from "../lib.js";
+import { factionTag, gimg, relicIcon } from "../game.js";
 import * as drawer from "../drawer.js";
 
 const st = { kind: "normal", tier: "" };
@@ -42,9 +43,9 @@ export default {
       const rows = (d.fissures || []).filter((f) => kindOf(f) === st.kind && (!st.tier || f.tier === st.tier));
       $("#cnt").textContent = `${rows.length} open`;
       $("#list").innerHTML = rows.map((f) => `<div class="fis">
-          <div>${era(f.tier)}</div>
+          <div class="tier">${gimg(relicIcon(f.tier), 30)}${era(f.tier)}</div>
           <div><div class="mission">${esc(f.mission)}</div><div class="node">${esc(f.node)}</div></div>
-          <div class="muted">${esc(f.enemy)}</div>
+          <div>${factionTag(f.enemy, 20)}</div>
           <div class="num">${countdown(f.expiry, "ending")}</div>
           ${mine(f)}
           <button class="ghost icon watch ${watch.has(f.watch) ? "on" : ""}" data-watch="${esc(f.watch)}" title="${watch.has(f.watch) ? "Stop watching" : "Watch"} ${esc(f.tier)} ${esc(f.mission)}">${icon("bell")}</button>

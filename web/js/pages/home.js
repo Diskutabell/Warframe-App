@@ -2,6 +2,7 @@
 
 import { $, ago, api, art, countdown, duc, era, esc, fmt, icon, plat } from "../lib.js";
 import * as drawer from "../drawer.js";
+import { ICON, PORTRAIT, cycleTile, gimg, mrBadge } from "../game.js";
 
 const ICONS = ["platinum", "ducats", "endo", "credits"];
 
@@ -14,7 +15,6 @@ function hero(S) {
   const top = S.masteryRankMax ?? mr;
   const shown = mr == null ? "?" : top !== mr ? `${mr}-${top}` : `${mr}`;
   const share = m.possible ? Math.min(1, (m.points || 0) / m.possible) : 0;
-  const C = 2 * Math.PI * 50;
   const cur = S.currencies || {};
   const purse = [["platinum", "Platinum", cur.platinum], ["ducats", "Ducats", cur.ducats],
     ["endo", "Endo", cur.endo], ["credits", "Credits", cur.credits]]
@@ -40,11 +40,9 @@ function hero(S) {
     hint = `${toNext}.`;
   }
   return `<div class="card hero">
-    <div class="mr-ring" title="${ringTitle}">
-      <svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="50" fill="none" stroke="#1e2c38" stroke-width="8"/>
-        <circle cx="60" cy="60" r="50" fill="none" stroke="#d4b26a" stroke-width="8" stroke-linecap="round"
-          stroke-dasharray="${(C * share).toFixed(1)} ${C.toFixed(1)}"/></svg>
-      <div class="val"><b>${shown}</b><span>MR</span></div>
+    <div class="mr-badge" title="${ringTitle}">
+      ${gimg(mr == null ? ICON.mastery : mrBadge(top), 116)}
+      <b>${mr == null ? "?" : `MR ${shown}`}</b><span>Mastery rank</span>
     </div>
     <div class="grow">
       <h1>${esc(S.account.name || S.account.logName || "Tenno")}</h1>
@@ -79,7 +77,7 @@ function crackNow(data) {
     return `<div class="empty"><b>Nothing to crack right now</b>${data?.error ? esc(data.error) : "No open fissure matches a relic you own."}</div>`;
   }
   return `<div class="list">${rows.map((g) => `<div class="list-row click" data-relic="${esc(g.best.name)}">
-      ${era(g.tier)}<div class="main"><div class="t">${esc(g.best.name)} Relic${g.hard ? ` <span class="pill warn">Steel Path</span>` : ""}
+      ${art(g.best.image, "sm")}${era(g.tier)}<div class="main"><div class="t">${esc(g.best.name)} Relic${g.hard ? ` <span class="pill warn">Steel Path</span>` : ""}
           <span class="muted" style="font-weight:400;font-size:13px"> · ${g.best.needs ? `${g.best.needs} needed drops · ` : ""}${plat(g.best.ev)} radiant</span></div>
         <div class="s">${g.missions.map((f) => `${esc(f.mission)} <span class="faint">(${esc(f.node.replace(/ \(.*\)$/, ""))}, ${countdown(f.expiry, "ending")})</span>`).join(" · ")}</div></div>
       <span class="faint num" style="font-size:12.5px">${fmt(g.owned)} ${g.tier === "Omnia" ? "relics" : esc(g.tier)}</span>
@@ -102,10 +100,9 @@ function rewards(h) {
 function worldCard(w) {
   if (!w || w.error && !w.cycles) return `<div class="empty"><b>World state unavailable</b>${esc(w?.error || "")}</div>`;
   const baro = w.baro || {};
-  return `<div class="cycles">${(w.cycles || []).map((c) => `<div class="cycle"><div class="n">${esc(c.name)}</div>
-      <div class="s">${esc(c.state)}</div><div class="t">${countdown(c.expiry, "changing")}</div></div>`).join("")}</div>
+  return `<div class="cycles scenic small">${(w.cycles || []).map((c) => cycleTile(c, false)).join("")}</div>
     <div class="list" style="margin-top:8px">
-      <div class="list-row"><span class="grow">Baro Ki'Teer${baro.location ? ` <span class="muted">· ${esc(baro.location)}</span>` : ""}</span>
+      <div class="list-row">${gimg(PORTRAIT.baro, 30, "portrait mini")}<span class="grow">Baro Ki'Teer${baro.location ? ` <span class="muted">· ${esc(baro.location)}</span>` : ""}</span>
         <span class="${baro.active ? "lotus" : "muted"}">${baro.active ? `here for ${countdown(baro.expiry, "leaving")}` : `arrives in ${countdown(baro.activation, "now")}`}</span></div>
       <div class="list-row"><span class="grow">Daily reset</span><span class="muted">${countdown(w.resets?.daily)}</span></div>
       <div class="list-row"><span class="grow">Weekly reset</span><span class="muted">${countdown(w.resets?.weekly)}</span></div>

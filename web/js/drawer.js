@@ -1,6 +1,7 @@
 // The detail drawer: one item, part or relic, from anywhere in the app.
 
-import { $, act, api, art, duc, era, esc, fmt, hydrateIcons, icon, plat, statusPill } from "./lib.js";
+import { $, artUrl, act, api, art, duc, era, esc, fmt, hydrateIcons, icon, plat, statusPill } from "./lib.js";
+import { ICON, gimg } from "./game.js";
 
 let stack = [];
 
@@ -73,7 +74,7 @@ function item(x) {
   return `<div class="dhead">${art(x.image, "xl")}<div class="grow">
       <h2>${esc(x.name)}</h2>
       <div class="row wrap">${statusPill(x.status)}<span class="pill">${esc(x.category)}</span>
-        ${x.masteryReq ? `<span class="pill">MR ${x.masteryReq}</span>` : ""}
+        ${x.masteryReq ? `<span class="pill" title="Mastery rank ${x.masteryReq} to build or trade it">${gimg(ICON.mastery, 14)}MR ${x.masteryReq}</span>` : ""}
         ${x.vaulted ? `<span class="pill vaulted">Vaulted</span>` : ""}${x.building ? `<span class="pill lotus">In the foundry</span>` : ""}
         ${x.owned ? `<span class="pill good">Owned</span>` : ""}</div></div></div>
     <div class="kv">
@@ -89,7 +90,7 @@ function item(x) {
     ${x.parts.length ? `<div class="dsec"><h2>Parts ${x.buildable ? `<span class="pill good">ready to build</span>` : ""}</h2>${parts}</div>` : ""}
     ${x.requires.length ? `<div class="dsec"><h2>Also needs</h2><div class="list">${x.requires.map((r) => `
       <div class="list-row click" data-open="${esc(r.uid)}"><div class="main"><div class="t">${r.count > 1 ? `${r.count} × ` : ""}${esc(r.name)}</div></div>${r.status ? statusPill(r.status) : ""}</div>`).join("")}</div></div>` : ""}
-    ${x.resources.length ? `<div class="dsec"><h2>Resources</h2><div class="chips">${x.resources.map((r) => `<span class="chip">${fmt(r.count)} × ${esc(r.name)}</span>`).join("")}</div></div>` : ""}
+    ${x.resources.length ? `<div class="dsec"><h2>Resources</h2><div class="chips">${x.resources.map((r) => `<span class="chip res">${r.image ? `<img alt="" width="22" height="22" src="${esc(artUrl(r.image, 22))}" onerror="this.remove()">` : ""}${fmt(r.count)} × ${esc(r.name)}</span>`).join("")}</div></div>` : ""}
     ${x.disposition ? `<div class="dsec"><h2>Riven disposition</h2><span class="gold">${"●".repeat(x.dots || 0)}${"○".repeat(5 - (x.dots || 0))}</span> <span class="muted">${x.disposition}×</span></div>` : ""}`;
 }
 
