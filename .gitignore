@@ -1,2 +1,15 @@
-/target
+/target/
 /result
+/result-*
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+.env
+.env.*
+*.pem
+*.key
+*.ppm
+/frames/
