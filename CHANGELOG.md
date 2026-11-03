@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.2 - 2026-11-03
+
+### Fixed
+
+- **An empty Standing page after the update.** A profile saved by an earlier version has no standing
+  in it, and it was only loaded again once it was half an hour old. Such a profile now counts as out
+  of date and is loaded again at the next chance: when the app starts with that account shown, or
+  when you switch to it. Switching to an account also loads its profile when that is out of date, one
+  request within DE's rate limit as always.
+
 ## 0.3.1 - 2026-11-03
 
 ### Fixed

@@ -385,11 +385,14 @@ impl State {
     }
 
     /// Whether an account's profile should be loaded again: never loaded, older than the refresh
-    /// interval, or loaded for another id.
+    /// interval, loaded for another id, or saved by a build that did not keep standing yet (DE's
+    /// profile always has it: every daily pool is sent even at rank 0).
     fn profile_stale(&self, acc: &Account) -> bool {
         let interval = self.settings().profile_refresh_minutes.max(10) as f64 * 60.0;
         acc.profile.as_ref().is_none_or(|p| {
-            now() - p.fetched > interval || p.id.as_deref().is_some_and(|pid| Some(pid) != acc.id.as_deref())
+            now() - p.fetched > interval
+                || p.id.as_deref().is_some_and(|pid| Some(pid) != acc.id.as_deref())
+                || (p.standing.is_none() && p.source.as_deref() == Some("DE public profile"))
         })
     }
 
@@ -1065,16 +1068,24 @@ impl State {
         Ok(())
     }
 
-    /// Shows another account. The next login in the game moves the window to that account again.
-    pub fn switch_account(&self, key: &str) -> Result<()> {
-        let mut d = lock(&self.data);
-        if d.get(key).is_none() {
-            return Err(UserError::new("There is no such account.").into());
-        }
-        if d.active.as_deref() != Some(key) {
-            d.active = Some(key.to_string());
-            d.switched = now();
-            d.save();
+    /// Shows another account, and loads its profile when that is out of date (one request, within
+    /// DE's rate limit). The next login in the game moves the window to that account again.
+    pub fn switch_account(self: &Arc<Self>, key: &str) -> Result<()> {
+        let due = {
+            let mut d = lock(&self.data);
+            let Some(acc) = d.get(key) else {
+                return Err(UserError::new("There is no such account.").into());
+            };
+            let due = acc.id.is_some() && self.profile_stale(acc);
+            if d.active.as_deref() != Some(key) {
+                d.active = Some(key.to_string());
+                d.switched = now();
+                d.save();
+            }
+            due
+        };
+        if due {
+            self.request_profile(key);
         }
         Ok(())
     }
