@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.3.0 - 2026-11-03
+
+Syndicate standing, and two accounts on one machine kept apart.
+
+### Added
+
+- **Standing page.** Every syndicate with its rank and how far into that rank you are (the way the
+  game shows it), what the next rank-up costs with the items you hold, a "rank up ready" mark when a
+  rank's standing is full, and a warning when a syndicate at its top rank is full and standing would
+  be lost. The six faction syndicates show which others gain or lose with them.
+- **Daily limits.** How much standing every daily pool still allows today (16,000 + 500 per mastery
+  rank; the faction syndicates share one pool), the focus left today, and when they refill. A pool
+  read before the daily reset counts as full again.
+- **What standing buys.** Any syndicate opens in the side panel with its offerings; the tradable ones
+  are priced on warframe.market and ranked by platinum per 1,000 standing.
+- **Hand-ins.** Medallions and other items a syndicate takes for standing, with the standing they are
+  worth, and whether that counts toward the daily limit.
+- **Your Nightwave rank** on the World page; the Overview has a Standing card with today's limits and
+  waiting rank-ups. Syndicates can be found with Ctrl+K.
+- **Several accounts.** Every account that logs in on the machine has its own profile, inventory,
+  hand-set counts, pins and reward history (`accounts/<name>/` in the data folder). The window
+  follows the game when it logs in to another account; the switcher at the top of the sidebar shows
+  any account, and Settings → Accounts links, shows and forgets them.
+- The memory scan now also keeps syndicate standing, the daily limits, the star chart and intrinsics,
+  so standing and mastery XP stay current after each mission.
+
+### Fixed
+
+- **Two accounts mixed up.** With two accounts on one machine, the app kept one account file: the
+  profile of one account was shown next to the inventory read from the other, and a login with the
+  other account unlinked the id without saying whose data was on screen. Each account is now kept
+  apart, and existing data is moved into an account of its own on the first start; an inventory that
+  belongs to another account than the saved profile is set aside instead of adopted.
+- A memory read is filed under the account its mastery XP belongs to. After logging out and in with
+  another account the game can still hold the first account's inventory; that copy is no longer
+  filed under the account now logged in. An imported inventory file of another account is refused.
+- A profile is filed under the account whose name it carries: an id linked to the wrong account
+  moves to the right one instead of being dropped.
+- The mastery rank is read from the profile, which does carry it from rank 1 up.
+- The Overview's reward history and session totals count only the account shown.
+
+### Changed
+
+- Pages are reached with 1-9 and 0 (Settings); Standing sits between World and Foundry.
+- The `account_id` setting is gone; ids are linked per account in Settings → Accounts.
+- Game data now includes the syndicate export and its English names from
+  warframe-public-export-plus (about 6 MB, cached and rechecked daily).
+
 ## 0.2.0 - 2026-10-09
 
 Rewritten in Rust, with a new interface and new companion features. The local API keeps every

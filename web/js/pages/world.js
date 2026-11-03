@@ -105,8 +105,14 @@ function invasionsCard(invasions) {
 function nightwaveCard(nw) {
   const challenges = [...(nw.challenges || [])].sort((a, b) => (b.daily - a.daily) || (a.elite - b.elite));
   const kind = (c) => (c.daily ? ["daily", "Daily"] : c.elite ? ["elite", "Elite weekly"] : ["weekly", "Weekly"]);
+  // Where the account shown stands in this season: its rank and the way to the next one.
+  const mine = nw.mine;
+  const me = mine ? `<div class="nw-me"><div class="row"><span class="grow"><b>${esc(mine.rankName)}</b>
+        <span class="muted"> · rank ${fmt(mine.title)}</span></span><span class="num muted">${fmt(mine.progress)} / ${fmt(mine.size)}</span></div>
+      <div class="bar thin"><i style="width:${mine.size ? Math.max(0, Math.min(100, (100 * mine.progress) / mine.size)).toFixed(1) : 0}%"></i></div></div>` : "";
   return `<div class="card"><div class="card-head"><h2>Nightwave</h2></div>
     ${lead(portrait(PORTRAIT.nora), nw.season != null ? `Season ${esc(nw.season)}` : "Nora Night", `${challenges.length} acts`, nw.expiry ? `ends in<b>${countdown(nw.expiry)}</b>` : "")}
+    ${me}
     <div class="list">${challenges.map((c) => `<div class="list-row">${emblem(ICON[kind(c)[0]], `sm ${kind(c)[0]}`, kind(c)[1])}
       <div class="main"><div class="t">${esc(c.title)}</div><div class="s">${esc(c.desc)}</div></div>
       <div class="side"><span class="num">${fmt(c.reputation)}</span><span class="faint">${countdown(c.expiry, "ending")}</span></div>
@@ -141,7 +147,7 @@ function render(w) {
         ${steelPathCard(w.steelPath)}
         ${w.darvo ? darvoCard(w.darvo) : ""}
         <div class="card"><div class="card-head"><h2>Resets</h2></div><div class="list">
-          <div class="list-row">${emblem(ICON.daily, "sm")}<div class="main"><div class="t">Daily</div><div class="s">Standing caps, login reward</div></div>${countdown(w.resets?.daily)}</div>
+          <a class="list-row click plain" href="#standing">${emblem(ICON.daily, "sm")}<div class="main"><div class="t">Daily</div><div class="s">Standing limits, login reward</div></div>${countdown(w.resets?.daily)}</a>
           <div class="list-row">${emblem(ICON.weekly, "sm")}<div class="main"><div class="t">Weekly</div><div class="s">Archon hunt, Steel Path, Nightwave</div></div>${countdown(w.resets?.weekly)}</div></div></div>
       </div>
     </div>`;

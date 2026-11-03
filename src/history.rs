@@ -27,6 +27,16 @@ pub struct Entry {
     pub t: f64,
     pub drops: Vec<Reward>,
     pub best: Option<String>,
+    /// The key of the account that was logged in (`accounts.rs`). Entries from before 0.3.0 have
+    /// none and are shown for every account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+}
+
+impl Entry {
+    fn belongs_to(&self, account: Option<&str>) -> bool {
+        self.account.is_none() || account.is_none() || self.account.as_deref() == account
+    }
 }
 
 static LOCK: Mutex<()> = Mutex::new(());
@@ -45,7 +55,9 @@ pub fn record(entry: Entry) {
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut all = read_all();
     let same_screen = all.last().is_some_and(|last| {
-        entry.t - last.t < 20.0 && last.drops.iter().map(|d| &d.name).eq(entry.drops.iter().map(|d| &d.name))
+        entry.t - last.t < 20.0
+            && last.account == entry.account
+            && last.drops.iter().map(|d| &d.name).eq(entry.drops.iter().map(|d| &d.name))
     });
     if same_screen {
         all.pop();
@@ -63,19 +75,20 @@ pub fn record(entry: Entry) {
     }
 }
 
-/// The newest `limit` entries, newest first.
-pub fn recent(limit: usize) -> Vec<Entry> {
+/// The newest `limit` entries of an account, newest first.
+pub fn recent(limit: usize, account: Option<&str>) -> Vec<Entry> {
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut all = read_all();
+    let mut all: Vec<Entry> = read_all().into_iter().filter(|e| e.belongs_to(account)).collect();
     all.reverse();
     all.truncate(limit);
     all
 }
 
-/// Totals since `since`: screens read and the platinum of the most valuable pick on each.
-pub fn totals(since: f64) -> (usize, i64) {
+/// An account's totals since `since`: screens read and the platinum of the most valuable pick on
+/// each.
+pub fn totals(since: f64, account: Option<&str>) -> (usize, i64) {
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let session: Vec<Entry> = read_all().into_iter().filter(|e| e.t >= since).collect();
+    let session: Vec<Entry> = read_all().into_iter().filter(|e| e.t >= since && e.belongs_to(account)).collect();
     let best_value = session.iter().map(|e| e.drops.iter().filter_map(|d| d.price).max().unwrap_or(0)).sum();
     (session.len(), best_value)
 }

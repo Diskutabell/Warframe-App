@@ -296,6 +296,8 @@ fn get_api(s: &Arc<State>, path: &str, q: &HashMap<String, String>) -> Result<Va
         }
         "rivens" => s.rivens(),
         "fissures" => s.fissures(),
+        "standing" => s.standing(),
+        "syndicate" => s.syndicate(q.get("tag").map_or("", String::as_str))?,
         "settings" => serde_json::to_value(s.settings())?,
         "search" => s.search(q.get("q").map_or("", String::as_str)),
         _ => return Err(UserError::new(format!("unknown endpoint {path}")).into()),
@@ -306,9 +308,12 @@ fn post_api(s: &Arc<State>, path: &str, b: &Value) -> Result<Option<Value>> {
     let uid = || b["uid"].as_str().map(str::to_owned).ok_or_else(|| UserError::new("uid is required"));
     match path {
         "settings" => s.update_settings(b)?,
-        "account/set" => s.set_account_id(b["id"].as_str().unwrap_or(""))?,
+        "account/set" => s.set_account_id(b["id"].as_str().unwrap_or(""), b["key"].as_str())?,
+        "account/switch" => s.switch_account(b["key"].as_str().unwrap_or(""))?,
+        "account/forget" => s.forget_account(b["key"].as_str().unwrap_or(""))?,
         "profile/refresh" => {
-            s.refresh_profile(false)?;
+            let key = s.active_key().ok_or_else(|| UserError::new("No account yet: start the game once, or enter an account id."))?;
+            s.refresh_profile(&key, false)?;
         }
         "profile/import" => s.import_profile(b)?,
         "inventory/import" => {

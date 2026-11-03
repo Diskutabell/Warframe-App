@@ -23,8 +23,10 @@ use serde_json::{Map, Value};
 const MARKER: &[u8] = b"\"LastInventorySync\"";
 /// The same process memory holds the login payload, with the live session Token and
 /// TwitchAuthToken. Nothing outside this allowlist is ever kept - a leaked session token is worth
-/// more to an attacker than the inventory is to anyone.
-const KEEP_KEYS: [&str; 38] = [
+/// more to an attacker than the inventory is to anyone. `allowed` adds three families of keys
+/// whose names vary: the daily standing pools (`DailyAffiliationCetus`...) and intrinsic ranks
+/// and points (`LPS_PILOTING`, `LPP_SPACE`).
+const KEEP_KEYS: [&str; 47] = [
     "LastInventorySync",
     "MiscItems",
     "Suits",
@@ -63,6 +65,18 @@ const KEEP_KEYS: [&str; 38] = [
     "XP",
     "ItemCount",
     "CompletionDate",
+    // Syndicate standing: [{"Tag", "Standing", "Title"}], and the focus left today.
+    "Affiliations",
+    "Tag",
+    "Standing",
+    "Title",
+    "DailyFocus",
+    // Star chart and intrinsics, for the mastery total: [{"Tag", "Completes", "Tier"}] and
+    // {"LPS_...": rank}.
+    "Missions",
+    "Completes",
+    "Tier",
+    "PlayerSkills",
 ];
 /// Mongo extended-JSON wrappers. Structural only, and only ever inside a key already allowed.
 const BSON_KEYS: [&str; 5] = ["$date", "$numberLong", "$numberInt", "$numberDouble", "$numberDecimal"];
@@ -124,15 +138,24 @@ pub fn availability() -> Result<(), String> {
     }
 }
 
+/// Whether a key may be kept: a known inventory field, one of the families named above, or a
+/// Mongo wrapper - and never anything that sounds like a credential.
+fn allowed(key: &str) -> bool {
+    let known = KEEP_KEYS.contains(&key)
+        || BSON_KEYS.contains(&key)
+        || key.starts_with("DailyAffiliation")
+        || key.starts_with("LPS_")
+        || key.starts_with("LPP_");
+    known && !SECRET_HINT.is_match(key)
+}
+
 /// Keeps only known inventory fields. Anything unrecognised is dropped, not inspected.
 pub fn sanitise(v: Value) -> Value {
     match v {
         Value::Array(items) => Value::Array(items.into_iter().map(sanitise).collect()),
         Value::Object(map) => Value::Object(
             map.into_iter()
-                .filter(|(k, _)| {
-                    (KEEP_KEYS.contains(&k.as_str()) || BSON_KEYS.contains(&k.as_str())) && !SECRET_HINT.is_match(k)
-                })
+                .filter(|(k, _)| allowed(k))
                 .map(|(k, v)| (k, sanitise(v)))
                 .collect::<Map<String, Value>>(),
         ),
@@ -322,8 +345,14 @@ pub struct ScanInfo {
     pub seconds: f64,
 }
 
-/// Reads the inventory out of the game process `pid`.
-pub fn scan_inventory(pid: u32, progress: impl Fn(f64)) -> Result<(Value, ScanInfo), ScanError> {
+/// How many different captures a scan hands back at most.
+const MAX_CAPTURES: usize = 6;
+
+/// Reads the inventory out of the game process `pid`: every distinct copy found, newest sync
+/// first. There can be more than one account's: after logging out and in with another account the
+/// game may still hold the first one's text, and its sync can even be the newer one. The caller
+/// decides which copy is the logged-in account's (`State::apply_capture`).
+pub fn scan_inventory(pid: u32, progress: impl Fn(f64)) -> Result<(Vec<Value>, ScanInfo), ScanError> {
     availability().map_err(ScanError::Denied)?;
     // Opening is where the kernel decides; a refusal costs nothing but a line in its log.
     let mem = fs::File::open(format!("/proc/{pid}/mem")).map_err(|e| match e.kind() {
@@ -341,7 +370,7 @@ pub fn scan_inventory(pid: u32, progress: impl Fn(f64)) -> Result<(Value, ScanIn
     let regions = regions(pid);
     let total: u64 = regions.iter().map(|(a, b)| b - a).sum::<u64>().max(1);
     let finder = memmem::Finder::new(MARKER);
-    let (mut best, mut hits, mut done) = (None::<Value>, 0usize, 0u64);
+    let (mut found, mut hits, mut done) = (Vec::<Value>::new(), 0usize, 0u64);
     let mut seen = HashSet::new();
     for &(a, b) in &regions {
         let mut off = a;
@@ -357,9 +386,7 @@ pub fn scan_inventory(pid: u32, progress: impl Fn(f64)) -> Result<(Value, ScanIn
                 }
                 hits += 1;
                 if let Some(obj) = extract_blob(&mem, (a, b), addr) {
-                    if best.as_ref().is_none_or(|cur| sync_time(&obj) > sync_time(cur)) {
-                        best = Some(obj);
-                    }
+                    keep_capture(&mut found, obj);
                 }
             }
             off += n as u64;
@@ -368,7 +395,25 @@ pub fn scan_inventory(pid: u32, progress: impl Fn(f64)) -> Result<(Value, ScanIn
         }
     }
     let info = ScanInfo { seconds: (started.elapsed().as_secs_f64() * 10.0).round() / 10.0 };
-    best.map(|b| (b, info)).ok_or(ScanError::NotFound { matches: hits })
+    if found.is_empty() {
+        return Err(ScanError::NotFound { matches: hits });
+    }
+    Ok((found, info))
+}
+
+/// Adds a capture to `found`, newest sync first. Copies of one sync are one capture: the most
+/// complete copy stands for it.
+fn keep_capture(found: &mut Vec<Value>, obj: Value) {
+    let size = |v: &Value| v.as_object().map_or(0, |o| o.len());
+    if let Some(same) = found.iter_mut().find(|c| sync_time(c) == sync_time(&obj)) {
+        if size(&obj) > size(same) {
+            *same = obj;
+        }
+        return;
+    }
+    found.push(obj);
+    found.sort_by_key(|c| std::cmp::Reverse(sync_time(c)));
+    found.truncate(MAX_CAPTURES);
 }
 
 #[cfg(test)]
@@ -410,6 +455,44 @@ mod tests {
             json!({"MiscItems": [{"ItemType": "/A", "ItemCount": 2}], "PendingRecipes": [{"ItemType": "/R",
             "CompletionDate": {"$date": {"$numberLong": "1"}}}], "PremiumCredits": 5})
         );
+    }
+
+    #[test]
+    fn standing_and_intrinsics_are_kept() {
+        let v = json!({"Affiliations": [{"Tag": "CetusSyndicate", "Standing": 23143, "Title": 1, "FreeFavorsUsed": []}],
+            "DailyAffiliationCetus": 16000, "DailyFocus": 250000, "AuthToken": "x",
+            "PlayerSkills": {"LPS_PILOTING": 7, "LPP_SPACE": 29267, "SessionKey": "s"},
+            "Missions": [{"Tag": "SolNode27", "Completes": 2, "Tier": 1, "BestRating": 3}]});
+        assert_eq!(
+            sanitise(v),
+            json!({"Affiliations": [{"Tag": "CetusSyndicate", "Standing": 23143, "Title": 1}],
+                "DailyAffiliationCetus": 16000, "DailyFocus": 250000,
+                "PlayerSkills": {"LPS_PILOTING": 7, "LPP_SPACE": 29267},
+                "Missions": [{"Tag": "SolNode27", "Completes": 2, "Tier": 1}]})
+        );
+    }
+
+    #[test]
+    fn captures_are_kept_newest_first_one_per_sync() {
+        let cap = |sync: i64, keys: usize| {
+            let mut v = json!({"LastInventorySync": sync});
+            for k in 0..keys {
+                v[format!("K{k}")] = json!(1);
+            }
+            v
+        };
+        let mut found = Vec::new();
+        for c in [cap(10, 1), cap(30, 1), cap(20, 1), cap(30, 4), cap(30, 2)] {
+            keep_capture(&mut found, c);
+        }
+        let syncs: Vec<i64> = found.iter().map(sync_time).collect();
+        assert_eq!(syncs, [30, 20, 10]);
+        assert_eq!(found[0].as_object().unwrap().len(), 5, "the most complete copy of a sync stands for it");
+        for s in 40..50 {
+            keep_capture(&mut found, cap(s, 1));
+        }
+        assert_eq!(found.len(), MAX_CAPTURES);
+        assert_eq!(sync_time(&found[0]), 49);
     }
 
     #[test]

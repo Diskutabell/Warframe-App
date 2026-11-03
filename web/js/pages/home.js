@@ -1,8 +1,9 @@
 // Overview: who you are, what to do next, and what is going on in the world.
 
-import { $, ago, api, art, countdown, duc, era, esc, fmt, icon, plat } from "../lib.js";
+import { $, act, ago, api, art, countdown, duc, era, esc, fmt, icon, plat } from "../lib.js";
 import * as drawer from "../drawer.js";
 import { ICON, PORTRAIT, cycleTile, gimg, mrBadge } from "../game.js";
+import { sigil } from "./standing.js";
 
 const ICONS = ["platinum", "ducats", "endo", "credits"];
 
@@ -39,7 +40,11 @@ function hero(S) {
   } else if (m.rank === top) {
     hint = `${toNext}.`;
   }
-  return `<div class="card hero">
+  // The window shows one account while the game plays another: say so, with a way back.
+  const other = S.account.logName && !S.account.playing
+    ? `<div class="hint warn">${icon("home")}<span><b>${esc(S.account.logName)}</b> is logged in to the game; this is ${esc(S.account.name)}.</span>
+        <button class="ghost" data-show-game>Show ${esc(S.account.logName)}</button></div>` : "";
+  return `${other}<div class="card hero">
     <div class="mr-badge" title="${ringTitle}">
       ${gimg(mr == null ? ICON.mastery : mrBadge(top), 116)}
       <b>${mr == null ? "?" : `MR ${shown}`}</b><span>Mastery rank</span>
@@ -118,6 +123,22 @@ function foundry(S) {
     </div>`).join("")}</div>`;
 }
 
+/** Today's standing: the pools already used today, rank-ups waiting, and the reset. */
+function standingCard(s) {
+  if (!s || !s.loaded) return `<div class="empty"><b>No syndicate data yet</b>It comes with the game data.</div>`;
+  if (!s.account) return `<div class="empty"><b>No account yet</b>Start the game once.</div>`;
+  const used = s.pools.filter((p) => p.left != null && p.cap && p.left < p.cap);
+  const rows = used.length ? used : s.pools.filter((p) => p.key === "DailyAffiliation");
+  const ready = s.syndicates.filter((r) => r.atCap || r.full);
+  const pool = (p) => `<div class="list-row"><span class="grow ellipsis">${esc(p.name)}</span>
+      <div class="bar thin lotus" style="width:110px;margin:0"><i style="width:${((100 * (p.left ?? 0)) / (p.cap || 1)).toFixed(1)}%"></i></div>
+      <span class="num ${p.left === 0 ? "warn-text" : "muted"}" style="width:92px;text-align:right">${p.left === 0 ? "capped" : `${fmt(p.left)} left`}</span></div>`;
+  return `<div class="row" style="margin-bottom:6px"><span class="muted grow" style="font-size:13px">${s.cap ? `${fmt(s.cap)} a day per pool` : "Mastery rank unknown"}${used.length ? "" : " · nothing earned today"}</span>
+      <span class="muted" style="font-size:13px">resets in ${countdown(s.reset, "a moment")}</span></div>
+    ${ready.length ? `<div class="chips" style="margin:0 0 8px">${ready.map((r) => `<span class="chip ${r.atCap ? "open" : ""}" data-syn="${esc(r.tag)}">${sigil(r.rankIcon || r.icon, 18)}${esc(r.name)}: ${r.atCap ? "rank up" : "full"}</span>`).join("")}</div>` : ""}
+    <div class="list">${rows.slice(0, 7).map(pool).join("")}</div>`;
+}
+
 function collection(S) {
   const c = S.collection || {};
   return `<div class="tiles">
@@ -152,7 +173,17 @@ function pinned(S) {
 function wire(view) {
   for (const el of view.querySelectorAll("[data-relic]")) el.onclick = () => el.dataset.relic && drawer.open(el.dataset.relic);
   for (const el of view.querySelectorAll("[data-part]")) el.onclick = () => drawer.open(el.dataset.part);
+  for (const el of view.querySelectorAll("[data-syn]")) el.onclick = () => drawer.open("syndicate:" + el.dataset.syn);
+  const back = view.querySelector("[data-show-game]");
+  if (back) {
+    back.onclick = async () => {
+      const game = (homeApp?.state?.accounts || []).find((a) => a.playing);
+      if (game && await act("account/switch", { key: game.key })) window.dispatchEvent(new CustomEvent("wfp:account"));
+    };
+  }
 }
+
+let homeApp = null;
 
 export default {
   id: "home",
@@ -160,8 +191,10 @@ export default {
   icon: "home",
   async render(view, params, app) {
     const S = app.state;
-    const [fis, world, hist] = await Promise.all([
-      api("fissures").catch(() => null), api("world").catch(() => null), api("history").catch(() => null)]);
+    homeApp = app;
+    const [fis, world, hist, stand] = await Promise.all([
+      api("fissures").catch(() => null), api("world").catch(() => null), api("history").catch(() => null),
+      api("standing").catch(() => null)]);
     lastScreens = S.session?.screens;
     view.innerHTML = `<div class="page">
       ${S.dataError ? `<div class="callout" style="margin-bottom:16px">${esc(S.dataError)}</div>` : ""}
@@ -174,6 +207,7 @@ export default {
         </div>
         <div class="stack">
           <div id="pinnedCard" ${S.pinned?.length ? "" : "hidden"}>${card("Pinned", pinned(S), null, "pinned")}</div>
+          ${card("Standing", standingCard(stand), "standing", "standingCard")}
           ${card("World", worldCard(world), "world", "world")}
           ${card("Foundry", foundry(S), "foundry", "foundry")}
           ${card("Activity", activity(S), null, "activity")}
@@ -181,16 +215,19 @@ export default {
       </div></div>`;
     wire(view);
     app.every(async () => {
-      const [f, w] = await Promise.all([api("fissures").catch(() => null), api("world").catch(() => null)]);
-      const c = $("#crack"), wo = $("#world");
+      const [f, w, st] = await Promise.all([api("fissures").catch(() => null), api("world").catch(() => null),
+        api("standing").catch(() => null)]);
+      const c = $("#crack"), wo = $("#world"), sc = $("#standingCard");
       if (c && f) { c.innerHTML = crackNow(f); wire(c); }
       if (wo && w) wo.innerHTML = worldCard(w);
+      if (sc && st) { sc.innerHTML = standingCard(st); wire(sc); }
     }, 60000);
   },
   async onState(S) {
     const h = $("#hero");
     if (!h) return;
     h.innerHTML = hero(S);
+    wire(h);
     $("#foundry").innerHTML = foundry(S);
     $("#activity").innerHTML = activity(S);
     $("#collection").innerHTML = collection(S);

@@ -169,6 +169,12 @@ impl Market {
         slug.and_then(|s| items.by_slug.get(s)).and_then(|i| i.ducats)
     }
 
+    /// The item's name as warframe.market lists it.
+    pub fn name(&self, slug: &str) -> Option<String> {
+        let items = self.items.read().unwrap_or_else(|e| e.into_inner());
+        items.by_slug.get(slug).and_then(|i| i.name.clone())
+    }
+
     pub fn image(&self, slug: Option<&str>) -> Option<String> {
         let items = self.items.read().unwrap_or_else(|e| e.into_inner());
         slug.and_then(|s| items.by_slug.get(s)).and_then(|i| i.thumb.clone())

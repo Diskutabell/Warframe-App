@@ -52,15 +52,75 @@ const COUNTED_KEYS: [&str; 7] =
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Profile {
     pub name: Option<String>,
-    /// DE's profile does not actually serve this (checked 2026-10-02); kept for imported files.
+    /// The account id the profile belongs to (`AccountId`), when it says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// `PlayerLevel`. DE leaves it out at rank 0 (a default value is not sent) and serves it
+    /// otherwise: 36 on a real profile, absent on a real rank-0 one (2026-11-03).
     pub mastery_rank: Option<i64>,
     pub xp: IndexMap<String, i64>,
     /// Star chart and intrinsics. `None` in a profile saved before the app read them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<Progress>,
+    /// Syndicate standing and today's limits. `None` in a profile saved before the app read them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standing: Option<Standing>,
     pub fetched: f64,
     #[serde(default)]
     pub source: Option<String>,
+}
+
+/// One syndicate's standing as the game stores it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Affiliation {
+    /// Counted from zero over all ranks, not from the start of the current rank: a real profile
+    /// has 289,873 at rank 5, whose range is 240,000-372,000 in the game's export.
+    pub standing: i64,
+    /// The rank ("title"), -2 to 5 for most syndicates; a Nightwave season counts its tiers.
+    pub title: i64,
+}
+
+/// Syndicate standing and the daily limits, as DE's profile and a raw inventory carry them (seen
+/// in two real profiles, 2026-11-03): `Affiliations: [{"Tag", "Standing", "Title"}]`, one
+/// `DailyAffiliation*` number per limit pool, and `DailyFocus`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Standing {
+    /// Syndicate tag ("SteelMeridianSyndicate") -> its standing and rank.
+    pub syndicates: IndexMap<String, Affiliation>,
+    /// Standing still allowed today per limit pool ("DailyAffiliationCetus" -> 16000) when the
+    /// source was read. The pools refill at the daily reset; a capped pool reads 0.
+    pub daily: IndexMap<String, i64>,
+    /// Focus still allowed today.
+    pub daily_focus: Option<i64>,
+}
+
+/// `None` when the payload has no standing at all, as in a memory capture that lost its head.
+fn standing_from(data: &Value) -> Option<Standing> {
+    let list = data.get("Affiliations").and_then(Value::as_array);
+    let mut out = Standing { daily_focus: data.get("DailyFocus").and_then(Value::as_i64), ..Standing::default() };
+    for a in list.into_iter().flatten() {
+        let Some(tag) = a["Tag"].as_str().filter(|t| !t.is_empty()) else { continue };
+        out.syndicates.insert(tag.to_string(), Affiliation { standing: int(&a["Standing"]), title: int(&a["Title"]) });
+    }
+    for (key, value) in data.as_object().into_iter().flatten() {
+        if key.starts_with("DailyAffiliation") {
+            if let Some(left) = value.as_i64() {
+                out.daily.insert(key.clone(), left);
+            }
+        }
+    }
+    (list.is_some() || !out.daily.is_empty() || out.daily_focus.is_some()).then_some(out)
+}
+
+/// Item -> mastery XP from an `XPInfo` list: the record of what each item has earned, which only
+/// ever grows. Comparing two of these tells whether they belong to one account
+/// (`accounts::same_owner`).
+pub fn xp_map(list: Option<&Value>) -> IndexMap<String, i64> {
+    list.and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e["ItemType"].as_str().filter(|t| !t.is_empty()).map(|t| (t.to_string(), int(&e["XP"]))))
+        .collect()
 }
 
 /// What gives mastery besides gear: the star chart nodes completed and the intrinsic ranks.
@@ -162,13 +222,7 @@ pub fn parse_profile(data: &Value) -> Result<Profile> {
         Some(list) => list.first().unwrap_or(data),
         None => data,
     };
-    let xpinfo = find_key(res, "XPInfo", 0).or_else(|| find_key(data, "XPInfo", 0));
-    let mut xp = IndexMap::new();
-    for e in xpinfo.and_then(Value::as_array).into_iter().flatten() {
-        if let Some(t) = e["ItemType"].as_str().filter(|t| !t.is_empty()) {
-            xp.insert(t.to_string(), int(&e["XP"]));
-        }
-    }
+    let xp = xp_map(find_key(res, "XPInfo", 0).or_else(|| find_key(data, "XPInfo", 0)));
     if xp.is_empty() {
         return Err(UserError::new("No mastery data (XPInfo) found in the profile JSON.").into());
     }
@@ -182,7 +236,18 @@ pub fn parse_profile(data: &Value) -> Result<Profile> {
         .flatten()
         .find(|v| !v.is_null())
         .and_then(Value::as_i64);
-    Ok(Profile { name, mastery_rank, xp, progress: progress_from(res), fetched: now(), source: None })
+    // {"$oid": "..."} in DE's answer; a plain string in files other tools wrote.
+    let id = res.get("AccountId").map(|v| v.get("$oid").unwrap_or(v)).and_then(Value::as_str).map(str::to_owned);
+    Ok(Profile {
+        name,
+        id,
+        mastery_rank,
+        xp,
+        progress: progress_from(res),
+        standing: standing_from(res),
+        fetched: now(),
+        source: None,
+    })
 }
 
 /// An integer from a JSON number or numeric string; anything else counts as 0.
@@ -224,14 +289,28 @@ pub struct Inventory {
     pub currencies: Currencies,
     pub mods: i64,
     pub mastery_rank: Option<i64>,
-    /// Star chart and intrinsics, when the payload has them (an imported file does, a memory
-    /// scan does not).
+    /// Star chart and intrinsics, when the payload has them (an imported file does; a memory
+    /// capture does when its head survived).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<Progress>,
+    /// Syndicate standing and today's limits, when the payload has them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standing: Option<Standing>,
     pub synced_at: Option<f64>,
     pub imported: f64,
+    /// How many top-level sections the payload had: a later capture of the same sync with no more
+    /// of them has nothing new.
+    #[serde(default)]
+    pub sections: usize,
     #[serde(default)]
     pub source: Option<String>,
+}
+
+impl Inventory {
+    /// When the game last synced it, or when it was read if the payload does not say.
+    pub fn as_of(&self) -> f64 {
+        self.synced_at.filter(|t| *t > 0.0).unwrap_or(self.imported)
+    }
 }
 
 /// Epoch seconds from a Mongo ObjectId (its first four bytes are a unix timestamp), or the
@@ -294,9 +373,7 @@ pub fn parse_inventory(data: &Value) -> Result<Inventory> {
             }
         }
     }
-    let xp = array("XPInfo")
-        .filter_map(|e| e["ItemType"].as_str().filter(|t| !t.is_empty()).map(|t| (t.to_string(), int(&e["XP"]))))
-        .collect();
+    let xp = xp_map(data.get("XPInfo"));
     let foundry = array("PendingRecipes")
         .map(|e| FoundryEntry { recipe: e["ItemType"].as_str().map(str::to_owned), done: date(&e["CompletionDate"]) })
         .collect();
@@ -315,8 +392,10 @@ pub fn parse_inventory(data: &Value) -> Result<Inventory> {
         mods,
         mastery_rank: data["PlayerLevel"].as_i64(),
         progress: progress_from(data),
+        standing: standing_from(data),
         synced_at: oid_time(&data["LastInventorySync"]),
         imported: now(),
+        sections: data.as_object().map_or(0, |o| o.len()),
         source: None,
     })
 }

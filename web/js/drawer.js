@@ -27,6 +27,7 @@ export async function open(key, push = true) {
   d.innerHTML = `<div class="drawer-top"><span class="grow"></span><button class="ghost icon" data-close>${icon("x")}</button></div>
     <div class="stack"><div class="skeleton" style="width:60%"></div><div class="skeleton"></div><div class="skeleton" style="width:80%"></div></div>`;
   d.querySelector("[data-close]").onclick = close;
+  if (key.startsWith("syndicate:")) return openSyndicate(key);
   let x;
   try {
     x = await api("item?key=" + encodeURIComponent(key));
@@ -50,6 +51,70 @@ export async function open(key, push = true) {
 }
 
 $("#scrim").onclick = close;
+
+// ------------------------------------------------------------------ a syndicate
+
+const syndicateArt = (url, px) => (url ? `<img class="gi" alt="" width="${px}" height="${px}" src="${esc(artUrl(url, px))}" onerror="this.remove()">` : "");
+
+function syndicate(x) {
+  const offers = x.offers || [];
+  const priced = offers.filter((o) => o.available && o.perK != null);
+  // What sells on warframe.market is the point here; the rest (cosmetics, consumables, parts that
+  // cannot be traded) is folded away.
+  const tradable = offers.filter((o) => o.slug);
+  const other = offers.filter((o) => !o.slug);
+  const row = (o) => `<div class="list-row ${o.available ? "" : "dim"}">${art(o.image, "sm")}
+      <div class="main"><div class="t">${esc(o.name)}</div>
+        <div class="s">${fmt(o.standing)} standing${o.level > x.title ? ` · needs rank ${o.level}` : ""}</div></div>
+      <div style="text-align:right">${o.slug ? plat(o.price) : `<span class="faint">not tradable</span>`}
+        ${o.perK != null ? `<div class="faint num" style="font-size:12.5px">${o.perK}p / 1k</div>` : ""}</div></div>`;
+  const ranks = (x.ranks || []).filter((r) => r.level > 0).map((r) => `<div class="list-row ${r.level === x.title ? "here" : ""}">
+      ${syndicateArt(r.icon, 28)}<div class="main"><div class="t">${esc(r.name)}</div></div><span class="faint num">rank ${r.level}</span></div>`).join("");
+  return `<div class="dhead">${syndicateArt(x.rankIcon || x.icon, 96)}<div class="grow">
+      <h2>${esc(x.name)}</h2>
+      <div class="row wrap"><span class="pill" style="${x.colour ? `color:${esc(x.colour)}` : ""}">${esc(x.rankName)}</span>
+        ${x.atCap ? `<span class="pill gold">Rank up ready</span>` : ""}${x.full ? `<span class="pill warn">Full - spend it</span>` : ""}</div></div></div>
+    <div class="kv">
+      <div><span>Standing</span><b>${fmt(x.standing)}</b></div>
+      <div><span>This rank</span><b>${x.steps ? `${x.progress} / ${x.size}` : x.size ? `${fmt(x.progress)} / ${fmt(x.size)}` : "–"}</b></div>
+      <div><span>Best value</span><b>${priced.length ? `${priced[0].perK}p / 1k` : "–"}</b></div>
+    </div>
+    ${(x.allies || []).length ? `<div class="dsec"><h2>Standing earned here also changes</h2><div class="chips">${x.allies.map((a) =>
+      `<span class="chip res ${a.share > 0 ? "owned" : ""}">${a.share > 0 ? "+" : "−"}${Math.abs(Math.round(a.share * 100))}% ${esc(a.name)}</span>`).join("")}</div></div>` : ""}
+    <div class="dsec"><h2>What standing buys <span class="count">${tradable.length} tradable</span>${x.pricing ? ` <span class="muted" style="letter-spacing:0;text-transform:none;font-weight:400">pricing ${x.pricing}…</span>` : ""}</h2>
+      <p class="muted" style="margin:-4px 0 8px;font-size:13px">What you can buy at your rank first, by platinum per 1,000 standing (the lowest sell order on warframe.market).</p>
+      <div class="list">${tradable.map(row).join("") || `<div class="muted">Nothing this syndicate offers sells on warframe.market.</div>`}</div>
+      ${other.length ? `<details class="more"><summary>${other.length} more that cannot be traded</summary><div class="list">${other.map(row).join("")}</div></details>` : ""}</div>
+    ${ranks ? `<div class="dsec"><h2>Ranks</h2><div class="list">${ranks}</div></div>` : ""}`;
+}
+
+async function openSyndicate(key, again = 0) {
+  const d = $("#drawer");
+  const scroll = again ? d.scrollTop : 0;
+  const tag = key.slice("syndicate:".length);
+  let x;
+  try {
+    x = await api("syndicate?tag=" + encodeURIComponent(tag));
+  } catch (e) {
+    d.querySelector(".stack").innerHTML = `<div class="callout">${esc(e.message)}</div>`;
+    return;
+  }
+  d.innerHTML = `<div class="drawer-top">
+      ${stack.length > 1 ? `<button class="ghost" data-back>${icon("back")} Back</button>` : ""}
+      <span class="grow"></span><button class="ghost icon" data-close title="Close (Esc)">${icon("x")}</button>
+    </div>${syndicate(x)}`;
+  hydrateIcons(d);
+  d.querySelector("[data-close]").onclick = close;
+  const back = d.querySelector("[data-back]");
+  if (back) back.onclick = () => { stack.pop(); open(stack[stack.length - 1], false); };
+  if (again) d.scrollTop = scroll;
+  else d.querySelector("[data-close]").focus();
+  // Prices arrive one by one from the market queue: look again while some are missing, for two
+  // minutes at most.
+  if (x.pricing && again < 30) {
+    setTimeout(() => { if (isOpen() && stack[stack.length - 1] === key) openSyndicate(key, again + 1); }, 4000);
+  }
+}
 
 function stepper(uid, n) {
   return `<span class="stepper"><button data-count="${esc(uid)}" data-c="${n - 1}" aria-label="One fewer">−</button><b>${n}</b><button data-count="${esc(uid)}" data-c="${n + 1}" aria-label="One more">+</button></span>`;

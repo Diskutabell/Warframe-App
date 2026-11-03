@@ -130,47 +130,49 @@ fn explicit_account(line: &str) -> Option<String> {
     ACCOUNT_RES.iter().find_map(|rx| rx.captures(line)).map(|m| m[1].to_string())
 }
 
-/// What an existing log says: the explicit account id, the player name, id candidates with their
-/// lines, and the local player's mastery badge.
-#[derive(Default)]
-pub struct LogScan {
-    pub explicit: Option<String>,
-    pub name: Option<String>,
-    pub candidates: Vec<(String, bool, String)>,
-    pub mastery: Option<(u32, Option<u32>)>,
-}
-
-pub fn scan_log(path: &Path) -> LogScan {
+/// What an existing log already says, in order, as the live watcher would have reported it:
+/// logins, explicit ids, id candidates and the local player's mastery badges. Reward screens and
+/// syncs are left out (they are over). The order matters: one game session can log out and in
+/// with another account, and everything after a login belongs to that account.
+pub fn scan_log(path: &Path) -> Vec<LogEvent> {
     const MAX_BYTES: u64 = 64_000_000;
-    let mut out = LogScan::default();
-    let Ok(mut f) = fs::File::open(path) else { return out };
+    let mut events = Vec::new();
+    let Ok(mut f) = fs::File::open(path) else { return events };
     let size = f.metadata().map(|m| m.len()).unwrap_or(0);
     let _ = f.seek(SeekFrom::Start(size.saturating_sub(MAX_BYTES)));
     let mut raw = Vec::new();
     if f.read_to_end(&mut raw).is_err() {
-        return out;
+        return events;
     }
     let text = String::from_utf8_lossy(&raw);
-    for line in text.lines() {
-        if let Some(n) = player_name(line) {
-            out.name = Some(n);
-        }
-        if let Some(acc) = explicit_account(line) {
-            out.explicit = Some(acc);
-        }
-        if let Some(mr) = mastery_rank(line) {
-            out.mastery = Some(mr);
-        }
-    }
+    let mut player: Option<String> = None;
+    let mut badge = None;
     let mut seen = std::collections::HashSet::new();
     for line in text.lines() {
-        for (id, sure) in candidate_ids(line, out.name.as_deref()) {
+        if let Some(n) = player_name(line) {
+            if player.as_deref() != Some(n.as_str()) {
+                player = Some(n.clone());
+                badge = None;
+                events.push(LogEvent::Name(n, false));
+            }
+        }
+        if let Some(acc) = explicit_account(line) {
+            events.push(LogEvent::Account(acc, player.clone()));
+        }
+        if let Some(mr) = mastery_rank(line) {
+            // The squad overlay redraws the badge many times a session; one report is enough.
+            if badge != Some(mr) {
+                badge = Some(mr);
+                events.push(LogEvent::Mastery(mr.0, mr.1));
+            }
+        }
+        for (id, sure) in candidate_ids(line, player.as_deref()) {
             if seen.insert(id.clone()) {
-                out.candidates.push((id, sure, tail(line.trim(), 200)));
+                events.push(LogEvent::Candidate(id, sure, tail(line.trim(), 200)));
             }
         }
     }
-    out
+    events
 }
 
 fn tail(s: &str, n: usize) -> String {
@@ -307,8 +309,9 @@ pub fn searching() -> bool {
 // ------------------------------------------------------------------ following the log
 
 pub enum LogEvent {
-    /// The player name from a "Logged in" or rename line.
-    Name(String),
+    /// The player name from a "Logged in" or rename line; true when the line was just written,
+    /// false when it was read back from a log that existed when the app started.
+    Name(String, bool),
     /// An explicit account id line (older builds), with the player name known at the time.
     Account(String, Option<String>),
     /// An id that may be the player's: (id, sure, the line it came from).
@@ -317,6 +320,8 @@ pub enum LogEvent {
     Mastery(u32, Option<u32>),
     RewardScreen,
     Sync,
+    /// The log as it was when the watcher found it has been read back.
+    Replayed,
 }
 
 /// What the UI shows about the log.
@@ -450,29 +455,26 @@ impl LogWatcher {
         }
     }
 
-    /// Reads what an existing log already says (name, ids, mastery) when it is first found.
+    /// Reads what an existing log already says (logins, ids, mastery) when it is first found.
     fn replay(&mut self, path: &Path) {
-        let scan = scan_log(path);
-        if let Some((lo, hi)) = scan.mastery {
-            (self.emit)(LogEvent::Mastery(lo, hi));
+        let events = scan_log(path);
+        // Following the live log goes on with the name the existing part ended on.
+        for ev in &events {
+            if let LogEvent::Name(name, _) = ev {
+                self.player = Some(name.clone());
+            }
         }
-        if let Some(name) = &scan.name {
-            self.player = Some(name.clone());
-            (self.emit)(LogEvent::Name(name.clone()));
+        for ev in events {
+            (self.emit)(ev);
         }
-        if let Some(acc) = scan.explicit {
-            (self.emit)(LogEvent::Account(acc, scan.name.clone()));
-        }
-        for (id, sure, line) in scan.candidates {
-            (self.emit)(LogEvent::Candidate(id, sure, line));
-        }
+        (self.emit)(LogEvent::Replayed);
     }
 
     fn handle(&mut self, line: &str) {
         if let Some(name) = player_name(line) {
             if self.player.as_deref() != Some(name.as_str()) {
                 self.player = Some(name.clone());
-                (self.emit)(LogEvent::Name(name));
+                (self.emit)(LogEvent::Name(name, true));
             }
             self.status().note(line);
         }
@@ -546,6 +548,42 @@ mod tests {
         assert!(candidate_ids(&other, Some("Tenno")).is_empty());
         let two = format!("Tenno {id} {}", "1234567890abcdef12345678");
         assert!(candidate_ids(&two, Some("Tenno")).iter().all(|(_, sure)| !sure));
+    }
+
+    #[test]
+    fn a_replayed_log_reports_each_login_with_what_followed_it() {
+        let id = "5f1e2d3c4b5a69788796a5b4";
+        let log = format!(
+            "1.0 Sys [Info]: Logged in Alpha\n\
+             2.0 Script [Info]: ThemedSquadOverlay.lua: OnMasteryIconReady1(Loaded: /Lotus/Interface/Icons/MasteryRanks/NewMasteryRanks/Rank0_d.png)\n\
+             2.1 Script [Info]: ThemedSquadOverlay.lua: OnMasteryIconReady1(Loaded: /Lotus/Interface/Icons/MasteryRanks/NewMasteryRanks/Rank0_d.png)\n\
+             3.0 Net [Info]: VoidProjections: Sending reward info from {id} to host!\n\
+             9.0 Sys [Info]: Logged in Beta\n\
+             9.5 Script [Info]: ThemedSquadOverlay.lua: OnMasteryIconReady1(Loaded: /Lotus/Interface/Icons/MasteryRanks/NewMasteryRanks/Rank34to36_d.png)\n"
+        );
+        let path = std::env::temp_dir().join(format!("wfp-eelog-test-{}.log", std::process::id()));
+        fs::write(&path, log).unwrap();
+        let events = scan_log(&path);
+        let _ = fs::remove_file(&path);
+        let shown: Vec<String> = events
+            .iter()
+            .map(|e| match e {
+                LogEvent::Name(n, live) => format!("name {n} {live}"),
+                LogEvent::Mastery(lo, hi) => format!("badge {lo} {hi:?}"),
+                LogEvent::Candidate(i, sure, _) => format!("id {i} {sure}"),
+                _ => "other".to_string(),
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                "name Alpha false".to_string(),
+                "badge 0 None".to_string(),
+                format!("id {id} true"),
+                "name Beta false".to_string(),
+                "badge 34 Some(36)".to_string()
+            ]
+        );
     }
 
     #[test]

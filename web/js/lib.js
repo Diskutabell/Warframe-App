@@ -116,6 +116,8 @@ const PATHS = {
   plus: "M12 5v14M5 12h14",
   minus: "M5 12h14",
   refresh: "M20 11a8 8 0 1 0-2.3 5.7 M20 4v7h-7",
+  standing: "M12 3l7 3v5c0 4.6-3 8.2-7 10-4-1.8-7-5.4-7-10V6z M8.5 12.5l2.4 2.4 4.6-4.8",
+  down: "M6 9l6 6 6-6",
 };
 export const icon = (name, cls = "") => `<svg class="ic ${cls}" viewBox="0 0 24 24" aria-hidden="true"><path d="${PATHS[name] || ""}"/></svg>`;
 export function hydrateIcons(root = document) {

@@ -41,6 +41,14 @@ fn worldstate(platform: Platform) -> (Option<Arc<Value>>, Option<String>) {
     (c.raw.clone(), c.error.clone())
 }
 
+/// The syndicate tag of the running Nightwave season, as the profile names it: the API spaces it
+/// out ("Radio Legion Intermission16 Syndicate" for "RadioLegionIntermission16Syndicate").
+pub fn nightwave_tag(platform: Platform) -> Option<String> {
+    let (raw, _) = worldstate(platform);
+    let tag: String = raw.as_deref()?["nightwave"]["tag"].as_str()?.chars().filter(|c| !c.is_whitespace()).collect();
+    (!tag.is_empty()).then_some(tag)
+}
+
 /// The fissures open right now, normal ones first, then by tier and expiry.
 pub fn fissures(platform: Platform) -> (Vec<Value>, Option<String>) {
     let (raw, err) = worldstate(platform);

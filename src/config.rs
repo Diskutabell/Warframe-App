@@ -101,8 +101,6 @@ pub struct Settings {
     pub platform: Platform,
     /// Empty: search Steam, Flatpak, Snap and ~/Games prefixes.
     pub ee_log_path: String,
-    /// Empty: read it from EE.log.
-    pub account_id: String,
     pub profile_auto_refresh: bool,
     pub profile_refresh_minutes: u32,
     pub inventory_json_path: String,
@@ -142,7 +140,6 @@ impl Default for Settings {
             port: 8642,
             platform: Platform::Pc,
             ee_log_path: String::new(),
-            account_id: String::new(),
             profile_auto_refresh: false,
             profile_refresh_minutes: 30,
             inventory_json_path: String::new(),

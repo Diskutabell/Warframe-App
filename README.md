@@ -1,9 +1,10 @@
 # Warframe App
 
-A Warframe companion for Linux. It tracks what you still need for mastery and prime sets, values
-your relics and names the best one to crack in the fissures open right now, shows the world
-timers and warframe.market prices, and puts overlays over the game: the fissure reward screen
-priced the moment it opens, and riven cards graded on a key press.
+A Warframe companion for Linux. It tracks what you still need for mastery and prime sets, follows
+your syndicate standing and what is left of today's limits, values your relics and names the best
+one to crack in the fissures open right now, shows the world timers and warframe.market prices, and
+puts overlays over the game: the fissure reward screen priced the moment it opens, and riven cards
+graded on a key press. Several accounts on one machine are kept apart.
 
 It is one native program written in Rust: a GTK window with the app's interface, and in-game
 overlays drawn by the desktop compositor. No Overwolf, no Wine, no browser tab. Game memory is
@@ -21,6 +22,13 @@ only read if you switch that on.
   pick is outlined. Reads the screen in about 1.3 s.
 - **Riven grades** - press a key with a riven card on screen and a panel beside it grades every
   stat against the weapon's disposition, and says so when a value cannot be right.
+- **Standing** - every syndicate's rank and how far into it you are, what the next rank-up costs
+  (with the items you hold), how much standing each daily pool still allows today and when it
+  resets, medallions and other hand-ins you hold, a warning when a maxed syndicate is full, your
+  Nightwave rank, and what each syndicate's standing buys ranked by platinum per 1,000 standing.
+- **Several accounts** - every account that logs in on the machine gets its own profile,
+  inventory, hand-set counts, pins and reward history. The window follows the game when it logs
+  in to another account; the switcher at the top of the sidebar shows any of them.
 - **Mastery** - everything that gives mastery, filtered by status, category, rank, primes, vaulted
   or ready to build, with the parts you hold and where to farm the rest.
 - **Prime sets and relics** - each set's parts and price; every relic's chance-weighted platinum
@@ -106,11 +114,13 @@ sed "s|/path/to/warframeproject|$PWD|" warframeproject.desktop > ~/.local/share/
 | Relics | Your relics with their value, needed drops and which can be cracked now |
 | Fissures | Live fissures with the best relic you own for each; the bell watches a tier and mission |
 | World | Cycles, vendors, rotations and reset timers |
+| Standing | Syndicate ranks, rank-up costs, today's limits, hand-ins; a syndicate opens with its offerings |
 | Foundry | What is building, and everything you could build from what you hold |
 | Market | Spare prime parts in platinum and ducats; a price check |
 | Settings | Sources, memory scan, notifications, overlays, hotkeys, files |
 
-**Ctrl+K** (or `/`) searches items, parts, relics and pages; **1-9** switch pages; **Esc** closes.
+**Ctrl+K** (or `/`) searches items, parts, relics, syndicates and pages; **1-9** and **0** switch
+pages; **Esc** closes.
 The side panel of an item is also where you correct a count, mark an item as mastered by hand, or
 pin it to the Overview with the star.
 
@@ -147,20 +157,34 @@ your IP temporarily blocked from logging into the game.
 Profile requests are limited to one every 5 minutes, plus one when the app starts and the saved
 profile is older than the refresh interval.
 
+### Several accounts
+
+Each name the game logs in with (`Logged in <name>` in `EE.log`) is an account of its own, with
+its own id, profile, inventory, counts, pins and reward history. Link each account's id once, in
+Settings → Accounts. When the game logs in to an account, the window shows it; the switcher at the
+top of the sidebar shows any other. What the game produces - the inventory read from memory, reward
+screens, the rank badge, ids in the log - always goes to the account that is logged in.
+
+The game can hold the previous account's inventory in memory after you log out and in with
+another one. A memory read is therefore filed by its mastery XP, which differs between any two
+accounts: a copy that belongs to another account is never filed under the one logged in. An
+imported inventory file is checked the same way. A profile is filed under the account whose name
+it carries, so an id linked to the wrong account moves to the right one.
+
 ## Data sources
 
 | Source | What it gives | How |
 |---|---|---|
 | [WFCD warframe-items](https://github.com/WFCD/warframe-items) | Items, prime parts, relics, drop tables | Downloaded and cached; rechecked daily |
 | `EE.log` | Your name and mastery rank badge, when the reward screen opens, when a mission ends | A plain read of the game's own log |
-| DE public profile | Mastery XP per item, completed star chart nodes, intrinsics, mastery rank | What the in-game profile screen shows other players |
-| [warframe-public-export-plus](https://github.com/calamity-inc/warframe-public-export-plus) | The mastery XP of each star chart node | Downloaded and cached; rechecked daily |
+| DE public profile | Mastery XP per item, completed star chart nodes, intrinsics, mastery rank, syndicate standing and today's limits | What the in-game profile screen shows other players |
+| [warframe-public-export-plus](https://github.com/calamity-inc/warframe-public-export-plus) | The mastery XP of each star chart node; every syndicate's ranks, rank-up costs, daily pools, offerings and medallions, with their English names | Downloaded and cached; rechecked daily |
 | [browse.wf](https://browse.wf) | The game's own interface art | Fetched once per picture, scaled and cached |
 | [warframe.market](https://warframe.market) | Prices, ducat values, item art | Public API, at most 3 requests a second |
 | [api.warframestat.us](https://api.warframestat.us) | Fissures, world timers, traded riven prices | Public API, one fetch a minute |
 | Reward screen OCR | The items on the fissure reward screen | Screenshot, tesseract, fuzzy matching |
 | Manual tracking | Part and relic counts, "mark as mastered" | The +/- buttons and the button in an item's panel |
-| `inventory.json` | The exact inventory: parts, relics, currencies, foundry | A file you import, or one the app watches |
+| `inventory.json` | The exact inventory: parts, relics, currencies, foundry, medallions, standing | A file you import, or one the app watches |
 | Memory scan (off) | The same, read from the running game | See below |
 
 Your **mastery rank** comes from your profile, or from `EE.log`, where the squad overlay loads your
@@ -168,6 +192,15 @@ rank badge (one badge per three ranks above rank 0, so the log alone gives a ban
 Your **mastery XP** is the total the in-game profile shows: gear, star chart, Steel Path and
 intrinsics. The Overview shows it with the rank that much XP is enough for, which can be above the
 rank you hold, since every rank needs its test.
+
+## Syndicate standing
+
+Standing comes from your profile and, when the memory scan is on, from the inventory read after
+each mission; the newer of the two wins. A syndicate's standing counts up over all its ranks, and
+each rank has a range: the Standing page shows how far into its rank you are, the way the game does.
+Every limit pool (the six faction syndicates share one; the open-world and other syndicates have
+their own) allows 16,000 + 500 × your mastery rank per day, and refills at 00:00 UTC. Focus has its
+own limit, 250,000 + 5,000 × your mastery rank.
 
 ## Memory scan (optional)
 
@@ -204,7 +237,7 @@ instead of printing a confident wrong grade.
 | What | Where |
 |---|---|
 | Settings | `~/.config/warframeproject/settings.json` |
-| Account, profile, inventory, manual counts, reward history | `~/.local/share/warframeproject/` |
+| Accounts (`accounts.json`), each account's profile, inventory and counts (`accounts/<name>/`), reward history | `~/.local/share/warframeproject/` |
 | Game data, prices, art, fonts | `~/.cache/warframeproject/` |
 | The last 12 reward and riven scans | `~/.cache/warframeproject/frames/` (screenshot, OCR text, result) |
 
@@ -236,7 +269,9 @@ embed it, debug builds read it from disk, so a reload shows an edit.
 | Path | Role |
 |---|---|
 | `src/main.rs` | Command line, startup, single instance |
-| `src/state.rs` | Merges the sources, account linking, scans, notifications |
+| `src/state.rs` | Merges the sources, follows the logged-in account, scans, notifications |
+| `src/accounts.rs` | The accounts on the machine, their folders, telling captures apart by mastery XP |
+| `src/standing.rs` | Syndicates from the game's export, rank progress, daily limits, offerings |
 | `src/views.rs` | Everything the interface shows, computed from a snapshot |
 | `src/server.rs` | The loopback HTTP API and the embedded interface |
 | `src/eelog.rs` | Finding and following `EE.log` |

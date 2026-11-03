@@ -19,8 +19,12 @@ pub const IMG_URL: &str = "https://cdn.warframestat.us/img/";
 /// The star chart, exported from the game's own files: the only source found that has the mastery
 /// XP of each node (`masteryExp`). WFCD has no node data. Its nodes add up to 14,569, the total
 /// the wiki gives for all missions (checked 2026-10-10).
+const EXPORT_URL: &str = "https://raw.githubusercontent.com/calamity-inc/warframe-public-export-plus/senpai/";
 const REGIONS_URL: &str =
     "https://raw.githubusercontent.com/calamity-inc/warframe-public-export-plus/senpai/ExportRegions.json";
+/// Syndicates from the same export: ranks, their standing ranges and costs, daily pools,
+/// offerings and medallions (`standing.rs`). Names are keys into `dict.en.json` (3.9 MB).
+const SYNDICATE_FILES: [&str; 2] = ["ExportSyndicates.json", "dict.en.json"];
 /// A junction gives 1,000 mastery points (wiki.warframe.com/w/Mastery_Rank); the export lists
 /// every junction with 0.
 const JUNCTION_XP: i64 = 1000;
@@ -174,6 +178,8 @@ pub struct Catalog {
     /// Star chart node tag ("SolNode27") -> the mastery XP its first completion gives. Empty
     /// until the region export has been downloaded once.
     pub node_xp: HashMap<String, i64>,
+    /// Every syndicate with its ranks and offerings. Empty until the export has been downloaded.
+    pub syndicates: crate::standing::Syndicates,
     pub loaded_at: Option<f64>,
 }
 
@@ -185,13 +191,18 @@ pub fn image_url(image: Option<&str>) -> Option<String> {
 pub fn load(force: bool) -> Result<Catalog> {
     let names: Vec<&str> = MASTERY_FILES.iter().chain(EXTRA_FILES.iter()).copied().collect();
     let regions_path = config::dirs().cache.join("regions.json");
-    let (raw, regions): (Vec<Result<Value>>, Result<Value>) = std::thread::scope(|s| {
+    let (raw, regions, syndicates): (Vec<Result<Value>>, Result<Value>, Vec<Result<Value>>) = std::thread::scope(|s| {
         let jobs: Vec<_> = names.iter().map(|n| s.spawn(move || download(n, force))).collect();
         let regions = s.spawn(|| download_to(REGIONS_URL, &regions_path, force));
+        let syndicates: Vec<_> = SYNDICATE_FILES
+            .iter()
+            .map(|f| s.spawn(move || download_to(&format!("{EXPORT_URL}{f}"), &config::dirs().cache.join(f), force)))
+            .collect();
         let panicked = || Err(anyhow!("download thread panicked"));
         (
             jobs.into_iter().map(|j| j.join().unwrap_or_else(|_| panicked())).collect(),
             regions.join().unwrap_or_else(|_| panicked()),
+            syndicates.into_iter().map(|j| j.join().unwrap_or_else(|_| panicked())).collect(),
         )
     });
     let mut files = IndexMap::new();
@@ -203,6 +214,14 @@ pub fn load(force: bool) -> Result<Catalog> {
     match regions {
         Ok(raw) => catalog.node_xp = node_xp_table(&raw),
         Err(e) => eprintln!("star chart data unavailable, mastery will leave it out: {e:#}"),
+    }
+    // Standing works without it too: the page then says the syndicate data is missing.
+    match &syndicates[..] {
+        [Ok(export), Ok(dict)] => catalog.syndicates = crate::standing::build(export, dict),
+        _ => {
+            let why: Vec<String> = syndicates.iter().filter_map(|r| r.as_ref().err()).map(|e| format!("{e:#}")).collect();
+            eprintln!("syndicate data unavailable: {}", why.join("; "));
+        }
     }
     catalog.loaded_at = Some(now());
     Ok(catalog)
@@ -761,6 +780,7 @@ pub fn build(raw: &IndexMap<String, Value>) -> Catalog {
         crafts,
         art,
         node_xp: HashMap::new(),
+        syndicates: crate::standing::Syndicates::default(),
         loaded_at: None,
     }
 }

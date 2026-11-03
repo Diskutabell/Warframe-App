@@ -11,7 +11,7 @@ use crate::difflib::py_round;
 use crate::gamedata::{self, Catalog, ComponentKind, Item, Relic};
 use crate::market::Market;
 use crate::sources::{Inventory, Profile, Progress};
-use crate::state::Manual;
+use crate::accounts::Manual;
 
 pub const ERAS: [&str; 5] = ["Lith", "Meso", "Neo", "Axi", "Requiem"];
 
@@ -681,7 +681,7 @@ impl View {
         rows.into_iter().map(|(_, r)| r).collect()
     }
 
-    /// Items, parts and relics whose names match `q`, best matches first.
+    /// Items, parts, relics and syndicates whose names match `q`, best matches first.
     pub fn find(&self, q: &str) -> Value {
         let q = q.trim().to_lowercase();
         if q.chars().count() < 2 {
@@ -725,6 +725,16 @@ impl View {
                     json!({"kind": "relic", "key": base, "name": format!("{base} Relic"),
                     "sub": if rel.vaulted { "Relic · vaulted" } else { "Relic" },
                     "image": gamedata::image_url(rel.image.as_deref()), "have": total}),
+                ));
+            }
+        }
+        for s in self.cat.syndicates.list.values().filter(|s| s.kind != crate::standing::Kind::Nightwave) {
+            if let Some(rank) = match_rank(&s.name, &q, &tokens) {
+                hits.push((
+                    rank,
+                    s.name.len(),
+                    json!({"kind": "syndicate", "key": format!("syndicate:{}", s.tag), "name": s.name,
+                    "sub": "Syndicate · standing and offerings", "image": s.icon}),
                 ));
             }
         }

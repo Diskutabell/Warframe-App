@@ -1,11 +1,12 @@
 // Settings: where the data comes from, and how the app behaves. Every control saves on change.
 
 import { $, act, ago, api, countdown, esc, fmt, pickJson, toast } from "../lib.js";
+import { gimg, ICON, mrBadge } from "../game.js";
 
 let s = {};
 
 const dot = (cls) => `<span class="dot ${cls}"></span>`;
-const SOURCE = { saved: "linked earlier", "EE.log": "read from EE.log", "entered by you": "entered by you", Settings: "set in Settings" };
+const SOURCE = { saved: "linked earlier", "EE.log": "read from EE.log", "entered by you": "entered by you", Settings: "set in Settings", "DE profile": "from its profile" };
 const desc = (d) => (d ? `<div class="d">${d}</div>` : "");
 const setting = (label, d, control) => `<div class="setting"><div><div class="l">${label}</div>${desc(d)}</div><div>${control}</div></div>`;
 
@@ -29,21 +30,50 @@ function sources(S) {
   const row = (cls, title, detail, actions = "") => `<div class="list-row">${dot(cls)}<div class="main"><div class="t">${title}</div><div class="s" style="white-space:normal">${detail}</div></div>${actions}</div>`;
   return `<div class="list">
     ${row(src.eeLog.path ? "on" : "warn", "Game log", src.eeLog.path ? `<code>${esc(src.eeLog.path)}</code>${src.eeLog.active ? " · game running" : ""}` : src.eeLog.searching ? "Searching…" : "Not found - set its path under Files.")}
-    ${row(acc.id ? "on" : "warn", "Account", acc.id ? `${esc(acc.name || "")} <code>${esc(acc.id)}</code> · ${esc(SOURCE[acc.source] || acc.source || "")}` : "Not linked yet. The id shows up in EE.log after a relic mission in a squad, or enter it below.")}
-    ${row(src.profile.fetched ? "on" : src.profile.error ? "warn" : "", "Public profile",
+    ${row(src.profile.fetched ? "on" : src.profile.error ? "warn" : "", `Public profile${acc.name ? ` <span class="muted" style="font-weight:400">· ${esc(acc.name)}</span>` : ""}`,
       (src.profile.fetched ? `${fmt(src.profile.items)} items with mastery · ${ago(src.profile.fetched)}` : "Not loaded") + (src.profile.error ? `<br><span class="warn-text">${esc(src.profile.error)}</span>` : ""),
       `<button data-act="profile" ${acc.id ? "" : "disabled"}>Refresh</button><button data-act="profileFile">Import file</button>`)}
     ${row(src.inventory.source ? "on" : "", "Inventory",
-      src.inventory.source ? `${fmt(src.inventory.stacks)} stacks · ${esc(src.inventory.source)} · ${ago(src.inventory.imported)}` : "None - parts, relics and currencies need one (memory scan or an inventory.json).",
+      src.inventory.source ? `${fmt(src.inventory.stacks)} stacks · ${esc(src.inventory.source)} · ${ago(src.inventory.imported)}` : "None - parts, relics, currencies and medallions need one (memory scan or an inventory.json).",
       `<button data-act="inventory">Import file</button>${src.inventory.source ? `<button data-act="forget" class="ghost">Forget</button>` : ""}`)}
     ${row(tools.tesseract && tools.screenshot ? "on" : "warn", "Screen reader",
       `${tools.tesseract ? "tesseract" : `<span class="warn-text">tesseract missing</span>`} · ${tools.screenshot ? esc(tools.screenshot) : `<span class="warn-text">no screenshot tool</span>`}`)}
     ${row(src.market.error ? "warn" : "on", "warframe.market", src.market.error ? esc(src.market.error) : `Live${src.market.queued ? ` · ${src.market.queued} prices queued` : ""}`)}
-  </div>
-  ${acc.evidence?.length ? `<div style="margin-top:12px"><div class="muted" style="font-size:13px;margin-bottom:6px">Account ids seen in EE.log</div>
-    ${acc.evidence.map((e) => `<div class="row" style="margin-bottom:6px"><code>${esc(e.id)}</code><button data-use="${esc(e.id)}">Link</button></div>`).join("")}</div>` : ""}
-  <div class="row" style="margin-top:12px"><input type="text" id="accId" placeholder="Account id (24 characters, 0-9 a-f)" spellcheck="false" style="width:300px">
-    <button id="accLink">Link account</button></div>`;
+  </div>`;
+}
+
+// ------------------------------------------------------------------ accounts
+
+/** The account whose Forget button was pressed once, and when: a second press deletes it. */
+let forgetting = { key: null, t: 0 };
+
+function accounts(S) {
+  const list = S.accounts || [];
+  const linkForm = (key) => `<div class="row" style="margin-top:8px"><input type="text" class="acc-id" data-for="${esc(key || "")}" placeholder="Account id (24 characters, 0-9 a-f)" spellcheck="false" style="width:300px">
+      <button data-link="${esc(key || "")}">Link</button></div>`;
+  if (!list.length) {
+    return `<div class="empty"><b>No account yet</b>One is added when the game logs in. You can also enter your account id.</div>${linkForm(null)}`;
+  }
+  const confirming = (key) => forgetting.key === key && Date.now() - forgetting.t < 5000;
+  const one = (a) => {
+    const badge = gimg(a.masteryRank == null ? ICON.mastery : mrBadge(a.masteryRankMax ?? a.masteryRank), 36);
+    const rank = a.masteryRank == null ? "MR unknown" : a.masteryRankMax != null && a.masteryRankMax !== a.masteryRank ? `MR ${a.masteryRank}-${a.masteryRankMax}` : `MR ${a.masteryRank}`;
+    const ids = (a.evidence || []).map((e) => `<div class="row" style="margin-top:6px" title="${esc(e.line)}"><code>${esc(e.id)}</code><button class="ghost" data-use="${esc(e.id)}" data-for="${esc(a.key)}">Link this id</button></div>`).join("");
+    return `<div class="acct-row ${a.active ? "on" : ""}">
+      <div class="row">${badge}
+        <div class="grow"><div class="t"><b>${esc(a.name)}</b> <span class="muted">${rank}</span>
+            ${a.active ? `<span class="pill gold">shown</span>` : ""}${a.playing ? `<span class="pill lotus">in game</span>` : ""}</div>
+          <div class="s">${a.id ? `<code>${esc(a.id)}</code> · ${esc(SOURCE[a.source] || a.source || "linked")}` : `<span class="warn-text">No account id yet</span>`}
+            · profile ${a.profile ? ago(a.profile) : "not loaded"} · inventory ${a.inventory ? ago(a.inventory) : "none"}</div>
+          ${a.profileError ? `<div class="s warn-text">${esc(a.profileError)}</div>` : ""}</div>
+        ${a.active ? "" : `<button data-show="${esc(a.key)}">Show</button>`}
+        <button class="${confirming(a.key) ? "danger" : "ghost"}" data-forget="${esc(a.key)}">${confirming(a.key) ? "Delete its data?" : "Forget"}</button></div>
+      ${a.id ? "" : linkForm(a.key)}
+      ${ids ? `<div class="muted" style="font-size:13px;margin-top:8px">Ids seen in EE.log while ${esc(a.name)} played:</div>${ids}` : ""}
+    </div>`;
+  };
+  return `<p class="muted" style="margin:0 0 10px;font-size:13.5px">Every account that logs in on this machine gets its own profile, inventory, counts and pins. The window follows the game: when it logs in to an account, that account is shown. Switch with the account button at the top of the sidebar.</p>
+    <div class="acct-list">${list.map(one).join("")}</div>`;
 }
 
 function memscan(S) {
@@ -74,6 +104,8 @@ export default {
     const tools = S.sources.tools || {};
     view.innerHTML = `<div class="page"><div class="page-head"><div><h1>Settings</h1><p>Changes save as you make them.</p></div></div>
     <div class="settings">
+      ${section("Accounts", `<div id="accounts">${accounts(S)}</div>`)}
+
       ${section("Sources", `<div id="sources">${sources(S)}</div>`)}
 
       ${section("Memory scan", `
@@ -159,18 +191,58 @@ export default {
     const test = $("#testOverlay");
     if (test) test.onclick = () => act("overlay/test");
     wireSources(view);
+    wireAccounts($("#accounts"));
   },
 
   onState(S) {
     if (!$("#memscan")) return;
     $("#memscan").innerHTML = memscan(S);
-    // Leave the account form alone while someone is typing in it.
-    if (document.activeElement?.id !== "accId") {
-      $("#sources").innerHTML = sources(S);
-      wireSources($("#sources"));
+    $("#sources").innerHTML = sources(S);
+    wireSources($("#sources"));
+    // Leave the account forms alone while someone is typing in one.
+    if (!document.activeElement?.classList.contains("acc-id")) {
+      $("#accounts").innerHTML = accounts(S);
+      wireAccounts($("#accounts"));
     }
   },
 };
+
+async function redrawAccounts() {
+  const S = await api("state").catch(() => null);
+  if (S && $("#accounts")) {
+    $("#accounts").innerHTML = accounts(S);
+    wireAccounts($("#accounts"));
+  }
+}
+
+function wireAccounts(root) {
+  for (const b of root.querySelectorAll("[data-link]")) {
+    b.onclick = async () => {
+      const input = b.parentElement.querySelector(".acc-id");
+      const key = b.dataset.link || undefined;
+      if (await act("account/set", { id: input.value, key }, "Account linked")) redrawAccounts();
+    };
+  }
+  for (const b of root.querySelectorAll("[data-use]")) {
+    b.onclick = async () => { if (await act("account/set", { id: b.dataset.use, key: b.dataset.for }, "Account linked")) redrawAccounts(); };
+  }
+  for (const b of root.querySelectorAll("[data-show]")) {
+    b.onclick = async () => { if (await act("account/switch", { key: b.dataset.show })) window.dispatchEvent(new CustomEvent("wfp:account")); };
+  }
+  for (const b of root.querySelectorAll("[data-forget]")) {
+    b.onclick = async () => {
+      const key = b.dataset.forget;
+      if (forgetting.key !== key || Date.now() - forgetting.t > 5000) {
+        forgetting = { key, t: Date.now() };
+        b.textContent = "Delete its data?";
+        b.className = "danger";
+        return;
+      }
+      forgetting = { key: null, t: 0 };
+      if (await act("account/forget", { key }, "Account forgotten")) window.dispatchEvent(new CustomEvent("wfp:account"));
+    };
+  }
+}
 
 function wireSources(root) {
   const on = (sel, fn) => { const el = root.querySelector(sel); if (el) el.onclick = fn; };
@@ -178,6 +250,4 @@ function wireSources(root) {
   on("[data-act=profileFile]", async () => { const j = await pickJson(); if (j) act("profile/import", j, "Profile imported"); });
   on("[data-act=inventory]", async () => { const j = await pickJson(); if (j) act("inventory/import", j, "Inventory imported"); });
   on("[data-act=forget]", () => act("inventory/clear", {}, "Inventory forgotten"));
-  on("#accLink", () => act("account/set", { id: $("#accId").value }, "Account linked"));
-  for (const b of root.querySelectorAll("[data-use]")) b.onclick = () => act("account/set", { id: b.dataset.use }, "Account linked");
 }
