@@ -176,9 +176,10 @@ it carries, so an id linked to the wrong account moves to the right one.
 | Source | What it gives | How |
 |---|---|---|
 | [WFCD warframe-items](https://github.com/WFCD/warframe-items) | Items, prime parts, relics, drop tables | Downloaded and cached; rechecked daily |
+| [WFCD drop data](https://drops.warframestat.us) | DE's drop tables: the names the game prints for relic drops, and which relics still drop | Only while WFCD's relic file lacks its drops (since 2026-10-23); cached |
 | `EE.log` | Your name and mastery rank badge, when the reward screen opens, when a mission ends | A plain read of the game's own log |
 | DE public profile | Mastery XP per item, completed star chart nodes, intrinsics, mastery rank, syndicate standing and today's limits | What the in-game profile screen shows other players |
-| [warframe-public-export-plus](https://github.com/calamity-inc/warframe-public-export-plus) | The mastery XP of each star chart node; every syndicate's ranks, rank-up costs, daily pools, offerings and medallions, with their English names | Downloaded and cached; rechecked daily |
+| [warframe-public-export-plus](https://github.com/calamity-inc/warframe-public-export-plus) | The mastery XP of each star chart node; every syndicate's ranks, rank-up costs, daily pools, offerings and medallions, with their English names; each relic's drops | Downloaded and cached; rechecked daily |
 | [browse.wf](https://browse.wf) | The game's own interface art | Fetched once per picture, scaled and cached |
 | [warframe.market](https://warframe.market) | Prices, ducat values, item art | Public API, at most 3 requests a second |
 | [api.warframestat.us](https://api.warframestat.us) | Fissures, world timers, traded riven prices | Public API, one fetch a minute |
@@ -277,6 +278,7 @@ embed it, debug builds read it from disk, so a reload shows an edit.
 | `src/eelog.rs` | Finding and following `EE.log` |
 | `src/sources.rs`, `src/memscan.rs` | Profile and inventory parsing, the memory scan |
 | `src/gamedata.rs`, `src/market.rs`, `src/world.rs` | Game data, prices, world state |
+| `src/relics.rs` | Relic drops from the game's export when WFCD's relic file lacks them |
 | `src/ocr/` | Screenshots, image preprocessing, tesseract, the name matcher, riven parsing |
 | `src/rivens.rs` | Riven stats and grading |
 | `src/desktop/` | The GTK window and the overlays |
@@ -290,3 +292,11 @@ embed it, debug builds read it from disk, so a reload shows an edit.
 - The reward-screen reader is tuned for the default interface theme (names in light blue); other
   themes fall back to plain contrast and read less reliably.
 - The X11 overlay path has not been tested on an X11 session yet.
+
+## License
+
+[MIT](LICENSE). Use, change and share it however you like, as long as the copyright notice
+(Copyright (c) 2026 Diskutabell) and the license text stay with every copy.
+
+Warframe and its art are the property of Digital Extremes; this is a fan project, not affiliated
+with or endorsed by them.

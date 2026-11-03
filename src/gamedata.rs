@@ -25,6 +25,23 @@ const REGIONS_URL: &str =
 /// Syndicates from the same export: ranks, their standing ranges and costs, daily pools,
 /// offerings and medallions (`standing.rs`). Names are keys into `dict.en.json` (3.9 MB).
 const SYNDICATE_FILES: [&str; 2] = ["ExportSyndicates.json", "dict.en.json"];
+/// Relics and their reward tables from the same export, for when WFCD's relics come without their
+/// drops (`relics.rs`).
+const RELIC_EXPORTS: [&str; 2] = ["ExportRelics.json", "ExportRewards.json"];
+/// WFCD's copy of DE's drop tables: the names the game prints for relic drops, and every table a
+/// relic drops from today.
+const DROP_URL: &str = "https://drops.warframestat.us/data/";
+const DROP_TABLES: [&str; 9] = [
+    "relics",
+    "missionRewards",
+    "transientRewards",
+    "cetusBountyRewards",
+    "solarisBountyRewards",
+    "deimosRewards",
+    "zarimanRewards",
+    "entratiLabRewards",
+    "hexRewards",
+];
 /// A junction gives 1,000 mastery points (wiki.warframe.com/w/Mastery_Rank); the export lists
 /// every junction with 0.
 const JUNCTION_XP: i64 = 1000;
@@ -209,6 +226,9 @@ pub fn load(force: bool) -> Result<Catalog> {
     for (name, data) in names.into_iter().zip(raw) {
         files.insert(name.to_string(), data.with_context(|| format!("Could not download game data ({name})"))?);
     }
+    if files.get("Relics").is_some_and(crate::relics::lacks_rewards) {
+        repair_relics(&mut files, force);
+    }
     let mut catalog = build(&files);
     // The app works without the star chart: only the mastery total is then short of it.
     match regions {
@@ -225,6 +245,43 @@ pub fn load(force: bool) -> Result<Catalog> {
     }
     catalog.loaded_at = Some(now());
     Ok(catalog)
+}
+
+/// Fills in the drop tables WFCD's relics lack, from the game's export and DE's drop tables (see
+/// `relics.rs`). Every source is downloaded and cached like the WFCD files; without the export the
+/// relics stay empty, without the drop tables the names fall back to the ids' words and "vaulted"
+/// to the export's own dates.
+fn repair_relics(files: &mut IndexMap<String, Value>, force: bool) {
+    let cache = &config::dirs().cache;
+    let (exports, drops): (Vec<Result<Value>>, Vec<Result<Value>>) = std::thread::scope(|s| {
+        let exports: Vec<_> = RELIC_EXPORTS
+            .iter()
+            .map(|f| s.spawn(move || download_to(&format!("{EXPORT_URL}{f}"), &cache.join(f), force)))
+            .collect();
+        let drops: Vec<_> = DROP_TABLES
+            .iter()
+            .map(|t| {
+                s.spawn(move || download_to(&format!("{DROP_URL}{t}.json"), &cache.join(format!("drops_{t}.json")), force))
+            })
+            .collect();
+        let panicked = || Err(anyhow!("download thread panicked"));
+        (
+            exports.into_iter().map(|j| j.join().unwrap_or_else(|_| panicked())).collect(),
+            drops.into_iter().map(|j| j.join().unwrap_or_else(|_| panicked())).collect(),
+        )
+    });
+    let [Ok(export_relics), Ok(export_rewards)] = &exports[..] else {
+        eprintln!("WFCD's relics have no drop tables and the game's export could not be read: relics stay empty");
+        return;
+    };
+    let mut drops = drops.into_iter();
+    let names = drops.next().and_then(Result::ok);
+    let tables: Vec<Value> = drops.filter_map(Result::ok).collect();
+    let dropping = crate::relics::dropping(&tables);
+    if let Some(relics) = files.get_mut("Relics") {
+        let filled = crate::relics::patch(relics, export_relics, export_rewards, names.as_ref(), Some(&dropping));
+        eprintln!("WFCD's relics had no drop tables: {filled} filled in from the game's export ({} relics drop today)", dropping.len());
+    }
 }
 
 /// Node tag -> mastery XP, for the nodes that give any.

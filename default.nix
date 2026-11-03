@@ -40,6 +40,7 @@ pkgs.rustPlatform.buildRustPackage {
   meta = {
     description = cargo.package.description;
     mainProgram = "warframeproject";
+    license = pkgs.lib.licenses.mit;
     platforms = pkgs.lib.platforms.linux;
   };
 }

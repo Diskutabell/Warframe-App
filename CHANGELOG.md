@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.1 - 2026-11-03
+
+### Fixed
+
+- **Relics without drops.** Since WFCD's data update of 2026-10-23 its relic file lists every relic
+  without its rewards and without the vaulted flag. Relic values read 0p, "Crack now" and the farm
+  hints had nothing to go on, every relic counted as vaulted, and the reward-screen reader no longer
+  knew the names of prime parts (a real screen from before read "Forma Blueprint" alone instead of
+  "Forma Blueprint" and "Orthos Prime Blueprint"). The drops now come from the game's own export, with
+  the names the game prints from DE's drop tables; a relic is vaulted when no drop table names it
+  today. The app does this only while WFCD's file is incomplete. Real reward screens saved before the
+  break read exactly as they did then.
+
+### Added
+
+- The project is licensed under the MIT license: use it, change it and share it, keeping the
+  copyright notice.
+
 ## 0.3.0 - 2026-11-03
 
 Syndicate standing, and two accounts on one machine kept apart.

@@ -19,6 +19,7 @@ mod net;
 mod notifier;
 mod ocr;
 mod process;
+mod relics;
 mod rivens;
 mod server;
 mod sources;
