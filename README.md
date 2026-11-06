@@ -196,7 +196,7 @@ Nothing else is sent anywhere.
 | "Port 8642 is in use" | Change `"port"` in settings.json or pass `--port`, then install the hotkeys again. |
 | No account detected | Play a relic mission in a squad (not as host), or paste your id in Settings. |
 | Windows: no overlay, or the scan reads nothing | Switch the game to borderless fullscreen. Exclusive fullscreen hides everything else and screenshots of it are black. |
-| Windows: "tesseract missing" | The built-in copy could not be unpacked (Settings shows why). Restart the app, or install tesseract with `winget install UB-Mannheim.TesseractOCR`. |
+| Windows: "tesseract missing" | The built-in copy could not be unpacked (the Overview's activity list says why). Restart the app, or install tesseract with `winget install UB-Mannheim.TesseractOCR`. |
 
 ## Development
 
