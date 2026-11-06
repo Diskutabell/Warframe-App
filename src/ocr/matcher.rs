@@ -1,7 +1,7 @@
 //! Turning tesseract's words into reward names.
 //!
-//! Most rules below exist because some reward screen was misread without them. It is a port of
-//! the Python matcher (thresholds, windows, suppression and tie-breaks).
+//! Most rules below exist because some reward screen was misread without them. The thresholds
+//! belong to difflib's similarity score (`difflib.rs`); another measure would move all of them.
 
 use std::collections::{BTreeSet, HashSet};
 
@@ -348,7 +348,6 @@ mod tests {
             .collect();
         let (found, _) = pick_rewards(&[words], &n);
         let got: Vec<(&str, f64)> = found.iter().map(|m| (m.name.as_str(), m.score)).collect();
-        // The scores the Python matcher gives for the same input.
         assert_eq!(
             got,
             [

@@ -34,13 +34,18 @@ pub fn prepare_environment(_settings: &Settings) -> Backend {
 /// First thing in `main`: print to the terminal the app was started from, if any, and work in
 /// real pixels on scaled screens.
 pub fn process_setup() {
-    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_OUTPUT_HANDLE};
     use windows_sys::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
-    // SAFETY: both only change settings of this process, before any window exists.
+    // SAFETY: these only change settings of this process, before any window exists.
     unsafe {
         // The exe is a GUI program (no console window when started from the desktop), so
-        // `warframeproject trigger` in a terminal would print nothing without this.
-        AttachConsole(ATTACH_PARENT_PROCESS);
+        // `warframeproject trigger` in a terminal would print nothing without this. Output
+        // that is already redirected (to a file or pipe) is left where it goes.
+        let out = GetStdHandle(STD_OUTPUT_HANDLE);
+        if out.is_null() || out == INVALID_HANDLE_VALUE {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+        }
         // Without it Windows scales our windows itself and reports scaled coordinates, and the
         // overlays would land in the wrong place over the game.
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);

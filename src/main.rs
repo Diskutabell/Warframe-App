@@ -185,8 +185,16 @@ fn run(settings: config::Settings, browser: bool, headless: bool, offline: bool)
     state.start();
     server::serve(server, Arc::clone(&state), 6);
     #[cfg(windows)]
-    if let Err(e) = state.install_hotkeys() {
-        state.event(&format!("Hotkeys not registered: {e}"), "warn");
+    {
+        if let Err(e) = state.install_hotkeys() {
+            state.event(&format!("Hotkeys not registered: {e}"), "warn");
+        }
+        let me = Arc::clone(&state);
+        std::thread::Builder::new().name("unpack-ocr".into()).spawn(move || {
+            if let Err(e) = compositor::unpack_tesseract() {
+                me.event(&format!("The built-in OCR could not be unpacked: {e:#}"), "warn");
+            }
+        })?;
     }
     let url = format!("http://127.0.0.1:{port}/");
     println!("warframeproject {} engine on {url}", env!("CARGO_PKG_VERSION"));
@@ -258,6 +266,8 @@ fn riven(port: u16) -> Result<()> {
 
 /// Reads a saved frame offline: the regression check for the OCR.
 fn replay(frame: &std::path::Path, riven: bool) -> Result<()> {
+    #[cfg(windows)]
+    compositor::unpack_tesseract()?;
     let catalog = gamedata::load(false).context("the game data is needed to know what to look for")?;
     let image = ocr::screenshot::load(frame)?;
     let started = Instant::now();

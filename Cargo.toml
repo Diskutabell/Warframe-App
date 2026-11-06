@@ -1,6 +1,6 @@
 [package]
 name = "warframeproject"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Warframe companion for Linux and Windows: mastery, prime sets, relics, reward-screen prices and riven grades"
@@ -35,6 +35,8 @@ webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
 tao = "0.37"
 wry = "0.57"
 tauri-winrt-notification = "0.8"
+# Only for the `bundled-tesseract` feature: the OCR program packed into the exe.
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"], optional = true }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
@@ -47,6 +49,11 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[features]
+# The Windows release exe carries tesseract inside it, so nothing has to be installed. The release
+# workflow builds the zip (.github/bundle-tesseract.sh) and points WFP_TESSERACT_ZIP at it.
+bundled-tesseract = ["dep:zip"]
 
 [profile.release]
 lto = "thin"

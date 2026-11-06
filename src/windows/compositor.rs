@@ -37,16 +37,19 @@ pub struct Rect {
     pub height: i32,
 }
 
-/// A program on PATH (`tesseract` finds `tesseract.exe`), or in the folder its Windows installer
-/// uses, which it does not add to PATH.
+/// A program on PATH (`tesseract` finds `tesseract.exe`). For tesseract also the copy the exe
+/// carries, and the folder its Windows installer uses, which it does not add to PATH.
 pub fn which(program: &str) -> Option<PathBuf> {
     let exe = format!("{program}.exe");
     let mut dirs: Vec<PathBuf> =
         std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
     if program == "tesseract" {
-        // Next to our own exe first, so a bundled copy wins over an installed one.
-        if let Some(here) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("tesseract"))) {
-            dirs.insert(0, here);
+        #[cfg(feature = "bundled-tesseract")]
+        {
+            let bundled = bundled_tesseract_dir().join(&exe);
+            if bundled.is_file() {
+                return Some(bundled);
+            }
         }
         for var in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {
             if let Some(base) = std::env::var_os(var) {
@@ -56,6 +59,45 @@ pub fn which(program: &str) -> Option<PathBuf> {
         }
     }
     dirs.into_iter().map(|d| d.join(&exe)).find(|p| p.is_file())
+}
+
+// ------------------------------------------------------------------ the bundled tesseract
+
+/// The release exe carries tesseract (the MSYS2 build, the DLLs it loads and the English data) as
+/// a zip, made by `.github/bundle-tesseract.sh`.
+#[cfg(feature = "bundled-tesseract")]
+static TESSERACT_ZIP: &[u8] = include_bytes!(env!("WFP_TESSERACT_ZIP"));
+
+/// Where it is unpacked: one folder per app version, so an update brings its own copy.
+#[cfg(feature = "bundled-tesseract")]
+fn bundled_tesseract_dir() -> PathBuf {
+    crate::config::dirs().cache.join(format!("tesseract-{}", env!("CARGO_PKG_VERSION")))
+}
+
+/// Unpacks the tesseract the exe carries, once per version (a build without it has nothing to do).
+/// Runs on its own thread at startup: it takes a few seconds the first time.
+pub fn unpack_tesseract() -> Result<()> {
+    #[cfg(feature = "bundled-tesseract")]
+    {
+        let dir = bundled_tesseract_dir();
+        if dir.join("tesseract.exe").is_file() {
+            return Ok(());
+        }
+        let cache = &crate::config::dirs().cache;
+        // Unpacked under another name and then renamed, so the folder is there whole or not at all.
+        let partial = cache.join("tesseract-unpacking");
+        let _ = std::fs::remove_dir_all(&partial);
+        zip::ZipArchive::new(std::io::Cursor::new(TESSERACT_ZIP))?.extract(&partial)?;
+        std::fs::rename(&partial, &dir)?;
+        // The copies earlier versions unpacked.
+        for entry in std::fs::read_dir(cache)?.flatten() {
+            let old = entry.file_name().to_string_lossy().starts_with("tesseract-") && entry.path() != dir;
+            if old {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+    Ok(())
 }
 
 // ------------------------------------------------------------------ the game's window

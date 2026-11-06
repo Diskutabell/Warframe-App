@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.1 - 2026-11-06
+
+### Changed
+
+- **Nothing to install on Windows.** The exe carries the OCR program that reads the reward screen
+  and riven cards (Tesseract, with the same English model as the Linux version) and unpacks it on
+  the first start. The C runtime is built in too, so the exe also runs on a Windows without the
+  Visual C++ redistributable.
+- Every release comes with the Windows exe attached.
+
 ## 0.4.0 - 2026-11-06
 
 A Windows version, and the repository is public.

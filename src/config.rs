@@ -268,8 +268,8 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn old_python_settings_load_without_losing_known_fields() {
-        // A settings file of the Python version: two keys that no longer exist.
+    fn old_settings_load_without_losing_known_fields() {
+        // A settings file from an early version: two keys that no longer exist.
         let raw = json!({"port": 9000, "screenshot_command": "", "overlay_force_x11": true,
                          "memory_scan_enabled": true, "riven_overlay_x_percent": 60});
         let s = Settings::from_value(raw).unwrap();

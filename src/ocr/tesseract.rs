@@ -22,8 +22,15 @@ pub struct TsvWord {
 
 fn tesseract(img: &Gray, psm: u8, tsv: bool, timeout: Duration) -> Result<String> {
     // On Windows the installer puts it outside PATH; `which` knows where.
-    let mut cmd = Command::new(which("tesseract").unwrap_or_else(|| "tesseract".into()));
-    cmd.args(["stdin", "stdout", "--psm", &psm.to_string(), "-l", "eng"]);
+    let program = which("tesseract").unwrap_or_else(|| "tesseract".into());
+    let mut cmd = Command::new(&program);
+    cmd.args(["stdin", "stdout"]);
+    // A copy with its language data beside it (the one the Windows exe carries, or the Windows
+    // installer's) is told where that is rather than relying on where it was built to look.
+    if let Some(data) = program.parent().map(|dir| dir.join("tessdata")).filter(|d| d.is_dir()) {
+        cmd.arg("--tessdata-dir").arg(data);
+    }
+    cmd.args(["--psm", &psm.to_string(), "-l", "eng"]);
     if tsv {
         cmd.arg("tsv");
     }

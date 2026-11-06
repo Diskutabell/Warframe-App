@@ -1,9 +1,9 @@
 # Warframe App
 
-A Warframe companion app for Linux and Windows. It keeps track of what you still need for mastery and prime
-sets, your syndicate standing and daily limits, values your relics, shows world timers and
-warframe.market prices, and draws overlays over the game: prices on the fissure reward screen and
-grades for riven cards.
+A Warframe companion app for Linux and Windows. It keeps track of what you still need for mastery
+and prime sets, your syndicate standing and daily limits, values your relics, shows world timers
+and warframe.market prices, and draws overlays over the game: prices on the fissure reward screen
+and grades for riven cards.
 
 It's a single Rust program with its own window and overlays. No Overwolf, no browser tab. On
 Linux it runs natively next to the game (no Wine needed for the app itself).
@@ -52,15 +52,17 @@ Linux it runs natively next to the game (no Wine needed for the app itself).
 
 1. Download `warframeproject-windows-x64.exe` from the
    [latest release](https://github.com/Diskutabell/Warframe-App/releases/latest). It's a single
-   file, no installer. Windows SmartScreen will warn you because the exe isn't signed.
-2. For the reward screen and riven scans, install tesseract (the OCR program):
-   `winget install UB-Mannheim.TesseractOCR`. The app finds it in its default folder.
-3. Run the exe, then Warframe. Set the game to **borderless fullscreen** (or windowed): overlays
-   can't draw over exclusive fullscreen, and the screenshots come out black there.
+   file: no installer, nothing else to install. Windows SmartScreen will warn you because the exe
+   isn't signed ("More info" → "Run anyway").
+2. Run it, then Warframe. Set the game to **borderless fullscreen** (or windowed): overlays can't
+   draw over exclusive fullscreen, and screenshots of it come out black.
 
-It needs the Microsoft Edge WebView2 Runtime, which comes with Windows 10 and 11. F9 and F10 work
-as soon as the app runs; change them under Settings → Hotkeys. Settings live in
-`%APPDATA%\warframeproject`, everything else in `%LOCALAPPDATA%\warframeproject`.
+The exe carries everything it needs, including the OCR program
+([Tesseract](https://github.com/tesseract-ocr/tesseract), Apache 2.0) that reads the reward
+screen; the first start unpacks it, which takes a few seconds. The window uses the Microsoft Edge
+WebView2 Runtime that comes with Windows 10 and 11. F9 and F10 work as soon as the app runs;
+change them under Settings → Hotkeys. Settings live in `%APPDATA%\warframeproject`, everything
+else in `%LOCALAPPDATA%\warframeproject`.
 
 ## Linux requirements
 
@@ -194,7 +196,7 @@ Nothing else is sent anywhere.
 | "Port 8642 is in use" | Change `"port"` in settings.json or pass `--port`, then install the hotkeys again. |
 | No account detected | Play a relic mission in a squad (not as host), or paste your id in Settings. |
 | Windows: no overlay, or the scan reads nothing | Switch the game to borderless fullscreen. Exclusive fullscreen hides everything else and screenshots of it are black. |
-| Windows: "tesseract missing" | `winget install UB-Mannheim.TesseractOCR`, then restart the app. |
+| Windows: "tesseract missing" | The built-in copy could not be unpacked (Settings shows why). Restart the app, or install tesseract with `winget install UB-Mannheim.TesseractOCR`. |
 
 ## Development
 
@@ -204,10 +206,12 @@ cargo test
 cargo run -- --headless --offline --port 8650    # engine only, no network
 ```
 
-On Windows, `cargo build --release` with the MSVC toolchain is all it takes. The code that talks
-to the desktop is split per system: `src/compositor.rs` and `src/desktop/` on Linux,
-`src/windows/` on Windows (same module names, picked in `main.rs`). GitHub Actions builds and
-tests the Windows exe on every push and attaches it to each release.
+On Windows, `cargo build --release` with the MSVC toolchain builds the app; it then uses an
+installed tesseract. The release exe also carries one (`--features bundled-tesseract`, see
+`.github/workflows/windows.yml`). The code that talks to the desktop is split per system:
+`src/compositor.rs` and `src/desktop/` on Linux, `src/windows/` on Windows (same module names,
+picked in `main.rs`). GitHub Actions builds the Windows exe on every push, has it read a reward
+screen, and attaches it to each release.
 
 `--browser` opens the interface in your web browser instead of a window. The interface in `web/`
 is plain HTML, CSS and JavaScript modules with no build step; debug builds read it from disk, so a
@@ -219,4 +223,6 @@ session; the Windows version has passed its tests but hasn't been used with the 
 
 ## License
 
-[MIT](LICENSE). Warframe and its art belong to Digital Extremes.
+[MIT](LICENSE). Warframe and its art belong to Digital Extremes. The Windows exe includes
+Tesseract OCR and the libraries it needs, each under its own license; their license texts are
+unpacked with it (`licenses/` in its folder under `%LOCALAPPDATA%\warframeproject\cache`).

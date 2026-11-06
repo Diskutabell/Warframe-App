@@ -1,11 +1,12 @@
-# Builds the Windows exe on a real Windows machine. Every push to main checks that it still
-# builds and passes the tests; a version tag also attaches the exe to that release.
+# Builds the Windows exe on a real Windows machine. Every push to main checks that it still builds
+# and reads a reward screen; publishing a release attaches the exe to it.
 name: Windows
 
 on:
   push:
     branches: [main]
-    tags: ["v*"]
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -22,8 +23,47 @@ jobs:
       - name: Test
         run: cargo test
 
+      # The OCR program goes into the exe, so Windows users have nothing to install.
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: mingw-w64-ucrt-x86_64-tesseract-ocr zip
+      - name: Pack tesseract
+        shell: msys2 {0}
+        run: bash .github/bundle-tesseract.sh "$(cygpath -u "$GITHUB_WORKSPACE")/tesseract.zip"
+
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --features bundled-tesseract
+        env:
+          WFP_TESSERACT_ZIP: ${{ github.workspace }}\tesseract.zip
+          # The C runtime goes into the exe too, so it runs without the Visual C++ redistributable.
+          RUSTFLAGS: -C target-feature=+crt-static
+
+      # Draws four reward names the way the game lays them out and has the exe read them, with
+      # nothing but Windows itself on PATH: proves the packed OCR is complete.
+      - name: Read a reward screen with the exe
+        shell: powershell
+        run: |
+          Add-Type -AssemblyName System.Drawing
+          $names = "Braton Prime Receiver", "Paris Prime String", "Forma Blueprint", "Ash Prime Systems Blueprint"
+          $bmp = New-Object System.Drawing.Bitmap 1920, 1080
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.Clear([System.Drawing.Color]::FromArgb(11, 18, 24))
+          $font = New-Object System.Drawing.Font("Arial", 24, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)
+          $brush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(190, 220, 255))
+          $centred = New-Object System.Drawing.StringFormat
+          $centred.Alignment = [System.Drawing.StringAlignment]::Center
+          for ($i = 0; $i -lt 4; $i++) {
+            $g.DrawString($names[$i], $font, $brush, (New-Object System.Drawing.RectangleF (174 + 413 * $i), 410, 333, 120), $centred)
+          }
+          $bmp.Save("$PWD\frame.png", [System.Drawing.Imaging.ImageFormat]::Png)
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          $p = Start-Process -FilePath target\release\warframeproject.exe -ArgumentList "replay", "frame.png" `
+            -NoNewWindow -Wait -PassThru -RedirectStandardOutput out.txt -RedirectStandardError err.txt
+          Get-Content out.txt, err.txt
+          $read = @($names | Where-Object { (Get-Content out.txt -Raw) -match [regex]::Escape($_) }).Count
+          if ($p.ExitCode -ne 0 -or $read -lt 3) { throw "read $read of 4 names (exit code $($p.ExitCode))" }
 
       - name: Package
         shell: bash
@@ -35,12 +75,8 @@ jobs:
           path: warframeproject-windows-x64.exe
 
       - name: Attach to the release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          # The release is normally made by hand right after the tag is pushed; make one if not.
-          gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 ||
-            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "See CHANGELOG.md."
-          gh release upload "$GITHUB_REF_NAME" warframeproject-windows-x64.exe --clobber
+        run: gh release upload "$GITHUB_REF_NAME" warframeproject-windows-x64.exe --clobber
