@@ -70,6 +70,34 @@ pub struct RewardResult {
     pub error: Option<String>,
 }
 
+impl RewardResult {
+    /// What Settings' "show a test overlay" shows.
+    pub fn sample() -> RewardResult {
+        let item = |name: &str, price: Option<i64>, ducats: Option<i64>, have, needed, vaulted| RewardItem {
+            name: name.into(),
+            uid: String::new(),
+            score: 1.0,
+            slug: None,
+            have,
+            needed,
+            vaulted: Some(vaulted),
+            ducats,
+            price,
+        };
+        RewardResult {
+            t: crate::now(),
+            items: vec![
+                item("Ash Prime Systems Blueprint", Some(25), Some(65), 0, 1, false),
+                item("Braton Prime Barrel", Some(4), Some(15), 2, 0, false),
+                item("Forma Blueprint", None, None, 3, 0, false),
+                item("Fragor Prime Head", Some(6), Some(45), 0, 0, true),
+            ],
+            best: Some("Ash Prime Systems Blueprint".into()),
+            ..Default::default()
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct RivenResult {
     pub t: f64,
@@ -747,7 +775,8 @@ impl State {
                 let _ = crate::config::write_json(&file, &sections);
                 st.state = "ok";
                 st.detail = None;
-                st.last = Some(json!({"t": now(), "stacks": inv.counts.len(), "seconds": seconds, "account": game_name}));
+                st.last =
+                    Some(json!({"t": now(), "stacks": inv.counts.len(), "seconds": seconds, "account": game_name}));
             }
             Err(e) => {
                 st.state = "error";
@@ -789,7 +818,10 @@ impl State {
             if wait > 0.0 {
                 let name = lock(&self.data).name_of(&key);
                 self.event(
-                    &format!("Loading {name}'s profile in {} min (pausing for DE's rate limit)", (wait / 60.0) as i64 + 1),
+                    &format!(
+                        "Loading {name}'s profile in {} min (pausing for DE's rate limit)",
+                        (wait / 60.0) as i64 + 1
+                    ),
                     "info",
                 );
                 std::thread::sleep(Duration::from_secs_f64(wait + 1.0));
@@ -881,7 +913,8 @@ impl State {
                 if acc.id.is_some() && acc.id == id {
                     acc.id = None;
                     acc.source = None;
-                    acc.profile_error = Some(format!("The linked id belonged to {owner}. Pick or paste this account's own id."));
+                    acc.profile_error =
+                        Some(format!("The linked id belonged to {owner}. Pick or paste this account's own id."));
                 }
             }
             d.push_event(format!("That id belongs to {owner}, not {was}: moved it there"), "warn");
@@ -1221,11 +1254,13 @@ impl State {
             Some(a) => json!({"key": a.key, "id": a.id, "name": a.name, "source": a.source, "playing": playing(&a.key),
                               "logName": d.game().map(|g| g.name.clone()), "evidence": a.evidence,
                               "profileError": a.profile_error}),
-            None => json!({"key": null, "id": null, "name": null, "logName": d.game().map(|g| g.name.clone()), "evidence": []}),
+            None => {
+                json!({"key": null, "id": null, "name": null, "logName": d.game().map(|g| g.name.clone()), "evidence": []})
+            }
         };
         json!({
             "ready": v.cat.loaded_at.is_some(), "dataError": self.catalog_error(),
-            "version": env!("CARGO_PKG_VERSION"), "desktop": self.has_ui(),
+            "version": env!("CARGO_PKG_VERSION"), "os": std::env::consts::OS, "desktop": self.has_ui(),
             "account": account,
             "accounts": d.accounts.iter().map(|a| json!({
                 "key": a.key, "name": a.name, "id": a.id, "source": a.source,
@@ -1717,6 +1752,18 @@ impl State {
                "note": compositor::hotkey_note(flavour)})
     }
 
+    /// Windows: the app holds the keys itself (`compositor::register_hotkeys`), from startup on.
+    #[cfg(windows)]
+    pub fn install_hotkeys(&self) -> Result<Value> {
+        let (port, keys) = self.hotkey_keys();
+        let pairs: Vec<(&str, &str)> = keys.iter().map(|(k, p)| (k.as_str(), *p)).collect();
+        let lines = compositor::register_hotkeys(port, &pairs)?;
+        let names: Vec<&str> = pairs.iter().map(|(k, _)| *k).filter(|k| !k.trim().is_empty()).collect();
+        self.event(&format!("Hotkeys registered: {}", names.join(", ")), "info");
+        Ok(json!({"file": null, "sourced": false, "lines": lines}))
+    }
+
+    #[cfg(unix)]
     pub fn install_hotkeys(&self) -> Result<Value> {
         let flavour = compositor::detect_flavour();
         let (port, keys) = self.hotkey_keys();
@@ -1754,10 +1801,8 @@ mod tests {
 
     fn account(key: &str, xp: &[(&str, i64)]) -> Account {
         let mut acc = Account::new(key.into(), key.to_uppercase());
-        acc.profile = Some(Arc::new(Profile {
-            xp: xp.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
-            ..Profile::default()
-        }));
+        acc.profile =
+            Some(Arc::new(Profile { xp: xp.iter().map(|(k, v)| (k.to_string(), *v)).collect(), ..Profile::default() }));
         acc
     }
 
@@ -1767,7 +1812,11 @@ mod tests {
         let mine: Vec<(&str, i64)> = items.iter().map(|(k, v)| (k.as_str(), *v)).collect();
         let theirs: Vec<(&str, i64)> = items.iter().map(|(k, v)| (k.as_str(), *v + 5000)).collect();
         let d = Data {
-            accounts: vec![account("alpha", &mine), account("beta", &theirs), Account::new("gamma".into(), "Gamma".into())],
+            accounts: vec![
+                account("alpha", &mine),
+                account("beta", &theirs),
+                Account::new("gamma".into(), "Gamma".into()),
+            ],
             ..Data::default()
         };
         let xp = |pairs: &[(&str, i64)]| pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect::<IndexMap<_, _>>();

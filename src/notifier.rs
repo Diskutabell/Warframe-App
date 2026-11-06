@@ -3,16 +3,29 @@
 
 use std::collections::HashSet;
 
+#[cfg(unix)]
 use crate::compositor::which;
 use crate::{clock, now, world};
 
 /// Shows a desktop notification through `notify-send`, if it is installed.
+#[cfg(unix)]
 pub fn send(title: &str, body: &str) {
     if which("notify-send").is_some() {
         let _ = std::process::Command::new("notify-send")
             .args(["-a", "warframeproject", "-t", "15000", title, body])
             .stdin(std::process::Stdio::null())
             .spawn();
+    }
+}
+
+/// Shows a Windows toast notification.
+#[cfg(windows)]
+pub fn send(title: &str, body: &str) {
+    use tauri_winrt_notification::{Duration, Toast};
+    // Toasts need the id of an installed app to show under; PowerShell's is always there.
+    let toast = Toast::new(Toast::POWERSHELL_APP_ID).title(title).text1(body).duration(Duration::Long);
+    if let Err(e) = toast.show() {
+        eprintln!("could not show a notification: {e}");
     }
 }
 

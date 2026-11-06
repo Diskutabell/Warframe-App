@@ -285,7 +285,10 @@ mod tests {
         assert_eq!(w["circuit"][0]["choices"][1]["image"], Value::Null);
         assert_eq!(url(&w["darvo"]["image"]).as_deref(), Some("soma.png"));
         assert_eq!(url(&w["steelPath"]["image"]).as_deref(), Some("f.png"));
-        assert_eq!(w["alerts"][0]["rewards"][0], json!({"name": "Fieldron", "count": 2, "image": w["steelPath"]["image"]}));
+        assert_eq!(
+            w["alerts"][0]["rewards"][0],
+            json!({"name": "Fieldron", "count": 2, "image": w["steelPath"]["image"]})
+        );
         assert_eq!(w["alerts"][0]["rewards"][1]["name"], "10000 credits");
         assert_eq!(w["invasions"][0]["attackerImage"], Value::Null);
         assert_eq!(url(&w["invasions"][0]["defenderImage"]).as_deref(), Some("soma.png"));

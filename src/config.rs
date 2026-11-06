@@ -22,6 +22,7 @@ pub struct Dirs {
 
 /// XDG directories, created on first use. An empty or relative XDG variable is ignored, as the
 /// spec says, rather than turning into a directory relative to wherever the app was started.
+#[cfg(unix)]
 pub fn dirs() -> &'static Dirs {
     static DIRS: OnceLock<Dirs> = OnceLock::new();
     DIRS.get_or_init(|| {
@@ -40,6 +41,24 @@ pub fn dirs() -> &'static Dirs {
             data: xdg("XDG_DATA_HOME", ".local/share"),
             cache: xdg("XDG_CACHE_HOME", ".cache"),
         }
+    })
+}
+
+/// Windows: settings in %APPDATA% (they roam with the account), everything else in
+/// %LOCALAPPDATA%, with the cache in a folder of its own.
+#[cfg(windows)]
+pub fn dirs() -> &'static Dirs {
+    static DIRS: OnceLock<Dirs> = OnceLock::new();
+    DIRS.get_or_init(|| {
+        let known = |var: &str| {
+            std::env::var_os(var).map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(std::env::temp_dir)
+        };
+        let made = |dir: PathBuf| {
+            let _ = fs::create_dir_all(&dir);
+            dir
+        };
+        let local = known("LOCALAPPDATA").join(APP);
+        Dirs { config: made(known("APPDATA").join(APP)), cache: made(local.join("cache")), data: made(local) }
     })
 }
 

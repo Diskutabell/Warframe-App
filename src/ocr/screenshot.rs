@@ -1,20 +1,49 @@
 //! Taking a screenshot of the game.
 
 use std::fs;
+#[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::Command;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(unix)]
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+#[cfg(unix)]
+use anyhow::bail;
+use anyhow::{Context, Result};
 
 use super::image::Rgb;
+#[cfg(unix)]
 use crate::compositor::{self, which};
-use crate::config::{self, ScreenshotTool};
+#[cfg(unix)]
+use crate::config;
+use crate::config::ScreenshotTool;
+#[cfg(unix)]
 use crate::process;
 
+// Windows needs no screenshot program: the app copies the screen itself, and the tool setting
+// does not apply.
+#[cfg(windows)]
+pub fn program(_tool: ScreenshotTool) -> &'static str {
+    "built in"
+}
+
+#[cfg(windows)]
+pub fn resolve(_setting: ScreenshotTool) -> Option<ScreenshotTool> {
+    Some(ScreenshotTool::Auto)
+}
+
+#[cfg(windows)]
+pub fn capture(_setting: ScreenshotTool) -> Result<Rgb> {
+    crate::compositor::capture()
+}
+
+#[cfg(unix)]
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+#[cfg(unix)]
 /// Auto-detection order: wlroots-style compositors, KDE, GNOME, then X11 tools.
 const AUTO: [ScreenshotTool; 6] = [
     ScreenshotTool::Grim,
@@ -25,6 +54,7 @@ const AUTO: [ScreenshotTool; 6] = [
     ScreenshotTool::Import,
 ];
 
+#[cfg(unix)]
 pub fn program(tool: ScreenshotTool) -> &'static str {
     match tool {
         ScreenshotTool::Auto | ScreenshotTool::Grim => "grim",
@@ -36,6 +66,7 @@ pub fn program(tool: ScreenshotTool) -> &'static str {
     }
 }
 
+#[cfg(unix)]
 /// The tool a capture would use, if one is installed.
 pub fn resolve(setting: ScreenshotTool) -> Option<ScreenshotTool> {
     match setting {
@@ -44,6 +75,7 @@ pub fn resolve(setting: ScreenshotTool) -> Option<ScreenshotTool> {
     }
 }
 
+#[cfg(unix)]
 /// A file only this capture uses, in the app's own cache directory (not a guessable name in /tmp).
 fn private_file() -> PathBuf {
     static N: AtomicU64 = AtomicU64::new(0);
@@ -52,6 +84,7 @@ fn private_file() -> PathBuf {
     dir.join(format!("shot-{}-{}.png", std::process::id(), N.fetch_add(1, Ordering::Relaxed)))
 }
 
+#[cfg(unix)]
 pub fn capture(setting: ScreenshotTool) -> Result<Rgb> {
     let Some(tool) = resolve(setting) else {
         bail!(

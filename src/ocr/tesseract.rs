@@ -10,6 +10,7 @@ use anyhow::{Result, bail};
 
 use super::image::Gray;
 use super::matcher::Word;
+use crate::compositor::which;
 use crate::process;
 
 /// One word of tesseract's TSV output and its confidence (0-100).
@@ -20,7 +21,8 @@ pub struct TsvWord {
 }
 
 fn tesseract(img: &Gray, psm: u8, tsv: bool, timeout: Duration) -> Result<String> {
-    let mut cmd = Command::new("tesseract");
+    // On Windows the installer puts it outside PATH; `which` knows where.
+    let mut cmd = Command::new(which("tesseract").unwrap_or_else(|| "tesseract".into()));
     cmd.args(["stdin", "stdout", "--psm", &psm.to_string(), "-l", "eng"]);
     if tsv {
         cmd.arg("tsv");

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.0 - 2026-11-06
+
+A Windows version, and the repository is public.
+
+### Added
+
+- **Windows.** `warframeproject-windows-x64.exe` on the release page: the same app in a WebView2
+  window, with the reward strip and riven panel as always-on-top overlays that never take focus,
+  F9/F10 registered by the app itself, screenshots without any extra tool, the game log found in
+  `%LOCALAPPDATA%\Warframe`, Windows notifications, and the optional memory scan. It needs
+  tesseract for the scans (`winget install UB-Mannheim.TesseractOCR`) and the game in borderless
+  fullscreen. Built and tested on Windows by GitHub Actions; not yet used with the real game.
+- A disclaimer in the README: the code is mostly vibe coded, using it may be against Warframe's
+  terms of service, and you use it at your own risk.
+
+### Changed
+
+- Shorter, plainer README and code comments.
+
 ## 0.3.2 - 2026-11-03
 
 ### Fixed

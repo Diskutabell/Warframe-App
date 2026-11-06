@@ -31,7 +31,7 @@ pub fn detect_tools(setting: ScreenshotTool) -> Tools {
     Tools {
         tesseract: which("tesseract").is_some(),
         screenshot: screenshot::resolve(setting).map(screenshot::program),
-        notify_send: which("notify-send").is_some(),
+        notify_send: cfg!(windows) || which("notify-send").is_some(),
     }
 }
 

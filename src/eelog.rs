@@ -4,7 +4,6 @@
 use std::collections::VecDeque;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
@@ -13,7 +12,9 @@ use regex::Regex;
 
 use crate::now;
 
-pub const WF_APPID: &str = "230410";
+#[cfg(unix)]
+const WF_APPID: &str = "230410";
+#[cfg(unix)]
 const LOG_SUFFIX: &str = "pfx/drive_c/users/steamuser/AppData/Local/Warframe/EE.log";
 
 /// Explicit "this is me" lines (older builds). Current builds only print "Logged in <name>".
@@ -182,6 +183,7 @@ fn tail(s: &str, n: usize) -> String {
 
 // ------------------------------------------------------------------ finding the log
 
+#[cfg(unix)]
 const SKIP_DIRS: [&str; 12] = [
     "dosdevices",
     "windows",
@@ -197,6 +199,7 @@ const SKIP_DIRS: [&str; 12] = [
     "nix",
 ];
 
+#[cfg(unix)]
 fn warframe_logs_in_drive_c(drive_c: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for user in fs::read_dir(drive_c.join("users")).into_iter().flatten().flatten() {
@@ -210,6 +213,7 @@ fn warframe_logs_in_drive_c(drive_c: &Path) -> Vec<PathBuf> {
 
 /// Wine prefixes under `root`, searched without following symlinks: every prefix has
 /// dosdevices/z: -> /, so a symlink-following search would crawl the whole disk.
+#[cfg(unix)]
 fn prefix_logs(root: &Path) -> Vec<PathBuf> {
     const MAX_DEPTH: usize = 5;
     const MAX_DIRS: usize = 20_000;
@@ -235,8 +239,18 @@ fn prefix_logs(root: &Path) -> Vec<PathBuf> {
     found
 }
 
+#[cfg(unix)]
 static LIBRARY_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#""path"\s+"([^"]+)""#).unwrap());
 
+/// Windows: the game writes its log under the user's local app data.
+#[cfg(windows)]
+pub fn candidate_paths() -> Vec<PathBuf> {
+    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    local.map(|dir| dir.join("Warframe").join("EE.log")).into_iter().collect()
+}
+
+/// Linux: the log sits inside the Wine prefix Proton, Lutris or Heroic made for the game.
+#[cfg(unix)]
 pub fn candidate_paths() -> Vec<PathBuf> {
     let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
     let roots = [
@@ -282,7 +296,7 @@ static FOUND: Mutex<Found> = Mutex::new(Found { checked: f64::NEG_INFINITY, path
 fn search() {
     let newest = candidate_paths()
         .into_iter()
-        .filter_map(|p| fs::metadata(&p).ok().filter(|m| m.is_file()).map(|m| (m.mtime(), p)))
+        .filter_map(|p| fs::metadata(&p).ok().filter(|m| m.is_file()).and_then(|m| Some((m.modified().ok()?, p))))
         .max_by_key(|(t, _)| *t)
         .map(|(_, p)| p);
     let mut f = FOUND.lock().unwrap_or_else(|e| e.into_inner());
@@ -307,6 +321,18 @@ pub fn searching() -> bool {
 }
 
 // ------------------------------------------------------------------ following the log
+
+/// Something that changes when the game deletes its log and writes a new one: the inode on
+/// Linux, the creation time on Windows (which has no inode numbers in std).
+#[cfg(unix)]
+fn file_id(meta: &fs::Metadata) -> u64 {
+    std::os::unix::fs::MetadataExt::ino(meta)
+}
+
+#[cfg(windows)]
+fn file_id(meta: &fs::Metadata) -> u64 {
+    std::os::windows::fs::MetadataExt::creation_time(meta)
+}
 
 pub enum LogEvent {
     /// The player name from a "Logged in" or rename line; true when the line was just written,
@@ -426,14 +452,14 @@ impl LogWatcher {
                 self.replay(&path);
                 let meta = fs::metadata(&path).ok();
                 pos = meta.as_ref().map_or(0, |m| m.len()); // only follow new lines
-                inode = meta.as_ref().map_or(0, |m| m.ino());
+                inode = meta.as_ref().map_or(0, file_id);
                 lines.clear();
                 current = Some(path.clone());
             }
             if let Ok(meta) = fs::metadata(&path) {
-                if meta.ino() != inode || meta.len() < pos {
+                if file_id(&meta) != inode || meta.len() < pos {
                     // The game restarted and recreated its log.
-                    (pos, inode) = (0, meta.ino());
+                    (pos, inode) = (0, file_id(&meta));
                     lines.clear();
                 }
                 if meta.len() > pos {

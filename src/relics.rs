@@ -216,7 +216,8 @@ pub fn patch(
         if items.is_empty() {
             continue;
         }
-        let printed = names.get(&(era.to_string(), name.to_string())).map(|n| pair_names(&items, n)).unwrap_or_default();
+        let printed =
+            names.get(&(era.to_string(), name.to_string())).map(|n| pair_names(&items, n)).unwrap_or_default();
         let rewards: Vec<Value> = items
             .iter()
             .map(|(id, rarity)| {
@@ -287,7 +288,13 @@ mod tests {
         let intact = &wfcd[0];
         assert_eq!(intact["vaulted"], false);
         let by_name = |r: &Value, id: &str| {
-            r["rewards"].as_array().unwrap().iter().find(|x| x["item"]["uniqueName"].as_str().unwrap().ends_with(id)).cloned().unwrap()
+            r["rewards"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|x| x["item"]["uniqueName"].as_str().unwrap().ends_with(id))
+                .cloned()
+                .unwrap()
         };
         assert_eq!(by_name(intact, "PrimeCronusLongSwordBlueprint")["item"]["name"], "Dakra Prime Blueprint");
         assert_eq!(by_name(intact, "PrimeDaikyuLowerLimb")["item"]["name"], "Daikyu Prime Lower Limb");
@@ -310,15 +317,20 @@ mod tests {
 
     #[test]
     fn drop_tables_name_the_relics_that_still_drop() {
-        let tables = [json!({"missionRewards": {"Earth": {"Mantle": {"rewards": {"A": [{"itemName": "Lith A12 Relic"}]}}}}}),
-                      json!([{"bountyLevel": "x", "rewards": [{"itemName": "Requiem II Relic"}, {"itemName": "Relic Pack"}]}])];
+        let tables = [
+            json!({"missionRewards": {"Earth": {"Mantle": {"rewards": {"A": [{"itemName": "Lith A12 Relic"}]}}}}}),
+            json!([{"bountyLevel": "x", "rewards": [{"itemName": "Requiem II Relic"}, {"itemName": "Relic Pack"}]}]),
+        ];
         let set = dropping(&tables);
         assert_eq!(set, HashSet::from(["Lith A12".to_string(), "Requiem II".to_string()]));
     }
 
     #[test]
     fn words_split_ids_and_names_alike() {
-        assert_eq!(words("/Lotus/Types/Recipes/Weapons/WeaponParts/PrimeDaikyuLowerLimb"), words("Daikyu Prime Lower Limb"));
+        assert_eq!(
+            words("/Lotus/Types/Recipes/Weapons/WeaponParts/PrimeDaikyuLowerLimb"),
+            words("Daikyu Prime Lower Limb")
+        );
         assert_eq!(words("Ack & Brunt"), words("AckAndBrunt"));
         assert!(likeness("/X/XakuPrimeSystemsBlueprint", "Xaku Prime Systems Blueprint") > 0.99);
     }

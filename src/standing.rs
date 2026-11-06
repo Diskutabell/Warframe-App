@@ -214,7 +214,8 @@ pub fn build(export: &Value, dict: &Value) -> Syndicates {
             .collect();
         let syndicate = Syndicate {
             tag: tag.clone(),
-            name: text(&s["name"]).unwrap_or_else(|| gamedata::camel_name(tag).trim_end_matches(" Syndicate").to_string()),
+            name: text(&s["name"])
+                .unwrap_or_else(|| gamedata::camel_name(tag).trim_end_matches(" Syndicate").to_string()),
             icon: s["icon"].as_str().map(|p| format!("{GAME_FILES}{p}")),
             colour: colour(&s["colour"]),
             kind,
@@ -264,7 +265,9 @@ pub fn progress(s: &Syndicate, a: Affiliation) -> Progress {
         return Progress { value: a.title.max(0), size: top, at_cap: false, full: false };
     }
     match s.rank(a.title) {
-        Some(r) if a.title < 0 => Progress { value: a.standing - r.max, size: r.max - r.min, at_cap: false, full: false },
+        Some(r) if a.title < 0 => {
+            Progress { value: a.standing - r.max, size: r.max - r.min, at_cap: false, full: false }
+        }
         Some(r) => {
             let full_rank = a.standing >= r.max;
             Progress {
@@ -457,10 +460,7 @@ pub fn detail(view: &View, tag: &str, mastery_rank: Option<i64>) -> Option<Value
             }
             let price = entry.and_then(|p| p.sell);
             let per_k = price.filter(|_| o.standing > 0).map(|p| p as f64 * 1000.0 / o.standing as f64);
-            let name = slug
-                .as_deref()
-                .and_then(|sl| view.market.name(sl))
-                .unwrap_or_else(|| view.cat.name_of(&o.uid));
+            let name = slug.as_deref().and_then(|sl| view.market.name(sl)).unwrap_or_else(|| view.cat.name_of(&o.uid));
             let image = view.market.image(slug.as_deref()).or_else(|| view.image_for(&o.uid));
             // Buyable now first, then the rest; within each, the most platinum per standing.
             let key = per_k.unwrap_or(-1.0) + if available { 1e9 } else { 0.0 };
@@ -525,9 +525,15 @@ mod tests {
     fn the_export_is_read_with_its_names() {
         let s = build(&export(), &dict());
         let tags: Vec<&str> = s.list.keys().map(String::as_str).collect();
-        assert_eq!(tags, ["SteelMeridianSyndicate", "CetusSyndicate", "KahlSyndicate", "RadioLegionIntermission16Syndicate"]);
+        assert_eq!(
+            tags,
+            ["SteelMeridianSyndicate", "CetusSyndicate", "KahlSyndicate", "RadioLegionIntermission16Syndicate"]
+        );
         let sm = &s.list["SteelMeridianSyndicate"];
-        assert_eq!((sm.name.as_str(), sm.kind.clone(), sm.pool.as_deref()), ("Steel Meridian", Kind::Faction, Some("DailyAffiliation")));
+        assert_eq!(
+            (sm.name.as_str(), sm.kind.clone(), sm.pool.as_deref()),
+            ("Steel Meridian", Kind::Faction, Some("DailyAffiliation"))
+        );
         assert_eq!(sm.colour.as_deref(), Some("#f39579"));
         assert_eq!(sm.ranks.first().map(|r| r.level), Some(-2));
         assert_eq!(sm.rank(5).map(|r| (r.name.as_str(), r.credits, r.items.len())), Some(("General", 500_000, 1)));
@@ -541,11 +547,20 @@ mod tests {
     fn pools_are_named_like_the_profile_names_them() {
         // Every bin of the export against the 14 pools a profile has.
         let pairs = [
-            ("NORMAL", "DailyAffiliation"), ("PVP", "DailyAffiliationPvp"), ("LIBRARY", "DailyAffiliationLibrary"),
-            ("CETUS", "DailyAffiliationCetus"), ("QUILLS", "DailyAffiliationQuills"), ("SOLARIS", "DailyAffiliationSolaris"),
-            ("VENTKIDS", "DailyAffiliationVentkids"), ("VOX", "DailyAffiliationVox"), ("ENTRATI", "DailyAffiliationEntrati"),
-            ("NECRALOID", "DailyAffiliationNecraloid"), ("ZARIMAN", "DailyAffiliationZariman"), ("KAHL", "DailyAffiliationKahl"),
-            ("CAVIA", "DailyAffiliationCavia"), ("HEX", "DailyAffiliationHex"),
+            ("NORMAL", "DailyAffiliation"),
+            ("PVP", "DailyAffiliationPvp"),
+            ("LIBRARY", "DailyAffiliationLibrary"),
+            ("CETUS", "DailyAffiliationCetus"),
+            ("QUILLS", "DailyAffiliationQuills"),
+            ("SOLARIS", "DailyAffiliationSolaris"),
+            ("VENTKIDS", "DailyAffiliationVentkids"),
+            ("VOX", "DailyAffiliationVox"),
+            ("ENTRATI", "DailyAffiliationEntrati"),
+            ("NECRALOID", "DailyAffiliationNecraloid"),
+            ("ZARIMAN", "DailyAffiliationZariman"),
+            ("KAHL", "DailyAffiliationKahl"),
+            ("CAVIA", "DailyAffiliationCavia"),
+            ("HEX", "DailyAffiliationHex"),
         ];
         for (bin, pool) in pairs {
             assert_eq!(pool_name(&format!("STANDING_LIMIT_BIN_{bin}")).as_deref(), Some(pool));
@@ -569,8 +584,14 @@ mod tests {
         assert_eq!(at(-71_000, -2), Progress { value: -44_000, size: 44_000, at_cap: false, full: false });
         // Kahl's Garrison and Nightcap count ranks in steps: no standing bar, no rank-up to buy.
         let kahl = &s.list["KahlSyndicate"];
-        assert_eq!(progress(kahl, Affiliation { standing: 5, title: 5 }), Progress { value: 5, size: 5, at_cap: false, full: false });
-        assert_eq!(progress(kahl, Affiliation { standing: 0, title: 0 }), Progress { value: 0, size: 5, at_cap: false, full: false });
+        assert_eq!(
+            progress(kahl, Affiliation { standing: 5, title: 5 }),
+            Progress { value: 5, size: 5, at_cap: false, full: false }
+        );
+        assert_eq!(
+            progress(kahl, Affiliation { standing: 0, title: 0 }),
+            Progress { value: 0, size: 5, at_cap: false, full: false }
+        );
     }
 
     #[test]

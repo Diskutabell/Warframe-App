@@ -1,14 +1,15 @@
-//! warframeproject: a Warframe companion for Linux.
+//! warframeproject: a Warframe companion for Linux and Windows.
 //!
 //! The engine (data sources, OCR, prices) serves a loopback-only HTTP API; the desktop shell shows
 //! the web UI in a native window and draws the in-game overlays.
 
+// A GUI program on Windows: no console window opens when it is started from the desktop.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod accounts;
 mod art;
 mod clock;
-mod compositor;
 mod config;
-mod desktop;
 mod difflib;
 mod eelog;
 mod gamedata;
@@ -27,6 +28,20 @@ mod standing;
 mod state;
 mod views;
 mod world;
+
+// The parts that talk to the desktop differ per system. On Windows the same module names load
+// the files in `src/windows/`, so the rest of the code calls `compositor::game_rect()` or
+// `desktop::run()` without caring which system it runs on.
+#[cfg(unix)]
+mod compositor;
+#[cfg(windows)]
+#[path = "windows/compositor.rs"]
+mod compositor;
+#[cfg(unix)]
+mod desktop;
+#[cfg(windows)]
+#[path = "windows/desktop.rs"]
+mod desktop;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -58,7 +73,7 @@ impl std::error::Error for UserError {}
 pub use clock::now;
 
 #[derive(Parser)]
-#[command(name = "warframeproject", version, about = "Warframe companion for Linux")]
+#[command(name = "warframeproject", version, about = "Warframe companion for Linux and Windows")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
@@ -86,7 +101,7 @@ enum Command {
     Riven,
     /// Close the running app.
     Quit,
-    /// Read a saved screenshot, e.g. from ~/.cache/warframeproject/frames, without the app.
+    /// Read a saved screenshot (the app keeps the last ones in its cache's frames folder).
     Replay {
         /// A screenshot (PNG or PPM) of the whole game screen.
         frame: PathBuf,
@@ -97,7 +112,11 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    #[cfg(windows)]
+    desktop::process_setup();
     let cli = Cli::parse();
+    #[cfg(windows)]
+    let opens_window = matches!(cli.command, None | Some(Command::Run)) && !cli.headless && !cli.browser;
     let mut settings = config::Settings::load();
     if let Some(port) = cli.port {
         settings.port = port;
@@ -118,6 +137,10 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("{e:#}");
+            #[cfg(windows)]
+            if opens_window {
+                desktop::error_box(&format!("{e:#}"));
+            }
             ExitCode::FAILURE
         }
     }
@@ -161,6 +184,10 @@ fn run(settings: config::Settings, browser: bool, headless: bool, offline: bool)
     let state = state::State::new(settings);
     state.start();
     server::serve(server, Arc::clone(&state), 6);
+    #[cfg(windows)]
+    if let Err(e) = state.install_hotkeys() {
+        state.event(&format!("Hotkeys not registered: {e}"), "warn");
+    }
     let url = format!("http://127.0.0.1:{port}/");
     println!("warframeproject {} engine on {url}", env!("CARGO_PKG_VERSION"));
 
@@ -172,7 +199,10 @@ fn run(settings: config::Settings, browser: bool, headless: bool, offline: bool)
         }
         None => {
             if browser {
+                #[cfg(unix)]
                 let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+                #[cfg(windows)]
+                desktop::open_url(&url);
             }
             loop {
                 std::thread::park();

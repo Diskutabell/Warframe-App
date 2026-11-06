@@ -37,7 +37,7 @@ function sources(S) {
       src.inventory.source ? `${fmt(src.inventory.stacks)} stacks · ${esc(src.inventory.source)} · ${ago(src.inventory.imported)}` : "None - parts, relics, currencies and medallions need one (memory scan or an inventory.json).",
       `<button data-act="inventory">Import file</button>${src.inventory.source ? `<button data-act="forget" class="ghost">Forget</button>` : ""}`)}
     ${row(tools.tesseract && tools.screenshot ? "on" : "warn", "Screen reader",
-      `${tools.tesseract ? "tesseract" : `<span class="warn-text">tesseract missing</span>`} · ${tools.screenshot ? esc(tools.screenshot) : `<span class="warn-text">no screenshot tool</span>`}`)}
+      `${tools.tesseract ? "tesseract" : `<span class="warn-text">tesseract missing${S.os === "windows" ? " - install it with <code>winget install UB-Mannheim.TesseractOCR</code>, then restart the app" : ""}</span>`} · ${tools.screenshot ? esc(tools.screenshot) : `<span class="warn-text">no screenshot tool</span>`}`)}
     ${row(src.market.error ? "warn" : "on", "warframe.market", src.market.error ? esc(src.market.error) : `Live${src.market.queued ? ` · ${src.market.queued} prices queued` : ""}`)}
   </div>`;
 }
@@ -102,6 +102,8 @@ export default {
     s = await api("settings");
     const S = app.state;
     const tools = S.sources.tools || {};
+    // Windows copies the screen itself and has one kind of overlay, so those choices are Linux's.
+    const linux = S.os !== "windows";
     view.innerHTML = `<div class="page"><div class="page-head"><div><h1>Settings</h1><p>Changes save as you make them.</p></div></div>
     <div class="settings">
       ${section("Accounts", `<div id="accounts">${accounts(S)}</div>`)}
@@ -129,21 +131,22 @@ export default {
         ${number("riven_overlay_seconds", "Hide the riven panel after", "Seconds.", { min: 3, max: 300 })}
         ${number("riven_overlay_x_percent", "Riven panel left edge", "% of the screen width. The card sits centred; 57 puts the panel beside it.", { min: 0, max: 100, step: 0.5 })}
         ${number("riven_overlay_y_percent", "Riven panel middle", "% of the screen height.", { min: 0, max: 100, step: 0.5 })}
-        ${select("overlay_backend", "Keep overlays above the game with", "Takes effect after a restart.", [["auto", "Automatic"], ["layer-shell", "Layer shell (Hyprland, Sway, KDE)"], ["x11", "X11 window (GNOME, X11 sessions)"]])}
-        ${select("screenshot_tool", "Screenshot tool", "", [["auto", "Automatic" + (tools.screenshot ? ` (${tools.screenshot})` : "")], ["grim", "grim (Hyprland, Sway)"], ["spectacle", "Spectacle (KDE)"], ["gnome-screenshot", "GNOME Screenshot"], ["maim", "maim (X11)"], ["scrot", "scrot (X11)"], ["import", "ImageMagick import (X11)"]])}
+        ${linux ? select("overlay_backend", "Keep overlays above the game with", "Takes effect after a restart.", [["auto", "Automatic"], ["layer-shell", "Layer shell (Hyprland, Sway, KDE)"], ["x11", "X11 window (GNOME, X11 sessions)"]]) : ""}
+        ${linux ? "" : `<div class="callout" style="margin-top:8px">The overlays only show over the game in <b>borderless</b> or windowed mode, not in exclusive fullscreen.</div>`}
+        ${!linux ? "" : select("screenshot_tool", "Screenshot tool", "", [["auto", "Automatic" + (tools.screenshot ? ` (${tools.screenshot})` : "")], ["grim", "grim (Hyprland, Sway)"], ["spectacle", "Spectacle (KDE)"], ["gnome-screenshot", "GNOME Screenshot"], ["maim", "maim (X11)"], ["scrot", "scrot (X11)"], ["import", "ImageMagick import (X11)"]])}
         ${S.desktop ? `<div class="row" style="margin-top:12px"><button id="testOverlay">Show a test overlay</button><span class="muted" style="font-size:13px">Sample rewards, where the strip will appear.</span></div>` : ""}`)}
 
       ${section("Hotkeys", `
         ${text("hotkey_rewards", "Read the reward screen", "")}
         ${text("hotkey_riven", "Grade the riven on screen", "")}
-        <div class="row" style="margin-top:12px"><button id="installKeys">Install hotkeys</button><span class="muted" id="keysNote" style="font-size:13px"></span></div>
+        <div class="row" style="margin-top:12px"><button id="installKeys">${linux ? "Install hotkeys" : "Register hotkeys"}</button><span class="muted" id="keysNote" style="font-size:13px"></span></div>
         <pre class="lines" id="keysLines"></pre>`)}
 
       ${section("Account and files", `
         ${select("platform", "Platform", "", [["pc", "PC"], ["ps4", "PlayStation"], ["xb1", "Xbox"], ["swi", "Switch"]])}
         ${toggle("profile_auto_refresh", "Refresh the public profile while playing", "DE rate-limits this; keep the interval long.")}
         ${number("profile_refresh_minutes", "Minutes between refreshes", "At least 10.", { min: 10, max: 1440 })}
-        ${text("ee_log_path", "EE.log path", "Empty: found automatically in Steam, Flatpak, Snap and ~/Games prefixes.", S.sources.eeLog.path || "")}
+        ${text("ee_log_path", "EE.log path", linux ? "Empty: found automatically in Steam, Flatpak, Snap and ~/Games prefixes." : "Empty: %LOCALAPPDATA%\\Warframe\\EE.log.", S.sources.eeLog.path || "")}
         ${text("inventory_json_path", "Watch an inventory.json", "Reloaded whenever the file changes.")}
         ${number("price_cache_minutes", "Keep bulk prices for", "Minutes. Reward-screen prices refresh after 15 minutes regardless.", { min: 5, max: 1440 })}
         ${number("port", "Engine port", "Takes effect after a restart.", { min: 1024, max: 65535 })}`)}
@@ -181,7 +184,7 @@ export default {
     showKeys();
     $("#installKeys").onclick = async () => {
       const r = await act("hotkeys/register");
-      if (r) { toast(r.sourced ? `Installed: ${r.file} is sourced and reloaded` : `Updated ${r.file} and reloaded`); showKeys(); }
+      if (r) { toast(!r.file ? "Hotkeys registered" : r.sourced ? `Installed: ${r.file} is sourced and reloaded` : `Updated ${r.file} and reloaded`); showKeys(); }
     };
     $("#reload").onclick = async (e) => {
       e.target.disabled = true;

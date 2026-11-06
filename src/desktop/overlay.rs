@@ -350,28 +350,7 @@ impl Overlays {
     }
 
     pub fn show_test(&self) {
-        let sample = |name: &str, price: Option<i64>, ducats: Option<i64>, have, needed, vaulted| RewardItem {
-            name: name.into(),
-            uid: String::new(),
-            score: 1.0,
-            slug: None,
-            have,
-            needed,
-            vaulted: Some(vaulted),
-            ducats,
-            price,
-        };
-        let r = RewardResult {
-            t: crate::now(),
-            items: vec![
-                sample("Ash Prime Systems Blueprint", Some(25), Some(65), 0, 1, false),
-                sample("Braton Prime Barrel", Some(4), Some(15), 2, 0, false),
-                sample("Forma Blueprint", None, None, 3, 0, false),
-                sample("Fragor Prime Head", Some(6), Some(45), 0, 0, true),
-            ],
-            best: Some("Ash Prime Systems Blueprint".into()),
-            ..Default::default()
-        };
+        let r = RewardResult::sample();
         // The test strip always shows, even with the reward overlay switched off.
         let panel = self.panel(&self.strip, "warframeproject-rewards", true);
         self.fill_strip(&panel, &r.items, r.best.as_deref());

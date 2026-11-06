@@ -1,18 +1,19 @@
 # Warframe App
 
-A Warframe companion app for Linux. It keeps track of what you still need for mastery and prime
+A Warframe companion app for Linux and Windows. It keeps track of what you still need for mastery and prime
 sets, your syndicate standing and daily limits, values your relics, shows world timers and
 warframe.market prices, and draws overlays over the game: prices on the fissure reward screen and
 grades for riven cards.
 
-It's a single Rust program: a GTK window for the interface plus overlays drawn by the compositor.
-No Overwolf, no Wine, no browser tab.
+It's a single Rust program with its own window and overlays. No Overwolf, no browser tab. On
+Linux it runs natively next to the game (no Wine needed for the app itself).
 
 > [!CAUTION]
 > ## Disclaimer: use at your own risk
 >
 > **This code is mostly vibe coded.** Large parts of it were written with AI tools and have only
-> been tested on my own machine. Expect bugs.
+> been tested on my own machine. Expect bugs. The Windows version is built and tested
+> automatically, but I don't play on Windows myself, so it has seen even less real use.
 >
 > **Using it may be against Warframe's Terms of Service / EULA.** The app reads the game's log
 > file, takes screenshots of the game for OCR and can (if you turn it on) read the game's memory.
@@ -47,7 +48,21 @@ No Overwolf, no Wine, no browser tab.
 - **Search:** Ctrl+K finds any item, part, relic, syndicate or page.
 - **Notifications** (off by default): watched fissures, Baro, finished builds.
 
-## Requirements
+## Windows
+
+1. Download `warframeproject-windows-x64.exe` from the
+   [latest release](https://github.com/Diskutabell/Warframe-App/releases/latest). It's a single
+   file, no installer. Windows SmartScreen will warn you because the exe isn't signed.
+2. For the reward screen and riven scans, install tesseract (the OCR program):
+   `winget install UB-Mannheim.TesseractOCR`. The app finds it in its default folder.
+3. Run the exe, then Warframe. Set the game to **borderless fullscreen** (or windowed): overlays
+   can't draw over exclusive fullscreen, and the screenshots come out black there.
+
+It needs the Microsoft Edge WebView2 Runtime, which comes with Windows 10 and 11. F9 and F10 work
+as soon as the app runs; change them under Settings → Hotkeys. Settings live in
+`%APPDATA%\warframeproject`, everything else in `%LOCALAPPDATA%\warframeproject`.
+
+## Linux requirements
 
 - Linux on Wayland (Hyprland, Sway, KDE, GNOME) or X11
 - Warframe through Steam/Proton, Lutris, Heroic, umu or a plain Wine prefix
@@ -63,7 +78,7 @@ No Overwolf, no Wine, no browser tab.
 
 - Optional: `notify-send` for notifications
 
-## Installation
+## Linux installation
 
 ### NixOS / Nix
 
@@ -99,7 +114,7 @@ sed "s|/path/to/warframeproject|$PWD|" warframeproject.desktop > ~/.local/share/
 1. Start the app, then Warframe. The app finds `EE.log` on its own.
 2. Link your account for mastery data (see below).
 3. Install the hotkeys under Settings → Hotkeys (Hyprland and Sway; on other desktops bind the
-   commands below yourself).
+   commands below yourself; on Windows they are already active).
 4. Optional: import an `inventory.json` or turn on the memory scan to get part, relic and
    currency counts.
 
@@ -117,7 +132,8 @@ a second late; F9 is instant. `warframeproject trigger` and `warframeproject riv
 from a terminal.
 
 On Hyprland, Sway and KDE the overlays sit on the compositor's overlay layer, above fullscreen
-games. On GNOME and X11 they are popup windows. Settings has a button to show a test overlay.
+games. On GNOME and X11 they are popup windows, and on Windows always-on-top windows that never
+take focus. Settings has a button to show a test overlay.
 
 ## Linking your account
 
@@ -135,11 +151,12 @@ in for a while.
 There's no public API for your inventory, so tools that keep it up to date automatically read
 it from the game's memory. Here that is optional and **off by default**:
 
-- Read-only, through `/proc/<pid>/mem`. Nothing is written to or injected into the game.
+- Read-only, through `/proc/<pid>/mem` on Linux and `ReadProcessMemory` on Windows. Nothing is
+  written to or injected into the game.
 - Runs by itself after login and after each mission, never on a timer.
 - Only known inventory fields are kept. Your session token is in the same memory and is thrown
   away without being read.
-- If Linux doesn't allow the read, Settings tells you. The app never changes system settings.
+- If the system doesn't allow the read, Settings tells you. The app never changes system settings.
 
 This is the part most likely to be against the ToS. See the disclaimer above.
 
@@ -157,7 +174,7 @@ This is the part most likely to be against the ToS. See the disclaimer above.
 
 Nothing else is sent anywhere.
 
-## Files
+## Files (Linux)
 
 | What | Where |
 |---|---|
@@ -176,6 +193,8 @@ Nothing else is sent anywhere.
 | The overlay is behind the game | Settings → *Keep overlays above the game with*: try the other option, then restart. Run the game fullscreen or borderless through the compositor. |
 | "Port 8642 is in use" | Change `"port"` in settings.json or pass `--port`, then install the hotkeys again. |
 | No account detected | Play a relic mission in a squad (not as host), or paste your id in Settings. |
+| Windows: no overlay, or the scan reads nothing | Switch the game to borderless fullscreen. Exclusive fullscreen hides everything else and screenshots of it are black. |
+| Windows: "tesseract missing" | `winget install UB-Mannheim.TesseractOCR`, then restart the app. |
 
 ## Development
 
@@ -185,13 +204,18 @@ cargo test
 cargo run -- --headless --offline --port 8650    # engine only, no network
 ```
 
+On Windows, `cargo build --release` with the MSVC toolchain is all it takes. The code that talks
+to the desktop is split per system: `src/compositor.rs` and `src/desktop/` on Linux,
+`src/windows/` on Windows (same module names, picked in `main.rs`). GitHub Actions builds and
+tests the Windows exe on every push and attaches it to each release.
+
 `--browser` opens the interface in your web browser instead of a window. The interface in `web/`
 is plain HTML, CSS and JavaScript modules with no build step; debug builds read it from disk, so a
 reload picks up changes.
 
 Known limitations: part and relic counts need manual tracking, an import or the memory scan; the
 OCR is tuned for the default UI theme; the X11 overlay path hasn't been tested on a real X11
-session.
+session; the Windows version has passed its tests but hasn't been used with the real game yet.
 
 ## License
 

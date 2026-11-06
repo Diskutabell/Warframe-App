@@ -1,9 +1,9 @@
 [package]
 name = "warframeproject"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Warframe companion for Linux: mastery, prime sets, relics, reward-screen prices and riven grades"
+description = "Warframe companion for Linux and Windows: mastery, prime sets, relics, reward-screen prices and riven grades"
 license = "MIT"
 publish = false
 
@@ -11,12 +11,6 @@ publish = false
 anyhow = "1"
 async-channel = "2"
 clap = { version = "4", features = ["derive"] }
-# GTK 3 family. webkit2gtk 2.0.2 and gtk-layer-shell 0.8 both pin gtk 0.18, so 0.18 it is - the
-# newer gtk 0.19 cannot be mixed in until those two move.
-gtk = "0.18"
-# v0_6: keyboard modes and is_supported(); nixpkgs ships gtk-layer-shell 0.10.
-gtk-layer-shell = { version = "0.8", features = ["v0_6"] }
-webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
 image = { version = "0.25", default-features = false, features = ["png", "pnm", "webp"] }
 indexmap = { version = "2", features = ["serde"] }
 memchr = "2"
@@ -26,6 +20,33 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 tiny_http = "0.12"
 ureq = "3"
+
+# Linux: the window and overlays are GTK, the page runs in WebKitGTK.
+[target.'cfg(unix)'.dependencies]
+# GTK 3 family. webkit2gtk 2.0.2 and gtk-layer-shell 0.8 both pin gtk 0.18, so 0.18 it is - the
+# newer gtk 0.19 cannot be mixed in until those two move.
+gtk = "0.18"
+# v0_6: keyboard modes and is_supported(); nixpkgs ships gtk-layer-shell 0.10.
+gtk-layer-shell = { version = "0.8", features = ["v0_6"] }
+webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
+
+# Windows: tao for the windows, wry for the page (in Edge's WebView2), the Win32 API for the rest.
+[target.'cfg(windows)'.dependencies]
+tao = "0.37"
+wry = "0.57"
+tauri-winrt-notification = "0.8"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [profile.release]
 lto = "thin"

@@ -239,7 +239,8 @@ pub fn load(force: bool) -> Result<Catalog> {
     match &syndicates[..] {
         [Ok(export), Ok(dict)] => catalog.syndicates = crate::standing::build(export, dict),
         _ => {
-            let why: Vec<String> = syndicates.iter().filter_map(|r| r.as_ref().err()).map(|e| format!("{e:#}")).collect();
+            let why: Vec<String> =
+                syndicates.iter().filter_map(|r| r.as_ref().err()).map(|e| format!("{e:#}")).collect();
             eprintln!("syndicate data unavailable: {}", why.join("; "));
         }
     }
@@ -261,7 +262,9 @@ fn repair_relics(files: &mut IndexMap<String, Value>, force: bool) {
         let drops: Vec<_> = DROP_TABLES
             .iter()
             .map(|t| {
-                s.spawn(move || download_to(&format!("{DROP_URL}{t}.json"), &cache.join(format!("drops_{t}.json")), force))
+                s.spawn(move || {
+                    download_to(&format!("{DROP_URL}{t}.json"), &cache.join(format!("drops_{t}.json")), force)
+                })
             })
             .collect();
         let panicked = || Err(anyhow!("download thread panicked"));
@@ -280,7 +283,10 @@ fn repair_relics(files: &mut IndexMap<String, Value>, force: bool) {
     let dropping = crate::relics::dropping(&tables);
     if let Some(relics) = files.get_mut("Relics") {
         let filled = crate::relics::patch(relics, export_relics, export_rewards, names.as_ref(), Some(&dropping));
-        eprintln!("WFCD's relics had no drop tables: {filled} filled in from the game's export ({} relics drop today)", dropping.len());
+        eprintln!(
+            "WFCD's relics had no drop tables: {filled} filled in from the game's export ({} relics drop today)",
+            dropping.len()
+        );
     }
 }
 
@@ -302,8 +308,7 @@ fn download(name: &str, force: bool) -> Result<Value> {
 /// one is revalidated with its ETag, and when the source cannot be reached the old copy will do.
 fn download_to(url: &str, path: &Path, force: bool) -> Result<Value> {
     let etag_path = path.with_extension("etag");
-    let age =
-        fs::metadata(path).and_then(|m| m.modified()).ok().and_then(|t| SystemTime::now().duration_since(t).ok());
+    let age = fs::metadata(path).and_then(|m| m.modified()).ok().and_then(|t| SystemTime::now().duration_since(t).ok());
     let cached = || -> Result<Value> { Ok(serde_json::from_slice(&fs::read(path)?)?) };
     if !force && age.is_some_and(|a| a < MAX_AGE) {
         if let Ok(v) = cached() {
@@ -664,11 +669,10 @@ pub fn build(raw: &IndexMap<String, Value>) -> Catalog {
             own_blueprint.insert(uid.clone(), stem.to_ascii_lowercase());
         }
     }
-    let owners: Vec<(String, String)> = own_blueprint
-        .iter()
-        .filter_map(|(uid, stem)| Some((stem.clone(), items.get(uid)?.name.clone())))
-        .collect();
-    let related = |base: &str, blueprint: &str| !base.is_empty() && (blueprint.starts_with(base) || base.starts_with(blueprint));
+    let owners: Vec<(String, String)> =
+        own_blueprint.iter().filter_map(|(uid, stem)| Some((stem.clone(), items.get(uid)?.name.clone()))).collect();
+    let related =
+        |base: &str, blueprint: &str| !base.is_empty() && (blueprint.starts_with(base) || base.starts_with(blueprint));
 
     // Resolve components into parts, required items and resources.
     let mut parts: IndexMap<String, Part> = IndexMap::new();
@@ -1028,10 +1032,16 @@ mod tests {
             ),
         ]));
         let names = |uid: &str| c.items[uid].components.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
-        assert_eq!(names("/Lotus/Powersuits/Dragon/Dragon"), ["Chroma Blueprint", "Chroma Neuroptics", "Volt Neuroptics"]);
+        assert_eq!(
+            names("/Lotus/Powersuits/Dragon/Dragon"),
+            ["Chroma Blueprint", "Chroma Neuroptics", "Volt Neuroptics"]
+        );
         assert_eq!(names("/Lotus/Powersuits/Volt/Volt"), ["Volt Blueprint", "Volt Neuroptics"]);
         // No item's blueprint is called "War": the part keeps its own name.
-        assert_eq!(names("/Lotus/Weapons/Tenno/Melee/Swords/StalkerTwoSmallSword"), ["Broken War Blueprint", "War Blade"]);
+        assert_eq!(
+            names("/Lotus/Weapons/Tenno/Melee/Swords/StalkerTwoSmallSword"),
+            ["Broken War Blueprint", "War Blade"]
+        );
         assert_eq!(
             names("/Lotus/Weapons/Tenno/Melee/Fist/FuraxWraith"),
             ["Furax Wraith Blueprint", "Furax Wraith Left Gauntlet", "Furax Wraith Right Gauntlet"]
@@ -1041,8 +1051,14 @@ mod tests {
     #[test]
     fn pictures_by_display_name() {
         let c = build(&raw(&[
-            ("Melee", json!([{"uniqueName": "/AB", "name": "Ack & Brunt", "masterable": true, "imageName": "ack.png"}])),
-            ("Primary", json!([{"uniqueName": "/DV", "name": "Dera Vandal", "masterable": true, "imageName": "dera.png"}])),
+            (
+                "Melee",
+                json!([{"uniqueName": "/AB", "name": "Ack & Brunt", "masterable": true, "imageName": "ack.png"}]),
+            ),
+            (
+                "Primary",
+                json!([{"uniqueName": "/DV", "name": "Dera Vandal", "masterable": true, "imageName": "dera.png"}]),
+            ),
             ("Resources", json!([{"uniqueName": "/F", "name": "Forma", "imageName": "forma.png"}])),
         ]));
         let art = |name| c.art_by_name(name).map(|u| u.trim_start_matches(IMG_URL).to_string());

@@ -15,6 +15,13 @@ pub struct Output {
 /// Runs `cmd`, feeding `input` on stdin, and collects its output. The process is killed once
 /// `timeout` passes, so a hung tool cannot hang the scan or request that called it.
 pub fn run(cmd: &mut Command, input: Option<Vec<u8>>, timeout: Duration) -> Result<Output> {
+    #[cfg(windows)]
+    {
+        // Without this every tesseract run opens a console window for a moment.
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
     let mut child = cmd
         .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
@@ -60,7 +67,7 @@ pub fn run(cmd: &mut Command, input: Option<Vec<u8>>, timeout: Duration) -> Resu
     Ok(Output { success: status.success(), stdout, stderr })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

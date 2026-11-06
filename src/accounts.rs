@@ -297,7 +297,8 @@ mod tests {
         later.insert("/New".into(), 5);
         assert_eq!(same_owner(&base, &later), Some(true));
         // Another account with the same gear: no value matches.
-        let other: IndexMap<String, i64> = items.iter().enumerate().map(|(i, k)| (k.clone(), 5000 + i as i64)).collect();
+        let other: IndexMap<String, i64> =
+            items.iter().enumerate().map(|(i, k)| (k.clone(), 5000 + i as i64)).collect();
         assert_eq!(same_owner(&base, &other), Some(false));
         // Too little in common to say; unused items (0) do not count.
         assert_eq!(same_owner(&xp(&[("/A", 1), ("/B", 2)]), &xp(&[("/A", 1), ("/B", 2)])), None);

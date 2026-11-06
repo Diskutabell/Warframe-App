@@ -7,11 +7,11 @@ use indexmap::IndexMap;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::accounts::Manual;
 use crate::difflib::py_round;
 use crate::gamedata::{self, Catalog, ComponentKind, Item, Relic};
 use crate::market::Market;
 use crate::sources::{Inventory, Profile, Progress};
-use crate::accounts::Manual;
 
 pub const ERAS: [&str; 5] = ["Lith", "Meso", "Neo", "Axi", "Requiem"];
 
@@ -865,7 +865,10 @@ mod tests {
             ),
         };
         let m = other_mastery(&cat, &progress);
-        assert_eq!(m, OtherMastery { star_chart: 63 + 24 + 1000, steel_path: 24 + 1000, railjack: 16_500, drifter: 3000 });
+        assert_eq!(
+            m,
+            OtherMastery { star_chart: 63 + 24 + 1000, steel_path: 24 + 1000, railjack: 16_500, drifter: 3000 }
+        );
         assert_eq!(m.total(), 21_611);
     }
 

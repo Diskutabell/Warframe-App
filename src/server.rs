@@ -14,8 +14,8 @@ use serde_json::{Value, json};
 use tiny_http::{Header, Method, Request, Response, Server};
 
 use crate::UserError;
-use crate::memscan::ScanError;
 use crate::art;
+use crate::memscan::ScanError;
 use crate::state::State;
 
 #[derive(RustEmbed)]
@@ -312,7 +312,9 @@ fn post_api(s: &Arc<State>, path: &str, b: &Value) -> Result<Option<Value>> {
         "account/switch" => s.switch_account(b["key"].as_str().unwrap_or(""))?,
         "account/forget" => s.forget_account(b["key"].as_str().unwrap_or(""))?,
         "profile/refresh" => {
-            let key = s.active_key().ok_or_else(|| UserError::new("No account yet: start the game once, or enter an account id."))?;
+            let key = s
+                .active_key()
+                .ok_or_else(|| UserError::new("No account yet: start the game once, or enter an account id."))?;
             s.refresh_profile(&key, false)?;
         }
         "profile/import" => s.import_profile(b)?,

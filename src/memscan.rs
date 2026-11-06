@@ -4,13 +4,11 @@
 //! the inventory it downloaded from DE as JSON text; the scan finds that text (anchored on
 //! "LastInventorySync") and copies it out. It never writes to the game and never injects. When
 //! enabled it runs by itself after login and after each mission (`State::schedule_memscan`).
-//! Whether Linux allows the read is the kernel's decision, made when the game's memory is opened.
+//! Whether the system allows the read is decided when the game's memory is opened.
 //!
 //! Digital Extremes' position on third-party tools is "use at your own risk".
 
 use std::collections::HashSet;
-use std::fs;
-use std::os::unix::fs::FileExt;
 use std::sync::LazyLock;
 use std::time::Instant;
 
@@ -90,7 +88,7 @@ const MAX_REGION: u64 = 2 * 1024 * 1024 * 1024;
 #[derive(Debug)]
 pub enum ScanError {
     NotRunning,
-    /// Linux refused to let this process read the game's memory.
+    /// The system refused to let this process read the game's memory.
     Denied(String),
     /// The inventory text is not (completely) in memory right now; it is after the next sync.
     NotFound {
@@ -118,26 +116,6 @@ impl std::fmt::Display for ScanError {
 
 impl std::error::Error for ScanError {}
 
-/// kernel.yama.ptrace_scope, when Yama is active.
-fn ptrace_scope() -> Option<u8> {
-    fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope").ok().and_then(|s| s.trim().parse().ok())
-}
-
-/// Rules out, without touching the game, only what can never work: ptrace_scope 3 forbids every
-/// program to read another's memory.
-///
-/// Scopes 1 and 2 are not a "no". Yama lets a process read another one's memory when it holds
-/// CAP_SYS_PTRACE in that process's user namespace (security/yama/yama_lsm.c), and a namespace's
-/// owner holds every capability in it. Steam's sandbox runs the game in a user namespace owned by
-/// the user, so on such a system (NixOS, for one) the read works at scope 1. Whether it applies
-/// elsewhere only shows when the game's memory is opened.
-pub fn availability() -> Result<(), String> {
-    match ptrace_scope() {
-        Some(3) => Err("kernel.yama.ptrace_scope is 3: Linux lets no program read another program's memory.".into()),
-        _ => Ok(()),
-    }
-}
-
 /// Whether a key may be kept: a known inventory field, one of the families named above, or a
 /// Mongo wrapper - and never anything that sounds like a credential.
 fn allowed(key: &str) -> bool {
@@ -154,64 +132,132 @@ pub fn sanitise(v: Value) -> Value {
     match v {
         Value::Array(items) => Value::Array(items.into_iter().map(sanitise).collect()),
         Value::Object(map) => Value::Object(
-            map.into_iter()
-                .filter(|(k, _)| allowed(k))
-                .map(|(k, v)| (k, sanitise(v)))
-                .collect::<Map<String, Value>>(),
+            map.into_iter().filter(|(k, _)| allowed(k)).map(|(k, v)| (k, sanitise(v))).collect::<Map<String, Value>>(),
         ),
         other => other,
     }
 }
 
-pub fn find_game_pid() -> Option<u32> {
-    for entry in fs::read_dir("/proc").ok()?.flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else { continue };
-        let comm = fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
-        if comm.trim().starts_with("Warframe.x64") {
-            return Some(pid);
-        }
-        let cmd = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-        let has = |needle: &[u8]| memmem::find(&cmd, needle).is_some();
-        if has(b"Warframe.x64.exe") && !has(b"Launcher") && !has(b"reaper") {
-            return Some(pid);
-        }
-    }
-    None
-}
+// ------------------------------------------------------------------ the operating system's part
 
-/// Writable, anonymous-ish regions: where downloaded JSON lives.
-fn regions(pid: u32) -> Vec<(u64, u64)> {
-    let maps = fs::read_to_string(format!("/proc/{pid}/maps")).unwrap_or_default();
-    maps.lines()
-        .filter_map(|line| {
-            let mut parts = line.split_whitespace();
-            let (range, perms) = (parts.next()?, parts.next()?);
-            let path = parts.nth(3).unwrap_or("");
-            if !perms.starts_with("rw")
-                || path.ends_with(".so")
-                || path.ends_with(".dll")
-                || path.ends_with(".exe")
-                || path.starts_with("/dev/")
-            {
-                return None;
+/// Linux: the game's memory through /proc. Windows has its own version in `windows/memory.rs`
+/// with the same functions.
+#[cfg(unix)]
+mod os {
+    use std::fs;
+    use std::os::unix::fs::FileExt;
+
+    use memchr::memmem;
+
+    use super::{MAX_REGION, ScanError};
+
+    /// kernel.yama.ptrace_scope, when Yama is active.
+    fn ptrace_scope() -> Option<u8> {
+        fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope").ok().and_then(|s| s.trim().parse().ok())
+    }
+
+    /// Rules out, without touching the game, only what can never work: ptrace_scope 3 forbids every
+    /// program to read another's memory.
+    ///
+    /// Scopes 1 and 2 are not a "no". Yama lets a process read another one's memory when it holds
+    /// CAP_SYS_PTRACE in that process's user namespace (security/yama/yama_lsm.c), and a namespace's
+    /// owner holds every capability in it. Steam's sandbox runs the game in a user namespace owned by
+    /// the user, so on such a system (NixOS, for one) the read works at scope 1. Whether it applies
+    /// elsewhere only shows when the game's memory is opened.
+    pub fn availability() -> Result<(), String> {
+        match ptrace_scope() {
+            Some(3) => {
+                Err("kernel.yama.ptrace_scope is 3: Linux lets no program read another program's memory.".into())
             }
-            let (a, b) = range.split_once('-')?;
-            let (a, b) = (u64::from_str_radix(a, 16).ok()?, u64::from_str_radix(b, 16).ok()?);
-            (b > a && b - a <= MAX_REGION).then_some((a, b))
-        })
-        .collect()
-}
-
-fn read(mem: &fs::File, addr: u64, len: usize) -> Vec<u8> {
-    let mut buf = vec![0u8; len];
-    match mem.read_at(&mut buf, addr) {
-        Ok(n) => {
-            buf.truncate(n);
-            buf
+            _ => Ok(()),
         }
-        Err(_) => Vec::new(),
+    }
+
+    pub fn find_game_pid() -> Option<u32> {
+        for entry in fs::read_dir("/proc").ok()?.flatten() {
+            let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else { continue };
+            let comm = fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+            if comm.trim().starts_with("Warframe.x64") {
+                return Some(pid);
+            }
+            let cmd = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            let has = |needle: &[u8]| memmem::find(&cmd, needle).is_some();
+            if has(b"Warframe.x64.exe") && !has(b"Launcher") && !has(b"reaper") {
+                return Some(pid);
+            }
+        }
+        None
+    }
+
+    /// Writable, anonymous-ish regions: where downloaded JSON lives.
+    fn regions(pid: u32) -> Vec<(u64, u64)> {
+        let maps = fs::read_to_string(format!("/proc/{pid}/maps")).unwrap_or_default();
+        maps.lines()
+            .filter_map(|line| {
+                let mut parts = line.split_whitespace();
+                let (range, perms) = (parts.next()?, parts.next()?);
+                let path = parts.nth(3).unwrap_or("");
+                if !perms.starts_with("rw")
+                    || path.ends_with(".so")
+                    || path.ends_with(".dll")
+                    || path.ends_with(".exe")
+                    || path.starts_with("/dev/")
+                {
+                    return None;
+                }
+                let (a, b) = range.split_once('-')?;
+                let (a, b) = (u64::from_str_radix(a, 16).ok()?, u64::from_str_radix(b, 16).ok()?);
+                (b > a && b - a <= MAX_REGION).then_some((a, b))
+            })
+            .collect()
+    }
+
+    /// The game's memory, opened for reading.
+    pub struct Memory {
+        file: fs::File,
+        pid: u32,
+    }
+
+    impl Memory {
+        /// Opening is where the kernel decides; a refusal costs nothing but a line in its log.
+        pub fn open(pid: u32) -> Result<Memory, ScanError> {
+            let file = fs::File::open(format!("/proc/{pid}/mem")).map_err(|e| match e.kind() {
+                std::io::ErrorKind::PermissionDenied => {
+                    let scope = ptrace_scope().map_or_else(|| "not set".to_string(), |s| s.to_string());
+                    ScanError::Denied(format!(
+                        "Linux refused access to the game's memory (kernel.yama.ptrace_scope is {scope}). It is tried \
+                         again when the game restarts; the app never changes that setting."
+                    ))
+                }
+                std::io::ErrorKind::NotFound => ScanError::NotRunning,
+                _ => ScanError::Io(e.to_string()),
+            })?;
+            Ok(Memory { file, pid })
+        }
+
+        pub fn regions(&self) -> Vec<(u64, u64)> {
+            regions(self.pid)
+        }
+
+        /// Up to `len` bytes at `addr`; fewer (or none) where the memory is not readable.
+        pub fn read(&self, addr: u64, len: usize) -> Vec<u8> {
+            let mut buf = vec![0u8; len];
+            match self.file.read_at(&mut buf, addr) {
+                Ok(n) => {
+                    buf.truncate(n);
+                    buf
+                }
+                Err(_) => Vec::new(),
+            }
+        }
     }
 }
+
+#[cfg(windows)]
+#[path = "windows/memory.rs"]
+mod os;
+
+pub use os::{availability, find_game_pid};
 
 /// Epoch seconds from a Mongo ObjectId: its first four bytes are a unix timestamp.
 fn oid_time(v: &Value) -> i64 {
@@ -224,12 +270,12 @@ fn sync_time(v: &Value) -> i64 {
 }
 
 /// Grows outward from the marker until NUL bytes bound the text, then decodes the JSON object.
-fn extract_blob(mem: &fs::File, (start_lim, end_lim): (u64, u64), hit: u64) -> Option<Value> {
+fn extract_blob(mem: &os::Memory, (start_lim, end_lim): (u64, u64), hit: u64) -> Option<Value> {
     const STEP: u64 = 1024 * 1024;
     let mut lo = hit;
     while lo > start_lim && hit - lo < MAX_EXTENT {
         let a = start_lim.max(lo.saturating_sub(STEP));
-        let buf = read(mem, a, (lo - a) as usize);
+        let buf = mem.read(a, (lo - a) as usize);
         if let Some(z) = memchr::memrchr(0, &buf) {
             lo = a + z as u64 + 1;
             break;
@@ -238,7 +284,7 @@ fn extract_blob(mem: &fs::File, (start_lim, end_lim): (u64, u64), hit: u64) -> O
     }
     let mut hi = hit;
     while hi < end_lim && hi - hit < MAX_EXTENT {
-        let buf = read(mem, hi, STEP.min(end_lim - hi) as usize);
+        let buf = mem.read(hi, STEP.min(end_lim - hi) as usize);
         if buf.is_empty() {
             break;
         }
@@ -248,7 +294,7 @@ fn extract_blob(mem: &fs::File, (start_lim, end_lim): (u64, u64), hit: u64) -> O
         }
         hi += buf.len() as u64;
     }
-    let raw = read(mem, lo, (hi - lo) as usize);
+    let raw = mem.read(lo, (hi - lo) as usize);
     let text = String::from_utf8_lossy(&raw);
     let text = text.trim();
     if text.is_empty() {
@@ -354,20 +400,9 @@ const MAX_CAPTURES: usize = 6;
 /// decides which copy is the logged-in account's (`State::apply_capture`).
 pub fn scan_inventory(pid: u32, progress: impl Fn(f64)) -> Result<(Vec<Value>, ScanInfo), ScanError> {
     availability().map_err(ScanError::Denied)?;
-    // Opening is where the kernel decides; a refusal costs nothing but a line in its log.
-    let mem = fs::File::open(format!("/proc/{pid}/mem")).map_err(|e| match e.kind() {
-        std::io::ErrorKind::PermissionDenied => {
-            let scope = ptrace_scope().map_or_else(|| "not set".to_string(), |s| s.to_string());
-            ScanError::Denied(format!(
-                "Linux refused access to the game's memory (kernel.yama.ptrace_scope is {scope}). It is tried \
-                 again when the game restarts; the app never changes that setting."
-            ))
-        }
-        std::io::ErrorKind::NotFound => ScanError::NotRunning,
-        _ => ScanError::Io(e.to_string()),
-    })?;
+    let mem = os::Memory::open(pid)?;
     let started = Instant::now();
-    let regions = regions(pid);
+    let regions = mem.regions();
     let total: u64 = regions.iter().map(|(a, b)| b - a).sum::<u64>().max(1);
     let finder = memmem::Finder::new(MARKER);
     let (mut found, mut hits, mut done) = (Vec::<Value>::new(), 0usize, 0u64);
@@ -378,7 +413,7 @@ pub fn scan_inventory(pid: u32, progress: impl Fn(f64)) -> Result<(Vec<Value>, S
             let n = CHUNK.min((b - off) as usize);
             // Read a little past the chunk so a marker straddling the boundary is still found; it
             // is counted only in the chunk it starts in.
-            let buf = read(&mem, off, n + MARKER.len());
+            let buf = mem.read(off, n + MARKER.len());
             for at in finder.find_iter(&buf).filter(|&at| at < n) {
                 let addr = off + at as u64;
                 if !seen.insert(addr) {
