@@ -1,8 +1,7 @@
 //! Turning tesseract's words into reward names.
 //!
-//! This is the most hand-tuned code in the project; every rule below exists because a real reward
-//! screen broke without it. It is a faithful port of the Python matcher (thresholds, windows,
-//! suppression and tie-breaks).
+//! Most rules below exist because some reward screen was misread without them. It is a port of
+//! the Python matcher (thresholds, windows, suppression and tie-breaks).
 
 use std::collections::{BTreeSet, HashSet};
 
@@ -332,7 +331,7 @@ mod tests {
 
     #[test]
     fn four_names_in_one_merged_column_all_match() {
-        // The 2026-10-03 failure: every card's name landed in one column.
+        // Every card's name landed in one column.
         let n = names(&[
             "Gyre Prime Systems Blueprint",
             "Gyre Prime Blueprint",
@@ -341,7 +340,7 @@ mod tests {
             "Braton Prime Receiver",
         ]);
         let text = "Gyre Pri stems Blueprlnt Dual Zoren Prime Handle Paris Prime Strmg Braton Prime Recelver";
-        // Overlapping boxes, so every word lands in one column as on the real screen.
+        // Overlapping boxes, so every word lands in one column as on the screen this came from.
         let words: Vec<Word> = text
             .split(' ')
             .enumerate()

@@ -1,8 +1,7 @@
 //! The tesseract CLI, fed through stdin.
 //!
-//! Images go in as PGM on stdin and results come back on stdout, so there are no temporary files:
-//! the Python version wrote every variant to fixed paths in the cache, and two overlapping scans
-//! (the F9 hotkey plus the automatic trigger, the normal case) read each other's images.
+//! Images go in as PGM on stdin and results come back on stdout, so there are no temporary files
+//! that two overlapping scans (the F9 hotkey plus the automatic trigger) could share.
 
 use std::process::Command;
 use std::time::Duration;

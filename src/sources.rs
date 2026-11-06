@@ -55,8 +55,7 @@ pub struct Profile {
     /// The account id the profile belongs to (`AccountId`), when it says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    /// `PlayerLevel`. DE leaves it out at rank 0 (a default value is not sent) and serves it
-    /// otherwise: 36 on a real profile, absent on a real rank-0 one (2026-11-03).
+    /// `PlayerLevel`. DE leaves it out at rank 0 (a default value is not sent).
     pub mastery_rank: Option<i64>,
     pub xp: IndexMap<String, i64>,
     /// Star chart and intrinsics. `None` in a profile saved before the app read them.
@@ -73,16 +72,16 @@ pub struct Profile {
 /// One syndicate's standing as the game stores it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Affiliation {
-    /// Counted from zero over all ranks, not from the start of the current rank: a real profile
-    /// has 289,873 at rank 5, whose range is 240,000-372,000 in the game's export.
+    /// Counted from zero over all ranks, not from the start of the current rank: 289,873 is
+    /// rank 5, whose range is 240,000-372,000 in the game's export.
     pub standing: i64,
     /// The rank ("title"), -2 to 5 for most syndicates; a Nightwave season counts its tiers.
     pub title: i64,
 }
 
-/// Syndicate standing and the daily limits, as DE's profile and a raw inventory carry them (seen
-/// in two real profiles, 2026-11-03): `Affiliations: [{"Tag", "Standing", "Title"}]`, one
-/// `DailyAffiliation*` number per limit pool, and `DailyFocus`.
+/// Syndicate standing and the daily limits, as DE's profile and a raw inventory carry them:
+/// `Affiliations: [{"Tag", "Standing", "Title"}]`, one `DailyAffiliation*` number per limit pool,
+/// and `DailyFocus`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Standing {
     /// Syndicate tag ("SteelMeridianSyndicate") -> its standing and rank.
@@ -148,8 +147,8 @@ impl Progress {
 }
 
 /// Reads `Missions` and `PlayerSkills`, which DE's profile and a raw inventory carry in the same
-/// form (seen in the user's profile, 2026-10-10: `{"Tag": "SolNode27", "Completes": 2}`, with
-/// `"Tier": 1` on a node done on the Steel Path, and `{"LPS_PILOTING": 7, "LPP_SPACE": 29267}`).
+/// form: `{"Tag": "SolNode27", "Completes": 2}`, with `"Tier": 1` on a node done on the Steel
+/// Path, and `{"LPS_PILOTING": 7, "LPP_SPACE": 29267}`.
 /// `None` when neither key is there, as in a memory scan, which keeps neither.
 fn progress_from(data: &Value) -> Option<Progress> {
     let missions = data.get("Missions").and_then(Value::as_array);

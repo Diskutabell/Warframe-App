@@ -18,7 +18,7 @@ const BASE_URL: &str = "https://raw.githubusercontent.com/WFCD/warframe-items/ma
 pub const IMG_URL: &str = "https://cdn.warframestat.us/img/";
 /// The star chart, exported from the game's own files: the only source found that has the mastery
 /// XP of each node (`masteryExp`). WFCD has no node data. Its nodes add up to 14,569, the total
-/// the wiki gives for all missions (checked 2026-10-10).
+/// the wiki gives for all missions.
 const EXPORT_URL: &str = "https://raw.githubusercontent.com/calamity-inc/warframe-public-export-plus/senpai/";
 const REGIONS_URL: &str =
     "https://raw.githubusercontent.com/calamity-inc/warframe-public-export-plus/senpai/ExportRegions.json";

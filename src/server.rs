@@ -1,6 +1,6 @@
 //! Loopback HTTP: the JSON API and the web UI. Binds to 127.0.0.1 only.
 //!
-//! The endpoints are the Python app's, unchanged, so existing hotkey binds
+//! The endpoints are the same as in the Python version, so existing hotkey binds
 //! (`curl -X POST http://127.0.0.1:8642/api/rewards/scan`) keep working.
 
 use std::collections::HashMap;

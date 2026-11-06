@@ -13,8 +13,7 @@
   --text-2: #b9c2c9;
   --muted: #94a3b0;
   --faint: #677886;
-  /* Small capital labels. In the body face at regular weight they were thin grey hairlines on a
-     1x screen; the display face at semibold holds up at this size. */
+  /* Small capital labels: the body face at regular weight is too thin at this size. */
   --label: 600 12.5px/1.2 var(--display);
   --gold: #d4b26a;
   --gold-2: #f0d391;

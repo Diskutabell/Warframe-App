@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn old_python_settings_load_without_losing_known_fields() {
-        // The Python app's file: two keys that no longer exist, everything else still valid.
+        // A settings file of the Python version: two keys that no longer exist.
         let raw = json!({"port": 9000, "screenshot_command": "", "overlay_force_x11": true,
                          "memory_scan_enabled": true, "riven_overlay_x_percent": 60});
         let s = Settings::from_value(raw).unwrap();

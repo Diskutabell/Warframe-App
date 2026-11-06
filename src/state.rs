@@ -1433,8 +1433,8 @@ impl State {
             .item_by_name(body["weapon"].as_str().unwrap_or(""))
             .filter(|i| i.disposition.is_some_and(|d| d != 0.0))
             .ok_or_else(|| UserError::new("No riven data for that weapon."))?;
-        // A missing count means the common 3+1, but a legitimate 0 negatives must stay 0: the
-        // Python app once turned it into 1 and graded every 3+0 riven against the wrong multiplier.
+        // A missing count means the common 3+1, but a legitimate 0 negatives must stay 0, or a
+        // 3+0 riven is graded against the wrong multiplier.
         let pos = body["positives"].as_u64().map_or(3, |n| n as u8);
         let neg = body["negatives"].as_u64().map_or(1, |n| n as u8);
         let graded: Vec<Graded> = body["stats"]

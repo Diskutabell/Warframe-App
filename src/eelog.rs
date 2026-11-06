@@ -27,13 +27,13 @@ static NAME_RES: LazyLock<[Regex; 3]> = LazyLock::new(|| {
         Regex::new(r"Player name changed to (\S+)").unwrap(),
     ]
 });
-/// The squad overlay loads a mastery badge per slot, and slot 1 is the local player: on the user's
-/// log it is `Rank0` every time (an MR 0 account, which they confirmed), while slots 2-4 carry the
-/// squadmates' badges, Rank7to9 to Rank28to30. Low ranks get an exact icon, higher ones a band.
+/// The squad overlay loads a mastery badge per slot. Slot 1 is the local player, slots 2-4 carry
+/// the squadmates' badges. Rank 0 has an exact icon, every other badge covers three ranks
+/// (Rank1to3 ... Rank49to51).
 static MASTERY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"OnMasteryIconReady1\(Loaded:[^)]*?/Rank(\d+)(?:to(\d+))?_").unwrap());
-/// Confirmed on real relic cracks: the screen opens on OpenVoidProjectionRewardScreen (logged
-/// with an `RMI` suffix, so this stays a substring test). `Created .../ProjectionRewardChoice.swf`
+/// The reward screen opens on OpenVoidProjectionRewardScreen (logged with an `RMI` suffix, so
+/// this stays a substring test). `Created .../ProjectionRewardChoice.swf`
 /// follows 2 ms later and `Got rewards` 0.36 s later; the 8 s debounce keeps them from scanning
 /// three times. `Pause countdown done` (wfinfo-ng's trigger) never fires on current builds.
 pub const REWARD_TRIGGERS: [&str; 4] = [
@@ -347,10 +347,10 @@ impl LogStatus {
 
 /// Splits followed bytes into complete lines.
 ///
-/// The game flushes EE.log in arbitrary chunks, not whole lines: watching a live log, 9 of 10
-/// reads ended mid-line, one of them inside the 3-byte platform glyph. Handling each piece as a
-/// line split triggers in two and once read "Logged in tennoplayer" as the name "tenno". So the
-/// bytes after the last newline wait for the rest of their line.
+/// The game flushes EE.log in arbitrary chunks, not whole lines; most reads end mid-line,
+/// sometimes inside the 3-byte platform glyph. Handling each piece as a line would split
+/// triggers in two and read "Logged in tennoplayer" as the name "tenno", so the bytes after the
+/// last newline wait for the rest of their line.
 #[derive(Default)]
 pub struct LineBuffer {
     pending: Vec<u8>,
@@ -588,7 +588,7 @@ mod tests {
 
     #[test]
     fn mastery_badges() {
-        // Lines from the user's EE.log (MR 0); the band form is what squadmates' slots show.
+        // Lines from an EE.log (MR 0); the band form is what squadmates' slots show.
         let mine = "Script [Info]: ThemedSquadOverlay.lua: OnMasteryIconReady1(Loaded: /Lotus/Interface/Icons/MasteryRanks/NewMasteryRanks/Rank0_d.png)";
         assert_eq!(mastery_rank(mine), Some((0, None)));
         assert_eq!(mastery_rank(&mine.replace("Rank0", "Rank16to18")), Some((16, Some(18))));

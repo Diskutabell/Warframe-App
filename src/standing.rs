@@ -3,11 +3,10 @@
 //!
 //! The syndicates come from the game's own export (warframe-public-export-plus
 //! `ExportSyndicates.json`, English names from its `dict.en.json`); the account's standing from
-//! DE's profile or the inventory (`sources::Standing`). Two real profiles (2026-11-03) showed how
-//! they fit together: standing counts up over all ranks (289,873 at rank 5, whose range the
-//! export gives as 240,000-372,000), and every `DailyAffiliation*` pool reads 16,000 + 500 x MR
-//! when nothing was earned that day (34,000 at MR 36; 16,000 at MR 0, with the four pools that
-//! account had capped that day at 0).
+//! DE's profile or the inventory (`sources::Standing`). Standing counts up over all ranks
+//! (289,873 is rank 5, whose range the export gives as 240,000-372,000), and every
+//! `DailyAffiliation*` pool reads 16,000 + 500 x MR when nothing was earned that day, 0 once
+//! it is capped.
 
 use indexmap::IndexMap;
 use serde_json::{Value, json};
@@ -48,8 +47,7 @@ const ORDER: [&str; 21] = [
     "EventSyndicate",
 ];
 
-/// Standing allowed per day in each pool: 16,000 + 500 per mastery rank (wiki; a real MR 36
-/// profile showed 34,000 in every pool, an MR 0 one 16,000).
+/// Standing allowed per day in each pool: 16,000 + 500 per mastery rank (34,000 at MR 36).
 pub fn daily_cap(mastery_rank: i64) -> i64 {
     16_000 + 500 * mastery_rank.max(0)
 }
@@ -490,7 +488,7 @@ pub fn detail(view: &View, tag: &str, mastery_rank: Option<i64>) -> Option<Value
 mod tests {
     use super::*;
 
-    /// A syndicate as the export describes Steel Meridian (2026-11-03), shortened.
+    /// A syndicate as the export describes Steel Meridian, shortened.
     fn export() -> Value {
         json!({
             "SteelMeridianSyndicate": {
@@ -541,7 +539,7 @@ mod tests {
 
     #[test]
     fn pools_are_named_like_the_profile_names_them() {
-        // Every bin of the export against the 14 pools of a real profile.
+        // Every bin of the export against the 14 pools a profile has.
         let pairs = [
             ("NORMAL", "DailyAffiliation"), ("PVP", "DailyAffiliationPvp"), ("LIBRARY", "DailyAffiliationLibrary"),
             ("CETUS", "DailyAffiliationCetus"), ("QUILLS", "DailyAffiliationQuills"), ("SOLARIS", "DailyAffiliationSolaris"),
@@ -563,7 +561,7 @@ mod tests {
         let s = build(&export(), &dict());
         let sm = &s.list["SteelMeridianSyndicate"];
         let at = |standing, title| progress(sm, Affiliation { standing, title });
-        // Values from real profiles: 289,873 at rank 5 is 49,873 of 132,000.
+        // 289,873 at rank 5 is 49,873 of 132,000.
         assert_eq!(at(289_873, 5), Progress { value: 49_873, size: 132_000, at_cap: false, full: false });
         assert_eq!(at(372_000, 5), Progress { value: 132_000, size: 132_000, at_cap: false, full: true });
         assert_eq!(at(27_000, 1), Progress { value: 22_000, size: 22_000, at_cap: true, full: false });

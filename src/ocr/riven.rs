@@ -86,7 +86,7 @@ pub fn stat_after(window: &str) -> Option<&'static str> {
         return Some(stat);
     }
     // The card wraps long names, and the wrapped line is what tesseract loses on a busy background:
-    // a real riven read as "+57.5% Magazine" with "Capacity" gone (2026-10-09). The first word still
+    // "+57.5% Magazine Capacity" can come out as "+57.5% Magazine". The first word still
     // names the stat if no other wording starts with it - and if it never occurs inside a longer
     // name, where it could be what is left of that one ("Chance" from "Critical Chance").
     let first = words[0];
@@ -194,7 +194,7 @@ mod tests {
 
     #[test]
     fn reads_a_wrapped_card() {
-        // Modelled on a real riven frame from 2026-10-03: these are the stats tesseract read there.
+        // What tesseract read off a riven card.
         let text = "Latron Critatis\n+56.9% Ammo Maximum\n+167.4% Critical Chance\n+57.5% Magazine\nCapacity\nMR 9";
         let r = parse(text, &weapons());
         assert_eq!(r.weapon.as_deref(), Some("Latron"));
@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn a_lost_wrapped_line_still_names_the_stat() {
-        // The real card from 2026-10-09: tesseract lost "Capacity" against the cycle screen.
+        // Tesseract lost "Capacity" against the busy background of the cycle screen.
         let text = "- Latron Arma- -\nampicron @\no> +56.9% Ammo Maximum . : F\n\
                     +167.4% Critical Chance ' -\n- v +57.5% Magazine - - .\nMR 6 9 _ Al |\nLOCK TRAIT . p S8";
         let r = parse(text, &weapons());

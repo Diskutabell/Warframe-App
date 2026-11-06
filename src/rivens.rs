@@ -1,9 +1,8 @@
 //! Riven maths: base values, disposition, the roll window and letter grades.
 //!
-//! value = base x disposition x multiplier, and a real roll lands anywhere in 90%..110% of that.
+//! value = base x disposition x multiplier, and a roll lands anywhere in 90%..110% of that.
 //! The multipliers per (positives, negatives) and the grade bands follow wiki.warframe.com's Riven
-//! Mods page; the grading was validated against a real graded riven (Sicarus, disposition 1.2,
-//! 3 positives + 1 negative), every stat reproducing its letter grade within display rounding.
+//! Mods page.
 //!
 //! A grade only says how the roll compares with an average roll - never whether the stats are
 //! any good on the weapon.
@@ -61,12 +60,11 @@ pub struct Stat {
     pub spliced: bool,
 }
 
-/// Every riven attribute and its base value, transcribed by script from wiki.warframe.com's Riven
-/// Mods page ("Base Values" and "Spliced Values", both sourced from DE's Public Export
-/// ExportUpgrades_en.json) on 2026-10-09. The names are the ones the app has always used.
+/// Every riven attribute and its base value, from wiki.warframe.com's Riven Mods page ("Base
+/// Values" and "Spliced Values", both taken from DE's Public Export ExportUpgrades_en.json).
 #[rustfmt::skip]
 pub static STATS: &[Stat] = &[
-    // The 32 regular attributes, in the order the app has always listed them.
+    // The 32 regular attributes.
     Stat { name: "Damage", unit: Unit::Percent, base: [Some(165.0), Some(164.7), Some(219.6), Some(99.9), Some(164.7)], sign: Sign::PositiveOnly, spliced: false },
     Stat { name: "Multishot", unit: Unit::Percent, base: [Some(90.0), Some(119.7), Some(119.7), Some(60.3), None], sign: Sign::Either, spliced: false },
     Stat { name: "Critical Chance", unit: Unit::Percent, base: [Some(149.99), Some(90.0), Some(149.99), Some(99.9), Some(180.0)], sign: Sign::Either, spliced: false },
@@ -437,8 +435,7 @@ mod tests {
 
     #[test]
     fn zero_negatives_use_their_own_multiplier() {
-        // The Python app once turned `negatives: 0` into 1 with `or`, grading 3+0 rivens against
-        // 0.9375 instead of 0.75.
+        // 3+0 uses 0.75, not the 3+1 multiplier 0.9375.
         let w = weapon("rifle", 1.0);
         let g = grade_roll(&w, "Multishot", 90.0 * 0.75, 3, 0, false).unwrap();
         assert_eq!(g.grade, "B+");
@@ -446,7 +443,7 @@ mod tests {
 
     #[test]
     fn a_missing_stat_line_is_inferred_from_the_values() {
-        // The user's Latron (disposition 1.4), a 3+0 roll; OCR lost "+57.5% Magazine Capacity".
+        // A Latron (disposition 1.4), a 3+0 roll; OCR lost "+57.5% Magazine Capacity".
         let w = weapon("rifle", 1.4);
         let read = [("Ammo Maximum", 56.9, false), ("Critical Chance", 167.4, false)];
         assert_eq!(infer_counts(&w, &read), (3, 0, 1));

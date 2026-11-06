@@ -126,8 +126,8 @@ export function hydrateIcons(root = document) {
 
 // ------------------------------------------------------------------ item art
 // Art comes from cdn.warframestat.us and warframe.market through the engine, which scales it to
-// the slot (src/art.rs). A dropped request used to leave a permanent hole, so retry twice with a
-// short backoff; art the source does not have is a 404, and the slot is hidden.
+// the slot (src/art.rs). A dropped request would leave a hole, so retry twice with a short
+// backoff; art the source does not have is a 404, and the slot is hidden.
 window.imgFail = (el) => {
   const n = (+el.dataset.try || 0) + 1;
   if (n > 2) { el.style.visibility = "hidden"; return; }

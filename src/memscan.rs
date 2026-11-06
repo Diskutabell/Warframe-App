@@ -1,4 +1,4 @@
-//! LAST RESORT, OFF BY DEFAULT: a read-only scan of the running game for its inventory JSON.
+//! Off by default: a read-only scan of the running game for its inventory JSON.
 //!
 //! This mirrors what Overwolf's Warframe plugin (used by AlecaFrame) does: the game already holds
 //! the inventory it downloaded from DE as JSON text; the scan finds that text (anchored on
@@ -129,8 +129,8 @@ fn ptrace_scope() -> Option<u8> {
 /// Scopes 1 and 2 are not a "no". Yama lets a process read another one's memory when it holds
 /// CAP_SYS_PTRACE in that process's user namespace (security/yama/yama_lsm.c), and a namespace's
 /// owner holds every capability in it. Steam's sandbox runs the game in a user namespace owned by
-/// the user, so on such a system the read works at scope 1 - it does on the developer's NixOS.
-/// Whether it applies elsewhere only shows when the game's memory is opened.
+/// the user, so on such a system (NixOS, for one) the read works at scope 1. Whether it applies
+/// elsewhere only shows when the game's memory is opened.
 pub fn availability() -> Result<(), String> {
     match ptrace_scope() {
         Some(3) => Err("kernel.yama.ptrace_scope is 3: Linux lets no program read another program's memory.".into()),

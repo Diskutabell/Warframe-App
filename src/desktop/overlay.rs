@@ -1,8 +1,7 @@
 //! The in-game overlays: the reward price strip and the riven grade panel.
 //!
-//! Native GTK widgets, updated directly when a scan finishes. The Python app used web pages that
-//! polled the engine once a second, so a re-shown strip showed the previous mission's rewards for
-//! up to a second. Windows are hidden and re-shown, never destroyed.
+//! Native GTK widgets, updated directly when a scan finishes, so a re-shown strip never shows
+//! the previous mission's rewards. Windows are hidden and re-shown, never destroyed.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -421,10 +420,10 @@ impl Overlays {
                 card.add(&stat_row(g));
             }
             if r.stats.iter().any(|g| g.out_of_range) {
-                card.add(&label("Values outside ±10% — the stat count or weapon looks wrong.", "wfp-warn"));
+                card.add(&label("Values outside ±10%: the stat count or weapon looks wrong.", "wfp-warn"));
             }
             if r.stats.iter().any(|g| g.sign_conflict) {
-                card.add(&label("A stat shows a sign it cannot roll with — the sign was misread.", "wfp-warn"));
+                card.add(&label("A stat shows a sign it cannot roll with: the sign was misread.", "wfp-warn"));
             }
             card.add(&label("Grades compare the roll with an average roll, not with what is useful.", "wfp-foot"));
             r.stats.len().max(1) as i32

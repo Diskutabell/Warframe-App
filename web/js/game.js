@@ -1,7 +1,6 @@
 // Game art: textures from Warframe's own interface, which the engine fetches, scales and caches
-// (src/art.rs). Paths are relative to /Lotus/Interface/Icons/ in the game's files; every one
-// listed here was looked at on 2026-10-10. A texture that cannot be loaded removes itself, so
-// nothing below may be needed for the layout to hold.
+// (src/art.rs). Paths are relative to /Lotus/Interface/Icons/ in the game's files. A texture
+// that cannot be loaded removes itself, so the layout must not depend on any of them.
 
 import { artUrl, countdown, esc } from "./lib.js";
 

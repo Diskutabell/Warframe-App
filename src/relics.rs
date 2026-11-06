@@ -1,9 +1,8 @@
 //! Relic drop tables when WFCD's are missing.
 //!
-//! Since its update of 2026-10-23, WFCD's `Relics.json` lists every relic without its rewards and
-//! without `vaulted` (all 3,208 entries, checked 2026-11-03). That emptied relic values and farm
-//! hints, made every relic look vaulted, and left the reward-screen reader with no names to look
-//! for. This module fills those gaps in the WFCD file, before the catalog is built:
+//! Since late October 2026, WFCD's `Relics.json` lists every relic without its rewards and
+//! without `vaulted`. That emptied relic values and farm hints, made every relic look vaulted,
+//! and left the reward-screen reader with no names to look for. This module fills those gaps in the WFCD file, before the catalog is built:
 //!
 //! * which items a relic holds, with their exact ids and rarities: the game's own export
 //!   (warframe-public-export-plus `ExportRelics.json`, whose `rewardManifest` points into
@@ -252,7 +251,7 @@ pub fn patch(
 mod tests {
     use super::*;
 
-    /// One relic as the three sources describe it (shortened from the real Lith A12 entries).
+    /// One relic as the three sources describe it (shortened from the Lith A12 entries).
     fn sources() -> (Value, Value, Value, Value) {
         let wfcd = json!([{"uniqueName": "/R/LithA12Bronze", "name": "Lith A12 Intact", "imageName": "RelicLithA.png", "rewards": []}]);
         let export_relics = json!({

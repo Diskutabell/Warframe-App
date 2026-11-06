@@ -199,8 +199,8 @@ pub fn new_key(name: &str, taken: &[&str]) -> String {
 ///
 /// An item's mastery XP only ever grows, and between two readings of one account only the items
 /// used in between change, so most shared items match exactly. Two accounts practically never
-/// do. On two real accounts (2026-11-03): one account's profile and memory capture matched on
-/// 98 of 101 items; the two accounts' profiles on 0 of 101.
+/// do: one account's profile and memory capture typically match on almost every shared item,
+/// two different accounts on none.
 pub fn same_owner(a: &IndexMap<String, i64>, b: &IndexMap<String, i64>) -> Option<bool> {
     const MIN_SHARED: usize = 10;
     let (mut shared, mut equal) = (0usize, 0usize);

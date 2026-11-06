@@ -1,9 +1,9 @@
 //! Item art for the UI, scaled by the engine.
 //!
-//! The sources serve 512 px (WFCD, browse.wf) and 128 px (warframe.market) images. Shrunk to a 24-72 px slot
-//! by WebKitGTK they came out pixelated (the user's screenshot, 2026-10-10). So the UI asks `/api/art?u=<url>&s=<px>` instead: the image is fetched once, scaled
-//! with a proper filter and kept in the cache directory (`art/`), which also makes art work
-//! offline.
+//! The sources serve 512 px (WFCD, browse.wf) and 128 px (warframe.market) images. Shrunk to a
+//! 24-72 px slot by the web view they come out pixelated, so the UI asks
+//! `/api/art?u=<url>&s=<px>` instead: the image is fetched once, scaled with a proper filter and
+//! kept in the cache directory (`art/`), which also makes art work offline.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

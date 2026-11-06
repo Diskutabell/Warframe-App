@@ -346,8 +346,8 @@ impl Market {
 /// A generic slot glyph (chassis, barrel, blueprint...) for a part warframe.market does not list,
 /// which is every part that cannot be traded. `category` is the WFCD category of the item the part
 /// builds; the slot is read off the end of the part's uid (`TenguHelmetComponent`,
-/// `StrunWraithBarrel`, `IronframeBlueprint`). The file names were checked against the site
-/// (2026-10-10); it answers 200 with an HTML page for a glyph it does not have.
+/// `StrunWraithBarrel`, `IronframeBlueprint`). The site answers 200 with an HTML page for a glyph
+/// it does not have.
 pub fn slot_glyph(category: &str, uid: &str) -> Option<String> {
     const WEAPON: &[&str] = &[
         "aegis", "barrel", "blade", "chassis", "disc", "engine", "gauntlet", "grip", "guard", "handle", "head",
