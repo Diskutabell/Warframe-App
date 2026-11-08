@@ -408,7 +408,7 @@ impl View {
                     let parts: Vec<PartView> = self.part_views(it, false);
                     row["parts"] = parts
                         .iter()
-                        .map(|p| json!({"name": p.name, "need": p.need, "have": p.have, "vaulted": p.vaulted}))
+                        .map(|p| json!({"name": p.name, "need": p.need, "have": p.have, "vaulted": p.vaulted, "image": p.image}))
                         .collect();
                     row["buildable"] = json!(!parts.is_empty() && parts.iter().all(|p| p.have >= p.need));
                     row["requires"] = json!(self.requires(it));
@@ -833,6 +833,28 @@ impl View {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mastery_parts_include_the_same_image_as_item_details() {
+        let cat = gamedata::build(&IndexMap::from([(
+            "Warframes".to_string(),
+            json!([{"uniqueName": "/Rhino", "name": "Rhino", "imageName": "rhino.png", "masterable": true,
+                "components": [{"uniqueName": "/Lotus/Types/Recipes/WarframeRecipes/RhinoChassisComponent"}]}]),
+        )]));
+        let view = View {
+            cat: Arc::new(cat),
+            profile: None,
+            inv: None,
+            manual: Arc::new(Manual::default()),
+            market: Market::new(Arc::new(std::sync::RwLock::new(crate::config::Settings::default()))),
+            foundry: HashSet::new(),
+        };
+        let mastery = view.mastery();
+        let rhino = mastery.as_array().unwrap().iter().find(|r| r["uid"] == "/Rhino").unwrap();
+        let detail = view.detail("/Rhino", &HashSet::new()).unwrap();
+        assert!(rhino["parts"][0]["image"].is_string());
+        assert_eq!(rhino["parts"][0]["image"], detail["parts"][0]["image"]);
+    }
 
     #[test]
     fn mastery_rank_thresholds() {

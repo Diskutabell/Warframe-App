@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added
+
+- **Mastery cards.** Switch between the table and larger cards, and filter for Prime or non-Prime
+  items.
+
+### Changed
+
+- Mastery says "parts collected" rather than "ready to build" when blueprint and component counts
+  are combined and resources have not been checked.
+
 ### Fixed
 
 - Game-data and market caches keep usable data when a response is invalid. Cache errors are
