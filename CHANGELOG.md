@@ -8,6 +8,13 @@
   materials. Goals are saved per account.
 - Ctrl+K searches mods, resources, gear and names in loaded drop tables. Item, part and relic
   details show known drop sources and chances, with wiki links for other sources.
+- **Mastery cards.** Switch between the table and larger cards, and filter for Prime or non-Prime
+  items.
+
+### Changed
+
+- Mastery says "parts collected" rather than "ready to build" when blueprint and component counts
+  are combined and resources have not been checked.
 
 ### Changed
 

@@ -138,6 +138,11 @@ window.imgFail = (el) => {
 window.imgDone = (el) => { if (!el.naturalWidth) el.style.visibility = "hidden"; };
 /** The engine's copy of an image, scaled for a slot `px` CSS pixels wide (see src/art.rs). */
 export const artUrl = (src, px) => `api/art?s=${Math.ceil(px * (window.devicePixelRatio || 1))}&u=${encodeURIComponent(src)}`;
+
+export function partPips(parts) {
+  return parts.flatMap((p) => Array.from({ length: p.need }, (_, i) =>
+    `<span class="pip ${i < p.have ? "ok" : ""}" title="${esc(p.name)} - own ${p.have} of ${p.need}">${p.image ? `<img alt="" src="${esc(artUrl(p.image, 24))}" onerror="this.remove()">` : ""}${i === 0 && p.have > p.need ? `<b>${p.have}</b>` : ""}</span>`)).join("");
+}
 // The picture area of each .art size in css/app.css: the box minus its 1 px border.
 const ART_PX = { sm: 30, lg: 70, xl: 102 };
 export const art = (src, cls = "") => (src
