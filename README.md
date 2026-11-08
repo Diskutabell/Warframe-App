@@ -38,12 +38,16 @@ Linux it runs natively next to the game (no Wine needed for the app itself).
 - **Standing:** rank progress for every syndicate, rank-up costs, what's left of today's daily
   limits, medallions you hold, and what each syndicate's offerings are worth in platinum.
 - **Mastery, prime sets, relics:** filterable lists with the parts you have and where to farm the
-  rest; relic values and which ones you can crack in open fissures. Mastery can be shown as a table
-  or cards and filtered to Prime or non-Prime items.
+  rest; relic values and which ones you can crack in open fissures. Item, part and relic details
+  show known mission and enemy drop chances and link to the wiki for other sources. Mastery can be
+  shown as a table or cards and filtered to Prime or non-Prime items.
 - **Fissures and world:** live fissures with the best relic you own for each, cycles, Baro,
   sortie, archon hunt, bounties, the Circuit, Archimedea, alerts, invasions, Nightwave, Darvo.
 - **Foundry and market:** what's building, what you could build, spare parts in platinum and
   ducats, price checks.
+- **Search:** Ctrl+K also finds mods, resources, gear and names in loaded drop tables. The mod
+  catalog is optional and needs to be downloaded at least once; missing sources can be checked
+  on the wiki.
 - **Several accounts:** every account that logs in on the machine gets its own data, and the
   window follows the game when you switch.
 - **Search:** Ctrl+K finds any item, part, relic, syndicate or page.

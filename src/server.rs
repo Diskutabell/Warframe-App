@@ -281,6 +281,7 @@ fn get_api(s: &Arc<State>, path: &str, q: &HashMap<String, String>) -> Result<Va
         "relics" => s.view().relics(q.get("owned").is_some_and(|v| v == "1")),
         "trade" => s.trade(),
         "find" => s.view().find(q.get("q").map_or("", String::as_str)),
+        "find-equipment" => s.view().find_equipment(q.get("q").map_or("", String::as_str)),
         "item" => s.detail(q.get("key").map_or("", String::as_str))?,
         "history" => s.history(),
         "world" => s.world(),
