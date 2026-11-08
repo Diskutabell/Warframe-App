@@ -125,6 +125,7 @@ export default {
       ${section("Reward screen and riven overlays", `
         ${toggle("ocr_enabled", "Read the reward screen when it opens", "Triggered by the game log; the hotkey below works any time.")}
         ${toggle("overlay_enabled", "Show prices over the game", "A panel under each reward card, gone when the reward screen closes. Clicks pass through to the game.")}
+        ${select("overlay_position", "Price panels", "Above the cards leaves the row under them in view, where it shows what the squad picks.", [["below", "Under the cards"], ["above", "Above the cards"]])}
         ${number("overlay_seconds", "Take the prices down at the latest after", "Seconds. They normally go with the reward screen.", { min: 3, max: 120 })}
         ${toggle("riven_overlay_enabled", "Show riven grades over the game", "After a riven scan with the hotkey.")}
         ${number("riven_overlay_seconds", "Hide the riven panel after", "Seconds.", { min: 3, max: 300 })}
@@ -133,7 +134,7 @@ export default {
         ${linux ? select("overlay_backend", "Keep overlays above the game with", "Takes effect after a restart.", [["auto", "Automatic"], ["layer-shell", "Layer shell (Hyprland, Sway, KDE)"], ["x11", "X11 window (GNOME, X11 sessions)"]]) : ""}
         ${linux ? "" : `<div class="callout" style="margin-top:8px">The overlays only show over the game in <b>borderless</b> or windowed mode, not in exclusive fullscreen.</div>`}
         ${!linux ? "" : select("screenshot_tool", "Screenshot tool", "", [["auto", "Automatic" + (tools.screenshot ? ` (${tools.screenshot})` : "")], ["grim", "grim (Hyprland, Sway)"], ["spectacle", "Spectacle (KDE)"], ["gnome-screenshot", "GNOME Screenshot"], ["maim", "maim (X11)"], ["scrot", "scrot (X11)"], ["import", "ImageMagick import (X11)"]])}
-        ${S.desktop ? `<div class="row" style="margin-top:12px"><button id="testOverlay">Show a test overlay</button><span class="muted" style="font-size:13px">Sample rewards, where the panels will appear under four cards.</span></div>` : ""}`)}
+        ${S.desktop ? `<div class="row" style="margin-top:12px"><button id="testOverlay">Show a test overlay</button><span class="muted" style="font-size:13px">Sample rewards, where the panels will appear for four cards.</span></div>` : ""}`)}
 
       ${section("Hotkeys", `
         ${text("hotkey_rewards", "Read the reward screen", "")}

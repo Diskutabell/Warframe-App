@@ -31,9 +31,10 @@ Linux it runs natively next to the game (no Wine needed for the app itself).
 
 - **Overview:** mastery rank and mastery XP (same total as the in-game profile), currencies,
   relics worth cracking right now, world timers, foundry, pinned items, recent reward screens.
-- **Reward screen overlay:** when the relic reward screen opens, a panel under each card shows
-  its platinum and ducat value, how many you own, whether you still need it, and which pick is
-  worth the most. Clicks go through to the game, and the panels leave with the screen.
+- **Reward screen overlay:** when the relic reward screen opens, a panel under each card (or
+  above it, in Settings) shows its platinum and ducat value, how many you own, whether you still
+  need it, and which pick is worth the most. Clicks go through to the game, and the panels leave
+  with the screen.
 - **Riven grades:** press a key with a riven card on screen and every stat gets graded against
   the weapon's disposition.
 - **Standing:** rank progress for every syndicate, rank-up costs, what's left of today's daily

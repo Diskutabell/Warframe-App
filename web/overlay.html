@@ -1,8 +1,8 @@
 <!doctype html>
 <!-- The in-game overlays on Windows: one transparent window per overlay loads this page, and the
-     app calls render() with a scan result and the size to draw at (CSS pixels per unit of the
-     reward screen, as the game draws its cards). On Linux the overlays are GTK widgets instead
-     (src/desktop/overlay.rs); the look is the same. -->
+     app calls render() with a scan result, the size to draw at (CSS pixels per unit of the
+     reward screen, as the game draws its cards) and where each price panel goes. On Linux the
+     overlays are GTK widgets instead (src/desktop/overlay.rs); the look is the same. -->
 <html>
 <head>
 <meta charset="utf-8">
@@ -13,12 +13,10 @@
   body { font: 13px "Source Sans 3", "Segoe UI", sans-serif; color: #a3b0b8; }
   #root { height: 100%; box-sizing: border-box; position: relative; }
 
-  /* One panel under each reward card; a card read without a name keeps its place, empty. */
-  .slots { display: flex; gap: calc(8 * var(--u)); height: 100%; }
-  .slot { flex: 1 1 0; min-width: 0; box-sizing: border-box; display: flex; flex-direction: column;
+  /* One panel under or above each reward card, where the app places it. */
+  .slot { position: absolute; min-width: 0; box-sizing: border-box; display: flex; flex-direction: column;
           justify-content: center; padding: calc(5 * var(--u)) calc(9 * var(--u));
           background: rgba(8, 12, 17, 0.97); border: 1px solid rgba(150, 170, 186, 0.3); border-radius: calc(3 * var(--u)); }
-  .slot.empty { visibility: hidden; }
   .slot.best { background: rgba(45, 37, 15, 0.97); border-color: #d9b45a; }
   .top { display: flex; align-items: center; gap: calc(6 * var(--u)); min-width: 0; }
   .name { flex: 1; min-width: 0; font: 600 calc(14.5 * var(--u)) "Rajdhani", "Arial Narrow", sans-serif; color: #a9b7c2;
@@ -58,32 +56,31 @@
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
   const root = document.getElementById("root");
 
-  function rewards(r) {
+  // `boxes`: x, y, width, height of each panel in this window, one per card (one for a message).
+  const at = (b) => `left:${b[0]}px;top:${b[1]}px;width:${b[2]}px;height:${b[3]}px`;
+
+  function rewards(r, boxes) {
     if (!r.items.length) {
-      return `<div class="slots"><div class="slot"><div class="name">Reward scan</div>
-        <div class="err">${esc(r.error || "No reward names recognized.")}</div></div></div>`;
+      return `<div class="slot" style="${at(boxes[0])}"><div class="name">Reward scan</div>
+        <div class="err">${esc(r.error || "No reward names recognized.")}</div></div>`;
     }
-    // Items read without cards come in order, one panel each.
-    const cards = Math.max(1, r.cards ?? r.items.length);
+    // Items read without cards come in order; a card read without a name gets no panel.
     const slots = [];
-    for (let k = 0; k < cards; k++) {
+    for (let k = 0; k < boxes.length; k++) {
       const it = r.items.find((x, i) => (x.slot ?? i) === k);
-      if (!it) {
-        slots.push(`<div class="slot empty"></div>`);
-        continue;
-      }
+      if (!it) continue;
       const best = r.best === it.name;
       const bits = [`owned ${it.have}`];
       if (it.needed > it.have) bits.push(`<span class="needed">needed</span>`);
       if (it.vaulted === true) bits.push(`<span class="vaulted">vaulted</span>`);
       const ducats = it.ducats > 0 ? `<span class="ducats"><img src="/icons/ducats.png" alt="">${it.ducats}</span>` : "";
-      slots.push(`<div class="slot${best ? " best" : ""}">
+      slots.push(`<div class="slot${best ? " best" : ""}" style="${at(boxes[k])}">
         <div class="top"><span class="name">${esc(it.name)}</span>${best ? `<span class="tag">BEST</span>` : ""}</div>
         <div class="money"><img class="p" src="/icons/platinum.png" alt="">
           <span class="plat${it.price == null ? " none" : ""}">${it.price ?? "–"}</span>${ducats}</div>
         <div class="info">${bits.join(" · ")}</div></div>`);
     }
-    return `<div class="slots">${slots.join("")}</div>`;
+    return slots.join("");
   }
 
   function riven(r) {
@@ -109,9 +106,9 @@
   }
 
   // The native window owns the hide timer, including during delayed price updates.
-  window.render = (kind, result, unit) => {
+  window.render = (kind, result, unit, boxes) => {
     document.documentElement.style.setProperty("--u", `${unit || 1}px`);
-    root.innerHTML = kind === "riven" ? riven(result) : rewards(result);
+    root.innerHTML = kind === "riven" ? riven(result) : rewards(result, boxes || []);
   };
   window.ipc.postMessage("ready");
 </script>

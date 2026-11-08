@@ -15,6 +15,7 @@ use gtk_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
 use super::Backend;
 use crate::compositor::{self, Rect};
+use crate::config::PanelPosition;
 use crate::ocr::reward;
 use crate::rivens::Graded;
 use crate::state::{RewardItem, RewardResult, RivenResult, State};
@@ -63,8 +64,6 @@ fn panel_css(u: f64) -> String {
 
 const DOTS: [&str; 6] = ["", "●○○○○", "●●○○○", "●●●○○", "●●●●○", "●●●●●"];
 const RIVEN_W: i32 = 470;
-/// The space between two panels, like the space between two cards.
-const PANEL_GAP: f64 = 8.0;
 
 fn escape(s: &str) -> String {
     glib::markup_escape_text(s).to_string()
@@ -350,42 +349,55 @@ impl Overlays {
         if !fresh && !panel.visible() {
             return; // a price update for panels already taken down with their screen
         }
+        let settings = self.state.settings();
         let scale = r.scale.or_else(|| self.state.ui_scales().first().copied()).unwrap_or(1.0);
-        // An error has no cards to sit under: one panel the width of two cards, in the middle.
-        let cards = if r.items.is_empty() { 2 } else { r.cards.unwrap_or(r.items.len()).max(1) };
+        // A message has no cards to sit under: one wide panel in the middle (`panel_places(0)`).
+        let cards = if r.items.is_empty() { 0 } else { r.cards.unwrap_or(r.items.len()).max(1) };
         let g = self.game_rect();
         let u = reward::unit(g.width as f64, g.height as f64, scale);
-        // Text smaller than this is unreadable; the panels then grow downwards.
+        // Text smaller than this is unreadable; the panels then grow away from the cards.
         let text_u = u.max(0.75);
-        let c = reward::CARD_W * u;
-        let gap = (PANEL_GAP * u).round();
+        let above = settings.overlay_position == PanelPosition::Above;
+        let game = (g.x as f64, g.y as f64, g.width as f64, g.height as f64);
+        let rects: Vec<[f64; 4]> = reward::panel_places(cards, above)
+            .iter()
+            .map(|p| reward::panel_rect(p, game, u, reward::PANEL_H * text_u))
+            .collect();
+        // One window around all the panels, each placed inside it.
+        let (x0, y0) = (
+            rects.iter().map(|r| r[0]).fold(f64::INFINITY, f64::min),
+            rects.iter().map(|r| r[1]).fold(f64::INFINITY, f64::min),
+        );
+        let x1 = rects.iter().map(|r| r[0] + r[2]).fold(f64::NEG_INFINITY, f64::max);
+        let y1 = rects.iter().map(|r| r[1] + r[3]).fold(f64::NEG_INFINITY, f64::max);
         let rect = Rect {
-            x: (g.x as f64 + g.width as f64 / 2.0 - cards as f64 * c / 2.0 + gap / 2.0).round() as i32,
-            y: (g.y as f64 + g.height as f64 / 2.0 - reward::PANEL_TOP * u).round() as i32,
-            width: (cards as f64 * c - gap).round() as i32,
-            height: (reward::PANEL_H * text_u).round() as i32,
+            x: x0.round() as i32,
+            y: y0.round() as i32,
+            width: (x1 - x0).round() as i32,
+            height: (y1 - y0).round() as i32,
+        };
+        let put = |fixed: &gtk::Fixed, widget: &gtk::Box, r: &[f64; 4]| {
+            widget.set_size_request(r[2].round() as i32, r[3].round() as i32);
+            fixed.put(widget, (r[0] - x0).round() as i32, (r[1] - y0).round() as i32);
         };
         self.style_panels(text_u);
         panel.clear();
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, gap as i32);
-        row.set_homogeneous(true);
-        row.set_vexpand(true);
+        let fixed = gtk::Fixed::new();
         if r.items.is_empty() {
             let message = r.error.as_deref().unwrap_or("No reward names recognized.");
-            row.add(&self.error_panel(message));
+            put(&fixed, &self.error_panel(message), &rects[0]);
         } else {
-            for k in 0..cards {
+            for (k, place) in rects.iter().enumerate() {
                 // Items read without cards are in order; a card read without a name stays empty.
                 let item = r.items.iter().enumerate().find(|(i, it)| it.slot.unwrap_or(*i) == k).map(|(_, it)| it);
-                match item {
-                    Some(it) => row.add(&self.item_panel(it, r.best.as_deref() == Some(it.name.as_str()), text_u)),
-                    None => row.add(&gtk::Box::new(gtk::Orientation::Vertical, 0)),
+                if let Some(it) = item {
+                    put(&fixed, &self.item_panel(it, r.best.as_deref() == Some(it.name.as_str()), text_u), place);
                 }
             }
         }
-        panel.body.add(&row);
+        panel.body.add(&fixed);
         if fresh || !panel.visible() {
-            panel.show(self.backend, rect, self.state.settings().overlay_seconds);
+            panel.show(self.backend, rect, settings.overlay_seconds);
         } else {
             panel.place(self.backend, rect);
             panel.window.show_all();

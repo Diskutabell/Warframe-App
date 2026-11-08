@@ -113,6 +113,17 @@ pub enum OverlayBackend {
     X11,
 }
 
+/// Where the price panels sit on the reward screen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PanelPosition {
+    /// Under the cards, over the row of player names.
+    #[default]
+    Below,
+    /// Above the cards, so the row under them stays in view: it shows what the squad picks.
+    Above,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -147,6 +158,7 @@ pub struct Settings {
     pub overlay_enabled: bool,
     /// The longest the price panels stay up; they go with the reward screen, usually sooner.
     pub overlay_seconds: u32,
+    pub overlay_position: PanelPosition,
     pub overlay_backend: OverlayBackend,
     /// Bulk prices; reward-screen prices refresh after 15 min regardless.
     pub price_cache_minutes: u32,
@@ -177,6 +189,7 @@ impl Default for Settings {
             notify_foundry: false,
             overlay_enabled: true,
             overlay_seconds: 15,
+            overlay_position: PanelPosition::Below,
             overlay_backend: OverlayBackend::Auto,
             price_cache_minutes: 360,
         }

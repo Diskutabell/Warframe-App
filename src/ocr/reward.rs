@@ -39,6 +39,14 @@ const BAR_LEVEL: i32 = 50;
 pub const PANEL_TOP: f64 = 52.0;
 /// How tall a price panel is.
 pub const PANEL_H: f64 = 86.0;
+/// Between two panels, as between two cards, and between a panel and what it stands on.
+const PANEL_GAP: f64 = 8.0;
+/// The top of the cards, above the middle of the screen.
+const CARD_TOP: f64 = 318.0;
+/// The choice countdown sits above the middle of the cards: half its box's width, and its top.
+/// Panels above the cards keep clear of it (measured on a 2560x1440 frame at 85%).
+const TIMER_HALF_W: f64 = 66.0;
+const TIMER_TOP: f64 = 415.0;
 /// The interface scales the game offers, nearest to 100% first, for a game whose EE.cfg cannot
 /// be read.
 const SCALES: [f64; 16] = [1.0, 0.95, 1.05, 0.9, 1.1, 0.85, 1.15, 0.8, 1.2, 0.75, 1.25, 0.7, 0.65, 0.6, 0.55, 0.5];
@@ -46,6 +54,56 @@ const SCALES: [f64; 16] = [1.0, 0.95, 1.05, 0.9, 1.1, 0.85, 1.15, 0.8, 1.2, 0.75
 /// Pixels per unit for a game of `width` x `height` at interface scale `ui_scale` (1.0 = 100%).
 pub fn unit(width: f64, height: f64, ui_scale: f64) -> f64 {
     (width / 1920.0).min(height / 1080.0) * ui_scale
+}
+
+/// Where one price panel goes, in units from the middle of the screen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PanelPlace {
+    /// The left edge, right of the middle (negative: left of it).
+    pub left: f64,
+    pub width: f64,
+    /// How far above the middle the panel's top hangs from, or its bottom stands on (`stands`).
+    pub at: f64,
+    pub stands: bool,
+}
+
+/// The price panels for `cards` cards, left to right: under each card, over the player names
+/// below it, or, `above`, standing on top of it. Above the cards they keep the choice countdown
+/// in view: the two middle panels of an even row leave its width free, and the middle panel of
+/// an odd row stands on top of it. No cards (a message) gives one panel two cards wide.
+pub fn panel_places(cards: usize, above: bool) -> Vec<PanelPlace> {
+    let (count, width) = if cards == 0 { (1, 2.0 * CARD_W) } else { (cards, CARD_W) };
+    let clear = TIMER_HALF_W + PANEL_GAP / 2.0;
+    (0..count)
+        .map(|k| {
+            let left = (k as f64 - count as f64 / 2.0) * width + PANEL_GAP / 2.0;
+            let mut p = PanelPlace { left, width: width - PANEL_GAP, at: PANEL_TOP, stands: false };
+            if above {
+                p.stands = true;
+                p.at = CARD_TOP + PANEL_GAP;
+                let right = p.left + p.width;
+                if count % 2 == 1 && k == count / 2 {
+                    p.at = TIMER_TOP + PANEL_GAP;
+                } else if right > -clear && p.left < clear {
+                    if p.left < 0.0 {
+                        p.width = -clear - p.left;
+                    } else {
+                        p.width = right - clear;
+                        p.left = clear;
+                    }
+                }
+            }
+            p
+        })
+        .collect()
+}
+
+/// A panel's rectangle in pixels (x, y, width, height), for a game window at `game` (x, y,
+/// width, height) with `u` pixels per unit and panels `h` pixels tall.
+pub fn panel_rect(p: &PanelPlace, game: (f64, f64, f64, f64), u: f64, h: f64) -> [f64; 4] {
+    let (gx, gy, gw, gh) = game;
+    let edge = gy + gh / 2.0 - p.at * u;
+    [gx + gw / 2.0 + p.left * u, if p.stands { edge - h } else { edge }, p.width * u, h]
 }
 
 /// Where the cards are on one frame.
@@ -427,6 +485,30 @@ mod tests {
         assert!(better(&short, &guess));
         // Names that do not contain each other compare by score.
         assert!(better(&read("Paris Prime Grip", 0.95), &read("Paris Prime String", 0.9)));
+    }
+
+    #[test]
+    fn panels_sit_under_the_cards_or_above_them_clear_of_the_countdown() {
+        // Under: one per card, 8 apart, hanging from just under the bars.
+        let below = panel_places(4, false);
+        let lefts: Vec<f64> = below.iter().map(|p| p.left).collect();
+        assert_eq!(lefts, [-480.0, -238.0, 4.0, 246.0]);
+        assert!(below.iter().all(|p| p.width == 234.0 && p.at == PANEL_TOP && !p.stands));
+        // Above, four cards: the middle two leave the countdown's width free.
+        let above = panel_places(4, true);
+        assert!(above.iter().all(|p| p.stands && p.at == CARD_TOP + PANEL_GAP));
+        assert_eq!((above[1].left + above[1].width, above[2].left), (-70.0, 70.0));
+        assert_eq!((above[0].width, above[3].width), (234.0, 234.0));
+        // Above, three cards: the middle one stands on top of the countdown.
+        let three = panel_places(3, true);
+        assert_eq!(three[1].at, TIMER_TOP + PANEL_GAP);
+        assert_eq!((three[0].at, three[0].width), (CARD_TOP + PANEL_GAP, 234.0));
+        // A message: one panel, two cards wide, in the middle.
+        assert_eq!(panel_places(0, false), [PanelPlace { left: -238.0, width: 476.0, at: PANEL_TOP, stands: false }]);
+        // In pixels: a 2560x1440 game at 85%, panels 97 px tall.
+        let u = unit(2560.0, 1440.0, 0.85);
+        let r = panel_rect(&above[0], (0.0, 0.0, 2560.0, 1440.0), u, 97.0);
+        assert_eq!(r.map(f64::round), [736.0, 254.0, 265.0, 97.0]);
     }
 
     #[test]
