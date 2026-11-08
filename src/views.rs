@@ -169,6 +169,24 @@ fn match_rank(name: &str, q: &str, tokens: &[&str]) -> Option<u8> {
 }
 
 impl View {
+    fn part_recipe(&self, uid: &str) -> Option<Value> {
+        let part = self.cat.parts.get(uid)?;
+        let uids = [Some(uid), part.alt.as_deref()];
+        let recipe = uids
+            .iter()
+            .flatten()
+            .filter_map(|id| self.cat.part_recipes.get(*id))
+            .find(|recipe| uids.contains(&Some(recipe.result.as_str())))?;
+        Some(json!({
+            "quantity": recipe.quantity, "credits": recipe.credits, "seconds": recipe.seconds,
+            "ingredients": recipe.ingredients.iter().map(|need| json!({
+                "uid": need.uid, "name": need.name, "count": need.count,
+                "have": if self.inv.is_some() || self.manual.counts.contains_key(&need.uid) { Some(self.count(&need.uid)) } else { None },
+                "drops": self.cat.drops.for_name(&need.name, false)
+            })).collect::<Vec<_>>()
+        }))
+    }
+
     /// Owned count for any uid. Prime parts combine the blueprint and the crafted component, and a
     /// hand-set count wins over the inventory only if it is newer than the inventory.
     pub fn count(&self, uid: &str) -> i64 {
@@ -408,7 +426,7 @@ impl View {
                     let parts: Vec<PartView> = self.part_views(it, false);
                     row["parts"] = parts
                         .iter()
-                        .map(|p| json!({"name": p.name, "need": p.need, "have": p.have, "vaulted": p.vaulted}))
+                        .map(|p| json!({"name": p.name, "need": p.need, "have": p.have, "vaulted": p.vaulted, "image": p.image}))
                         .collect();
                     row["buildable"] = json!(!parts.is_empty() && parts.iter().all(|p| p.have >= p.need));
                     row["requires"] = json!(self.requires(it));
@@ -681,8 +699,16 @@ impl View {
         rows.into_iter().map(|(_, r)| r).collect()
     }
 
-    /// Items, parts, relics and syndicates whose names match `q`, best matches first.
+    /// Catalog entries, drop names, relics and syndicates matching `q`, best matches first.
     pub fn find(&self, q: &str) -> Value {
+        self.find_matching(q, false)
+    }
+
+    pub fn find_equipment(&self, q: &str) -> Value {
+        self.find_matching(q, true)
+    }
+
+    fn find_matching(&self, q: &str, equipment_only: bool) -> Value {
         let q = q.trim().to_lowercase();
         if q.chars().count() < 2 {
             return json!([]);
@@ -699,6 +725,12 @@ impl View {
                     "sub": it.category, "image": gamedata::image_url(it.image.as_deref()), "status": st.status}),
                 ));
             }
+        }
+        if equipment_only {
+            hits.sort_by(|a, b| {
+                (a.0, a.1).cmp(&(b.0, b.1)).then_with(|| a.2["name"].as_str().cmp(&b.2["name"].as_str()))
+            });
+            return Value::Array(hits.into_iter().take(24).map(|(_, _, v)| v).collect());
         }
         for (uid, p) in &self.cat.parts {
             if p.relics.is_empty() {
@@ -738,7 +770,35 @@ impl View {
                 ));
             }
         }
-        hits.sort_by_key(|h| (h.0, h.1));
+        let mut represented: HashSet<String> =
+            hits.iter().filter_map(|(_, _, v)| v["name"].as_str().map(str::to_lowercase)).collect();
+        for item in self.cat.lookup.values().filter(|it| !self.cat.items.contains_key(&it.uid)) {
+            if let Some(rank) = match_rank(&item.name, &q, &tokens) {
+                if !represented.insert(item.name.to_lowercase()) {
+                    continue;
+                }
+                hits.push((
+                    rank,
+                    item.name.len(),
+                    json!({"kind": "lookup", "key": format!("lookup:{}", item.uid), "name": item.name,
+                           "sub": item.category, "image": gamedata::image_url(item.image.as_deref())}),
+                ));
+            }
+        }
+        for name in self.cat.drops.names() {
+            if let Some(rank) = match_rank(name, &q, &tokens) {
+                if !represented.insert(name.to_lowercase()) {
+                    continue;
+                }
+                hits.push((
+                    rank,
+                    name.len(),
+                    json!({"kind": "drop", "key": format!("drop:{name}"), "name": name,
+                           "sub": "Drop sources", "image": self.cat.art_by_name(name)}),
+                ));
+            }
+        }
+        hits.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)).then_with(|| a.2["name"].as_str().cmp(&b.2["name"].as_str())));
         Value::Array(hits.into_iter().take(24).map(|(_, _, v)| v).collect())
     }
 
@@ -747,6 +807,24 @@ impl View {
     /// fissures is up and you can get it: it still drops, or you hold one (vaulted relics crack
     /// like any other).
     pub fn detail(&self, key: &str, open_eras: &HashSet<String>) -> Option<Value> {
+        if let Some(uid) = key.strip_prefix("lookup:") {
+            let item = self.cat.lookup.get(uid)?;
+            return Some(json!({
+                "kind": "drop", "key": key, "name": item.name,
+                "image": gamedata::image_url(item.image.as_deref()),
+                "drops": self.cat.drops.for_name(&item.name, false),
+                "dropCoverage": {"available": self.cat.drops.available, "total": self.cat.drops.total}
+            }));
+        }
+        if let Some(name) = key.strip_prefix("drop:") {
+            let drops = self.cat.drops.for_name(name, false);
+            let first = drops.first()?;
+            return Some(json!({
+                "kind": "drop", "key": format!("drop:{}", first.item), "name": first.item,
+                "image": self.cat.art_by_name(&first.item), "drops": drops,
+                "dropCoverage": {"available": self.cat.drops.available, "total": self.cat.drops.total}
+            }));
+        }
         let open = |era: &str| open_eras.contains(era) || open_eras.contains("Omnia");
         let needed = self.needed_parts();
         // Open fissures first, then relics that still drop, then the ones you hold.
@@ -778,6 +856,8 @@ impl View {
                     let relics = self.cat.parts.get(&p.uid).map(|part| relic_refs(&part.relics)).unwrap_or_default();
                     let mut v = serde_json::to_value(&p).unwrap_or_default();
                     v["relics"] = json!(relics);
+                    v["drops"] = json!(self.cat.drops.for_name(&p.name, true));
+                    v["recipe"] = json!(self.part_recipe(&p.uid));
                     v
                 })
                 .collect();
@@ -794,12 +874,19 @@ impl View {
                 "points": st.rank.min(it.max_rank) * per, "maxPoints": it.max_rank * per,
                 "setSlug": set_slug, "setPrice": self.price(set_slug.as_deref(), true),
                 "parts": parts, "buildable": buildable,
+                "recipesAvailable": self.cat.recipes_available,
+                "drops": self.cat.drops.for_name(&it.name, false),
+                "dropCoverage": {"available": self.cat.drops.available, "total": self.cat.drops.total},
                 "requires": it.components.iter().filter(|c| c.kind == ComponentKind::Item).map(|c| {
                     let status = self.cat.items.get(&c.uid).map(|i| self.item_status(i).status);
-                    json!({"uid": c.uid, "name": c.name, "count": c.count, "status": status})
+                    json!({"uid": c.uid, "name": c.name, "count": c.count, "status": status,
+                           "have": self.owned(&c.uid)})
                 }).collect::<Vec<_>>(),
                 "resources": it.components.iter().filter(|c| c.kind == ComponentKind::Resource)
-                    .map(|c| json!({"name": c.name, "count": c.count, "image": self.cat.art_by_name(&c.name)}))
+                    .map(|c| json!({"uid": c.uid, "name": c.name, "count": c.count,
+                        "have": if self.inv.is_some() || self.manual.counts.contains_key(&c.uid) { Some(self.count(&c.uid)) } else { None },
+                        "image": self.cat.art_by_name(&c.name),
+                        "drops": self.cat.drops.for_name(&c.name, false)}))
                     .collect::<Vec<_>>(),
                 "disposition": it.disposition.map(|d| py_round(d, 3)), "dots": it.dispo_dots,
             });
@@ -814,6 +901,9 @@ impl View {
                 "slug": slug, "price": self.price(slug.as_deref(), true), "ducats": self.market.ducats(slug.as_deref()),
                 "vaulted": p.vaulted, "have": self.count(canon), "needed": needed.get(canon).copied().unwrap_or(0),
                 "relics": relic_refs(&p.relics),
+                "drops": self.cat.drops.for_name(&p.name, true),
+                "recipe": self.part_recipe(canon), "recipesAvailable": self.cat.recipes_available,
+                "dropCoverage": {"available": self.cat.drops.available, "total": self.cat.drops.total},
                 "usedIn": p.items.iter().filter_map(|u| self.cat.items.get(u)).map(|it| json!({
                     "uid": it.uid, "name": it.name, "image": gamedata::image_url(it.image.as_deref()),
                     "status": self.item_status(it).status})).collect::<Vec<_>>(),
@@ -826,6 +916,8 @@ impl View {
         v["kind"] = json!("relic");
         v["key"] = json!(base);
         v["open"] = json!(open(&rel.era) && (!rel.vaulted || row.total > 0));
+        v["drops"] = json!(self.cat.drops.for_name(&format!("{base} Relic"), false));
+        v["dropCoverage"] = json!({"available": self.cat.drops.available, "total": self.cat.drops.total});
         Some(v)
     }
 }
@@ -835,6 +927,94 @@ mod tests {
     use super::*;
 
     #[test]
+    fn item_part_and_relic_details_expose_their_drop_sources() {
+        let tables = json!({"missionRewards": {"Venus": {"Fossa": {"gameMode": "Assassination",
+            "rewards": [{"itemName": "Rhino Chassis Blueprint", "chance": 38.72},
+                        {"itemName": "Vitality", "chance": 8.0},
+                        {"itemName": "Lith A1 Relic", "chance": 5.0}]}}}});
+        let mut cat = gamedata::build(&IndexMap::from([
+            (
+                "Warframes".to_string(),
+                json!([{"uniqueName": "/Rhino", "name": "Rhino", "imageName": "rhino.png", "masterable": true,
+                "components": [{"uniqueName": "/Lotus/Types/Recipes/WarframeRecipes/RhinoChassisComponent"}]}]),
+            ),
+            ("Relics".to_string(), json!([{"uniqueName": "/LithA1", "name": "Lith A1 Intact", "vaulted": false}])),
+            (
+                "Mods".to_string(),
+                json!([
+                    {"uniqueName": "/Vitality", "name": "Vitality", "imageName": "vitality.png"},
+                    {"uniqueName": "/VendorMod", "name": "Vendor Mod"},
+                    {"uniqueName": "/Variant", "name": "Vitality"}
+                ]),
+            ),
+            (
+                "Resources".to_string(),
+                json!([
+                    {"uniqueName": "/Cell", "name": "Orokin Cell"},
+                    {"uniqueName": "/Rubedo", "name": "Rubedo"}
+                ]),
+            ),
+            (
+                "ExportRecipes".to_string(),
+                json!({
+                    "/Lotus/Types/Recipes/WarframeRecipes/RhinoChassisBlueprint": {
+                        "resultType": "/Lotus/Types/Recipes/WarframeRecipes/RhinoChassisComponent",
+                        "num": 1, "buildPrice": 15000, "buildTime": 43200,
+                        "ingredients": [{"ItemType": "/Rubedo", "ItemCount": 400}]
+                    }
+                }),
+            ),
+        ]));
+        cat.drops = crate::drops::Drops::from_tables(&[("missionRewards", &tables)], 2);
+        let mut view = View {
+            cat: Arc::new(cat),
+            profile: None,
+            inv: None,
+            manual: Arc::new(Manual::default()),
+            market: Market::new(Arc::new(std::sync::RwLock::new(crate::config::Settings::default()))),
+            foundry: HashSet::new(),
+        };
+        let mastery = view.mastery();
+        let rhino = mastery.as_array().unwrap().iter().find(|r| r["uid"] == "/Rhino").unwrap();
+        assert_eq!(rhino["parts"][0]["need"], 1);
+        let item = view.detail("/Rhino", &HashSet::new()).unwrap();
+        assert!(rhino["parts"][0]["image"].is_string());
+        assert_eq!(rhino["parts"][0]["image"], item["parts"][0]["image"]);
+        assert_eq!(item["dropCoverage"], json!({"available": 1, "total": 2}));
+        assert_eq!(item["parts"][0]["drops"][0]["item"], "Rhino Chassis Blueprint");
+        assert_eq!(item["parts"][0]["drops"][0]["chance"], 38.72);
+        assert_eq!(item["recipesAvailable"], true);
+        assert_eq!(item["parts"][0]["recipe"]["ingredients"][0]["name"], "Rubedo");
+        assert_eq!(item["parts"][0]["recipe"]["ingredients"][0]["count"], 400);
+        assert!(item["parts"][0]["recipe"]["ingredients"][0]["have"].is_null());
+        assert_eq!(item["parts"][0]["recipe"]["seconds"], 43200);
+        let uid = item["parts"][0]["uid"].as_str().unwrap();
+        let part = view.detail(uid, &HashSet::new()).unwrap();
+        assert_eq!(part["drops"][0]["location"], "Venus · Fossa");
+        assert_eq!(part["recipe"], item["parts"][0]["recipe"]);
+        Arc::make_mut(&mut view.manual).counts.insert("/Rubedo".into(), (250, 1.0));
+        Arc::make_mut(&mut view.manual).counts.insert(uid.into(), (1, 1.0));
+        let held = view.detail("/Rhino", &HashSet::new()).unwrap();
+        assert_eq!(held["parts"][0]["have"], 1);
+        assert_eq!(held["parts"][0]["recipe"]["ingredients"][0]["have"], 250);
+        assert_eq!(held["parts"][0]["recipe"]["ingredients"][0]["count"], 400);
+        let relic = view.detail("Lith A1", &HashSet::new()).unwrap();
+        assert_eq!(relic["drops"][0]["chance"], 5.0);
+        let hits = view.find("vitality");
+        assert_eq!(hits.as_array().unwrap().iter().filter(|hit| hit["name"] == "Vitality").count(), 1);
+        assert_eq!(hits[0]["key"], "lookup:/Vitality");
+        let lookup = view.detail("lookup:/Vitality", &HashSet::new()).unwrap();
+        assert_eq!(lookup["drops"][0]["chance"], 8.0);
+        assert!(view.find("vendor mod").as_array().unwrap().iter().any(|hit| hit["key"] == "lookup:/VendorMod"));
+        assert_eq!(view.detail("lookup:/VendorMod", &HashSet::new()).unwrap()["drops"], json!([]));
+        assert!(view.find("orokin cell").as_array().unwrap().iter().any(|hit| hit["key"] == "lookup:/Cell"));
+        let mod_detail = view.detail("drop:Vitality", &HashSet::new()).unwrap();
+        assert_eq!(mod_detail["kind"], "drop");
+        assert_eq!(mod_detail["drops"][0]["chance"], 8.0);
+        assert!(view.detail("drop:unknown", &HashSet::new()).is_none());
+    }
+
+    #[test]
     fn mastery_rank_thresholds() {
         assert_eq!(rank_for(0), (0, 0, 2500));
         assert_eq!(rank_for(2499), (0, 0, 2500));
@@ -842,6 +1022,28 @@ mod tests {
         assert_eq!(rank_for(1_960_000), (28, 1_960_000, 2_102_500));
         assert_eq!(rank_for(2_250_000), (30, 2_250_000, 2_397_500));
         assert_eq!(rank_for(2_397_500), (31, 2_397_500, 2_545_000), "Legendary 1");
+    }
+
+    #[test]
+    fn equipment_search_is_not_crowded_out_by_other_results() {
+        let mods: Vec<Value> =
+            (0..30).map(|n| json!({"uniqueName": format!("/mod/{n}"), "name": format!("Rh{n:02}")})).collect();
+        let cat = gamedata::build(&IndexMap::from([
+            ("Warframes".to_string(), json!([{"uniqueName": "/Rhino", "name": "Rhino", "masterable": true}])),
+            ("Mods".to_string(), json!(mods)),
+        ]));
+        let view = View {
+            cat: Arc::new(cat),
+            profile: None,
+            inv: None,
+            manual: Arc::new(Manual::default()),
+            market: Market::new(Arc::new(std::sync::RwLock::new(crate::config::Settings::default()))),
+            foundry: HashSet::new(),
+        };
+        assert!(!view.find("rh").as_array().unwrap().iter().any(|hit| hit["key"] == "/Rhino"));
+        let equipment = view.find_equipment("rh");
+        assert_eq!(equipment.as_array().unwrap().len(), 1);
+        assert_eq!(equipment[0]["key"], "/Rhino");
     }
 
     #[test]

@@ -1131,6 +1131,23 @@ impl State {
         })
     }
 
+    pub fn set_goal(&self, uid: &str, selected: bool) -> Result<()> {
+        if selected && !self.catalog().items.contains_key(uid) {
+            return Err(UserError::new("Choose a masterable item for the farming planner.").into());
+        }
+        self.edit_manual(|m| {
+            m.goals.retain(|key| key != uid);
+            if selected {
+                m.goals.push(uid.to_string());
+            }
+        })
+    }
+
+    pub fn goals(&self) -> Value {
+        let view = self.view();
+        json!({"goals": view.manual.goals, "inventoryKnown": view.inv.is_some()})
+    }
+
     // ------------------------------------------------------------ accounts
 
     /// Links an id typed or picked in Settings to an account (the one shown by default).
@@ -1429,6 +1446,7 @@ impl State {
         let mut v = view.detail(key, &open).ok_or_else(|| UserError::new(format!("Nothing is called {key}.")))?;
         let pinned = v["key"].as_str().is_some_and(|k| view.manual.pinned.iter().any(|p| p == k));
         v["pinned"] = json!(pinned);
+        v["goal"] = json!(v["kind"] == "item" && view.manual.goals.iter().any(|g| g == key));
         Ok(v)
     }
 

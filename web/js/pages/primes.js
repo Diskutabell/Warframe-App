@@ -1,15 +1,10 @@
 // Prime sets: each set, its parts, and how close it is.
 
-import { $, api, artUrl, art, esc, fmt, plat, statusPill } from "../lib.js";
+import { $, api, art, esc, fmt, partPips, plat, statusPill } from "../lib.js";
 import * as drawer from "../drawer.js";
 
 const st = { q: "", show: "started", unvaulted: false, unmastered: false };
 const SHOW = [["started", "In progress"], ["complete", "Complete"], ["missing", "Not started"], ["", "All"]];
-
-function pips(parts) {
-  return parts.flatMap((p) => Array.from({ length: p.need }, (_, i) =>
-    `<span class="pip ${i < p.have ? "ok" : ""}" title="${esc(p.name)} - own ${p.have} of ${p.need}">${p.image ? `<img alt="" src="${esc(artUrl(p.image, 24))}" onerror="this.remove()">` : ""}${i === 0 && p.have > p.need ? `<b>${p.have}</b>` : ""}</span>`)).join("");
-}
 
 export default {
   id: "primes",
@@ -41,7 +36,7 @@ export default {
           ${art(r.image, "lg")}
           <div class="body">
             <div class="row"><span class="name grow">${esc(r.name)}</span>${r.setPrice != null ? plat(r.setPrice) : ""}</div>
-            <div class="pips">${pips(r.parts)}</div>
+            <div class="pips">${partPips(r.parts)}</div>
             <div class="meta"><span>${r.have}/${r.need} parts</span>${statusPill(r.status)}
               ${r.owned ? `<span class="pill good">owned</span>` : ""}${r.vaulted ? `<span class="pill vaulted">vaulted</span>` : ""}</div>
           </div></div>`).join("") || `<div class="empty"><b>No sets match</b>Try another filter.</div>`;

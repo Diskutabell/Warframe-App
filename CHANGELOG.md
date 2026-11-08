@@ -2,8 +2,29 @@
 
 ## Unreleased
 
+### Added
+
+- A farming planner for equipment goals, with parts, relics, known drop sources and crafting
+  materials. Goals are saved per account.
+- Ctrl+K searches mods, resources, gear and names in loaded drop tables. Item, part and relic
+  details show known drop sources and chances, with wiki links for other sources.
+- **Mastery cards.** Switch between the table and larger cards, and filter for Prime or non-Prime
+  items.
+
+### Changed
+
+- Mastery says "parts collected" rather than "ready to build" when blueprint and component counts
+  are combined and resources have not been checked.
+- Part counts can include both blueprints and crafted parts. The planner shows component recipes
+  even for held parts, and its materials total assumes all components still need crafting. It can
+  miss recipes and required equipment; check the foundry before buying or farming materials.
+- Foundry says "parts collected" rather than promising equipment is ready to build.
+- Farming sits above Settings in the sidebar. Existing number shortcuts stay the same.
+
 ### Fixed
 
+- Game-data and market caches keep usable data when a response is invalid. Cache errors are
+  reported rather than silently replacing good data.
 - Memory scans can read inventory across adjacent memory regions and retry smaller reads when
   larger reads fail. Repeated logins and scans delayed by cooldown are handled, and incomplete
   captures are less likely to replace a more complete inventory.

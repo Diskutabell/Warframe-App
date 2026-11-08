@@ -31,7 +31,7 @@ const RELIC_EXPORTS: [&str; 2] = ["ExportRelics.json", "ExportRewards.json"];
 /// WFCD's copy of DE's drop tables: the names the game prints for relic drops, and every table a
 /// relic drops from today.
 const DROP_URL: &str = "https://drops.warframestat.us/data/";
-const DROP_TABLES: [&str; 9] = [
+const DROP_TABLES: [&str; 12] = [
     "relics",
     "missionRewards",
     "transientRewards",
@@ -41,6 +41,9 @@ const DROP_TABLES: [&str; 9] = [
     "zarimanRewards",
     "entratiLabRewards",
     "hexRewards",
+    "sortieRewards",
+    "blueprintLocations",
+    "modLocations",
 ];
 /// A junction gives 1,000 mastery points (wiki.warframe.com/w/Mastery_Rank); the export lists
 /// every junction with 0.
@@ -177,6 +180,23 @@ pub struct Craft {
     pub needs: Vec<CraftNeed>,
 }
 
+#[derive(Clone, Debug)]
+pub struct PartRecipe {
+    pub result: String,
+    pub quantity: i64,
+    pub credits: Option<i64>,
+    pub seconds: Option<i64>,
+    pub ingredients: Vec<CraftNeed>,
+}
+
+#[derive(Clone, Debug)]
+pub struct LookupItem {
+    pub uid: String,
+    pub name: String,
+    pub category: String,
+    pub image: Option<String>,
+}
+
 #[derive(Default)]
 pub struct Catalog {
     pub items: IndexMap<String, Item>,
@@ -190,6 +210,11 @@ pub struct Catalog {
     pub names: HashMap<String, String>,
     /// Builds that give no mastery, by kind and name.
     pub crafts: Vec<Craft>,
+    /// Blueprint uid -> recipe, from the public game export.
+    pub part_recipes: HashMap<String, PartRecipe>,
+    pub recipes_available: bool,
+    /// Non-equipment catalog entries searchable even when they have no known drops.
+    pub lookup: IndexMap<String, LookupItem>,
     /// Display name (as `art_key` spells it) -> image file, for everything in the WFCD files.
     pub art: HashMap<String, String>,
     /// Star chart node tag ("SolNode27") -> the mastery XP its first completion gives. Empty
@@ -197,6 +222,8 @@ pub struct Catalog {
     pub node_xp: HashMap<String, i64>,
     /// Every syndicate with its ranks and offerings. Empty until the export has been downloaded.
     pub syndicates: crate::standing::Syndicates,
+    /// Reward and enemy blueprint sources indexed by the exact item name.
+    pub drops: crate::drops::Drops,
     pub loaded_at: Option<f64>,
 }
 
@@ -208,28 +235,83 @@ pub fn image_url(image: Option<&str>) -> Option<String> {
 pub fn load(force: bool) -> Result<Catalog> {
     let names: Vec<&str> = MASTERY_FILES.iter().chain(EXTRA_FILES.iter()).copied().collect();
     let regions_path = config::dirs().cache.join("regions.json");
-    let (raw, regions, syndicates): (Vec<Result<Value>>, Result<Value>, Vec<Result<Value>>) = std::thread::scope(|s| {
+    let (raw, mods, recipes, regions, syndicates, drops): (
+        Vec<Result<Value>>,
+        Result<Value>,
+        Result<Value>,
+        Result<Value>,
+        Vec<Result<Value>>,
+        Vec<Result<Value>>,
+    ) = std::thread::scope(|s| {
         let jobs: Vec<_> = names.iter().map(|n| s.spawn(move || download(n, force))).collect();
+        let mods = s.spawn(|| download("Mods", force));
+        let recipes = s.spawn(|| {
+            download_to(
+                &format!("{EXPORT_URL}ExportRecipes.json"),
+                &config::dirs().cache.join("ExportRecipes.json"),
+                force,
+            )
+        });
         let regions = s.spawn(|| download_to(REGIONS_URL, &regions_path, force));
         let syndicates: Vec<_> = SYNDICATE_FILES
             .iter()
             .map(|f| s.spawn(move || download_to(&format!("{EXPORT_URL}{f}"), &config::dirs().cache.join(f), force)))
             .collect();
+        let drops: Vec<_> = DROP_TABLES
+            .iter()
+            .map(|t| {
+                s.spawn(move || {
+                    download_to(
+                        &format!("{DROP_URL}{t}.json"),
+                        &config::dirs().cache.join(format!("drops_{t}.json")),
+                        force,
+                    )
+                })
+            })
+            .collect();
         let panicked = || Err(anyhow!("download thread panicked"));
         (
             jobs.into_iter().map(|j| j.join().unwrap_or_else(|_| panicked())).collect(),
+            mods.join().unwrap_or_else(|_| panicked()),
+            recipes.join().unwrap_or_else(|_| panicked()),
             regions.join().unwrap_or_else(|_| panicked()),
             syndicates.into_iter().map(|j| j.join().unwrap_or_else(|_| panicked())).collect(),
+            drops.into_iter().map(|j| j.join().unwrap_or_else(|_| panicked())).collect::<Vec<_>>(),
         )
     });
     let mut files = IndexMap::new();
     for (name, data) in names.into_iter().zip(raw) {
         files.insert(name.to_string(), data.with_context(|| format!("Could not download game data ({name})"))?);
     }
+    match mods {
+        Ok(data) if data.is_array() => {
+            files.insert("Mods".into(), data);
+        }
+        Ok(_) => eprintln!("mod catalog has an unexpected format"),
+        Err(e) => eprintln!("mod catalog unavailable: {e:#}"),
+    }
+    match recipes {
+        Ok(data) if data.as_object().is_some_and(|o| !o.is_empty()) => {
+            files.insert("ExportRecipes".into(), data);
+        }
+        Ok(_) => eprintln!("component recipe export has an unexpected format"),
+        Err(e) => eprintln!("component recipes unavailable: {e:#}"),
+    }
     if files.get("Relics").is_some_and(crate::relics::lacks_rewards) {
-        repair_relics(&mut files, force);
+        repair_relics(&mut files, force, &drops);
     }
     let mut catalog = build(&files);
+    let mut drop_tables = Vec::new();
+    for (name, data) in DROP_TABLES.iter().zip(&drops).skip(1) {
+        match data {
+            Ok(data) if data.get(*name).is_some_and(|v| v.is_array() || v.is_object()) => {
+                drop_tables.push((*name, data))
+            }
+            Ok(_) => eprintln!("drop table {name} has an unexpected format"),
+            Err(e) => eprintln!("drop table {name} unavailable: {e:#}"),
+        }
+    }
+    catalog.drops = crate::drops::Drops::from_tables(&drop_tables, DROP_TABLES.len() - 1);
     // The app works without the star chart: only the mastery total is then short of it.
     match regions {
         Ok(raw) => catalog.node_xp = node_xp_table(&raw),
@@ -252,41 +334,26 @@ pub fn load(force: bool) -> Result<Catalog> {
 /// `relics.rs`). Every source is downloaded and cached like the WFCD files; without the export the
 /// relics stay empty, without the drop tables the names fall back to the ids' words and "vaulted"
 /// to the export's own dates.
-fn repair_relics(files: &mut IndexMap<String, Value>, force: bool) {
+fn repair_relics(files: &mut IndexMap<String, Value>, force: bool, drops: &[Result<Value>]) {
     let cache = &config::dirs().cache;
-    let (exports, drops): (Vec<Result<Value>>, Vec<Result<Value>>) = std::thread::scope(|s| {
+    let exports: Vec<Result<Value>> = std::thread::scope(|s| {
         let exports: Vec<_> = RELIC_EXPORTS
             .iter()
             .map(|f| s.spawn(move || download_to(&format!("{EXPORT_URL}{f}"), &cache.join(f), force)))
             .collect();
-        let drops: Vec<_> = DROP_TABLES
-            .iter()
-            .map(|t| {
-                s.spawn(move || {
-                    download_to(&format!("{DROP_URL}{t}.json"), &cache.join(format!("drops_{t}.json")), force)
-                })
-            })
-            .collect();
         let panicked = || Err(anyhow!("download thread panicked"));
-        (
-            exports.into_iter().map(|j| j.join().unwrap_or_else(|_| panicked())).collect(),
-            drops.into_iter().map(|j| j.join().unwrap_or_else(|_| panicked())).collect(),
-        )
+        exports.into_iter().map(|j| j.join().unwrap_or_else(|_| panicked())).collect()
     });
     let [Ok(export_relics), Ok(export_rewards)] = &exports[..] else {
         eprintln!("WFCD's relics have no drop tables and the game's export could not be read: relics stay empty");
         return;
     };
-    let mut drops = drops.into_iter();
-    let names = drops.next().and_then(Result::ok);
-    let tables: Vec<Value> = drops.filter_map(Result::ok).collect();
-    let dropping = crate::relics::dropping(&tables);
+    let names = drops.first().and_then(|r| r.as_ref().ok());
+    let tables: Vec<Value> = drops.iter().skip(1).take(8).filter_map(|r| r.as_ref().ok().cloned()).collect();
+    let dropping = (tables.len() == 8).then(|| crate::relics::dropping(&tables));
     if let Some(relics) = files.get_mut("Relics") {
-        let filled = crate::relics::patch(relics, export_relics, export_rewards, names.as_ref(), Some(&dropping));
-        eprintln!(
-            "WFCD's relics had no drop tables: {filled} filled in from the game's export ({} relics drop today)",
-            dropping.len()
-        );
+        let filled = crate::relics::patch(relics, export_relics, export_rewards, names, dropping.as_ref());
+        eprintln!("WFCD's relics had no drop tables: {filled} filled in from the game's export");
     }
 }
 
@@ -307,45 +374,72 @@ fn download(name: &str, force: bool) -> Result<Value> {
 /// Fetches a JSON file into the cache. A copy younger than `MAX_AGE` is used as it is, an older
 /// one is revalidated with its ETag, and when the source cannot be reached the old copy will do.
 fn download_to(url: &str, path: &Path, force: bool) -> Result<Value> {
+    download_to_with(url, path, force, net::get)
+}
+
+fn download_to_with(
+    url: &str,
+    path: &Path,
+    force: bool,
+    get: impl FnOnce(&str, &[(&str, &str)], Duration) -> Result<net::Response>,
+) -> Result<Value> {
     let etag_path = path.with_extension("etag");
     let age = fs::metadata(path).and_then(|m| m.modified()).ok().and_then(|t| SystemTime::now().duration_since(t).ok());
-    let cached = || -> Result<Value> { Ok(serde_json::from_slice(&fs::read(path)?)?) };
+    let cached: Result<Value> = fs::read(path)
+        .with_context(|| format!("reading cached {}", path.display()))
+        .and_then(|bytes| serde_json::from_slice(&bytes).with_context(|| format!("parsing cached {}", path.display())));
     if !force && age.is_some_and(|a| a < MAX_AGE) {
-        if let Ok(v) = cached() {
+        if let Ok(v) = cached {
             return Ok(v);
         }
     }
-    let etag = if force { None } else { fs::read_to_string(&etag_path).ok() };
+    let etag = if !force && cached.is_ok() { fs::read_to_string(&etag_path).ok() } else { None };
     let mut headers = Vec::new();
-    if let (Some(tag), true) = (&etag, path.exists()) {
+    if let Some(tag) = &etag {
         headers.push(("If-None-Match", tag.as_str()));
     }
-    match net::get(url, &headers, Duration::from_secs(60)) {
+    match get(url, &headers, Duration::from_secs(60)) {
         Ok(resp) if resp.status == 304 => {
-            // Unchanged upstream: mark the copy fresh again.
+            let data = cached.context("server returned HTTP 304 without a usable cached copy")?;
             if let Ok(f) = fs::File::options().append(true).open(path) {
                 let _ = f.set_modified(SystemTime::now());
             }
-            cached()
+            Ok(data)
         }
         Ok(resp) if (200..300).contains(&resp.status) => {
-            let data: Value = serde_json::from_slice(&resp.body)?;
-            config::write_atomic(path, &resp.body)?;
-            match resp.etag {
-                Some(tag) => {
-                    let _ = fs::write(&etag_path, tag);
+            let data: Value = match serde_json::from_slice(&resp.body) {
+                Ok(data) => data,
+                Err(e) => {
+                    return match cached {
+                        Ok(data) => {
+                            eprintln!("invalid JSON from {url}, using cached {}: {e}", path.display());
+                            Ok(data)
+                        }
+                        Err(cache_err) => Err(anyhow!("invalid JSON from {url}: {e}; {cache_err:#}")),
+                    };
                 }
-                None => {
-                    let _ = fs::remove_file(&etag_path);
+            };
+            match fs::remove_file(&etag_path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e).with_context(|| format!("removing {}", etag_path.display())),
+            }
+            config::write_atomic(path, &resp.body)?;
+            if let Some(tag) = resp.etag {
+                if let Err(e) = config::write_atomic(&etag_path, tag.as_bytes()) {
+                    eprintln!("could not save ETag for {}: {e}", path.display());
                 }
             }
             Ok(data)
         }
         // Offline or an error upstream: a stale copy beats no data at all.
-        other => cached().map_err(|cache_err| match other {
-            Ok(resp) => anyhow!("HTTP {}", resp.status),
-            Err(e) => e.context(cache_err),
-        }),
+        other => match cached {
+            Ok(data) => Ok(data),
+            Err(cache_err) => Err(match other {
+                Ok(resp) => anyhow!("HTTP {}; {cache_err:#}", resp.status),
+                Err(e) => e.context(cache_err),
+            }),
+        },
     }
 }
 
@@ -503,6 +597,23 @@ pub fn build(raw: &IndexMap<String, Value>) -> Catalog {
     let empty = Vec::new();
     let file = |name: &str| raw.get(name).and_then(Value::as_array).unwrap_or(&empty);
 
+    let mut lookup = IndexMap::new();
+    for (category, data) in raw {
+        if category == "Relics" {
+            continue;
+        }
+        for item in data.as_array().into_iter().flatten() {
+            if let (Some(uid), Some(name)) = (str_of(&item["uniqueName"]), str_of(&item["name"])) {
+                lookup.entry(uid.to_string()).or_insert_with(|| LookupItem {
+                    uid: uid.to_string(),
+                    name: name.to_string(),
+                    category: category.to_string(),
+                    image: str_of(&item["imageName"]).map(str::to_owned),
+                });
+            }
+        }
+    }
+
     let mut names: HashMap<String, String> = HashMap::new();
     for data in raw.values() {
         for x in data.as_array().into_iter().flatten() {
@@ -511,7 +622,41 @@ pub fn build(raw: &IndexMap<String, Value>) -> Catalog {
             }
         }
     }
-
+    let recipes_available = raw.get("ExportRecipes").and_then(Value::as_object).is_some_and(|r| !r.is_empty());
+    let mut part_recipes = HashMap::new();
+    if let Some(recipes) = raw.get("ExportRecipes").and_then(Value::as_object) {
+        for (uid, recipe) in recipes {
+            let Some(result) = str_of(&recipe["resultType"]) else { continue };
+            let Some(ingredients) = recipe["ingredients"].as_array() else { continue };
+            let needs: Option<Vec<CraftNeed>> = ingredients
+                .iter()
+                .map(|ingredient| {
+                    let id = str_of(&ingredient["ItemType"])?;
+                    let count = ingredient["ItemCount"].as_i64().filter(|n| *n > 0)?;
+                    Some(CraftNeed {
+                        uid: id.to_string(),
+                        name: names.get(id).cloned().unwrap_or_else(|| camel_name(id)),
+                        count,
+                        image: None,
+                    })
+                })
+                .collect();
+            let Some(ingredients) = needs else {
+                eprintln!("invalid ingredients in component recipe {uid}");
+                continue;
+            };
+            part_recipes.insert(
+                uid.clone(),
+                PartRecipe {
+                    result: result.to_string(),
+                    quantity: recipe["num"].as_i64().filter(|n| *n > 0).unwrap_or(1),
+                    credits: recipe["buildPrice"].as_i64().filter(|n| *n >= 0),
+                    seconds: recipe["buildTime"].as_i64().filter(|n| *n >= 0),
+                    ingredients,
+                },
+            );
+        }
+    }
     // Pictures by name, for things the world state only names. The files come in catalog order,
     // so a weapon wins over a resource that happens to share its name.
     let mut art: HashMap<String, String> = HashMap::new();
@@ -789,7 +934,7 @@ pub fn build(raw: &IndexMap<String, Value>) -> Catalog {
     }
     let mut crafts: Vec<Craft> = Vec::new();
     for (fname, data) in raw {
-        if fname == "Relics" {
+        if fname == "Relics" || fname == "Mods" {
             continue;
         }
         for x in data.as_array().into_iter().flatten() {
@@ -839,9 +984,13 @@ pub fn build(raw: &IndexMap<String, Value>) -> Catalog {
         relic_uids,
         names,
         crafts,
+        part_recipes,
+        recipes_available,
+        lookup,
         art,
         node_xp: HashMap::new(),
         syndicates: crate::standing::Syndicates::default(),
+        drops: crate::drops::Drops::default(),
         loaded_at: None,
     }
 }
@@ -926,6 +1075,96 @@ impl Catalog {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    struct TestCache(PathBuf);
+
+    impl TestCache {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "warframeproject-gamedata-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn path(&self) -> PathBuf {
+            self.0.join("data.json")
+        }
+    }
+
+    impl Drop for TestCache {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    fn response(status: u16, body: &str, etag: Option<&str>) -> net::Response {
+        net::Response { status, body: body.as_bytes().to_vec(), etag: etag.map(str::to_owned) }
+    }
+
+    #[test]
+    fn cached_download_revalidates_only_usable_data() {
+        let cache = TestCache::new();
+        let path = cache.path();
+        fs::write(&path, "broken").unwrap();
+        fs::write(path.with_extension("etag"), "\"old\"").unwrap();
+        let data = download_to_with("test", &path, false, |_, headers, _| {
+            assert!(headers.is_empty(), "a corrupt cache must not send an ETag");
+            Ok(response(200, r#"{"updated":true}"#, Some("\"new\"")))
+        })
+        .unwrap();
+        assert_eq!(data, json!({"updated": true}));
+        assert_eq!(fs::read_to_string(path.with_extension("etag")).unwrap(), "\"new\"");
+        let data = download_to_with("test", &path, false, |_, _, _| panic!("fresh cache should not fetch")).unwrap();
+        assert_eq!(data, json!({"updated": true}));
+
+        fs::File::options()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(SystemTime::now() - MAX_AGE - Duration::from_secs(60))
+            .unwrap();
+        let data = download_to_with("test", &path, false, |_, headers, _| {
+            assert_eq!(headers, &[("If-None-Match", "\"new\"")]);
+            Ok(response(304, "", None))
+        })
+        .unwrap();
+        assert_eq!(data, json!({"updated": true}));
+        assert!(fs::metadata(&path).unwrap().modified().unwrap().elapsed().unwrap() < MAX_AGE);
+    }
+
+    #[test]
+    fn cached_download_preserves_valid_data_on_bad_response() {
+        let cache = TestCache::new();
+        let path = cache.path();
+        fs::write(&path, r#"{"cached":true}"#).unwrap();
+        fs::write(path.with_extension("etag"), "\"old\"").unwrap();
+        let data = download_to_with("test", &path, true, |_, headers, _| {
+            assert!(headers.is_empty(), "forced refresh must not send an ETag");
+            Ok(response(200, "not json", Some("\"bad\"")))
+        })
+        .unwrap();
+        assert_eq!(data, json!({"cached": true}));
+        assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"cached":true}"#);
+        assert_eq!(fs::read_to_string(path.with_extension("etag")).unwrap(), "\"old\"");
+        let data = download_to_with("test", &path, true, |_, _, _| Ok(response(503, "", None))).unwrap();
+        assert_eq!(data, json!({"cached": true}));
+        let data = download_to_with("test", &path, true, |_, _, _| Err(anyhow!("network unavailable"))).unwrap();
+        assert_eq!(data, json!({"cached": true}));
+        let data =
+            download_to_with("test", &path, true, |_, _, _| Ok(response(200, r#"{"next":true}"#, None))).unwrap();
+        assert_eq!(data, json!({"next": true}));
+        assert!(!path.with_extension("etag").exists());
+        fs::write(&path, "broken").unwrap();
+        let err = download_to_with("test", &path, true, |_, _, _| Ok(response(200, "not json", None))).unwrap_err();
+        assert!(format!("{err:#}").contains("invalid JSON"));
+        let err = download_to_with("test", &path, false, |_, _, _| Ok(response(304, "", None))).unwrap_err();
+        assert!(format!("{err:#}").contains("without a usable cached copy"));
+    }
 
     #[test]
     fn camel_names() {
