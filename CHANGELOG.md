@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+- Ctrl+K searches mods, resources, gear and names in loaded drop tables. Item, part and relic
+  details show known drop sources and chances, with wiki links for other sources.
+
 ### Fixed
 
 - Game-data and market caches keep usable data when a response is invalid. Cache errors are

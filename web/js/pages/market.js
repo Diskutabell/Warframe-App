@@ -18,7 +18,8 @@ function spareRows(rows) {
 
 function checkRows(rows) {
   return rows.map((r) => `<tr>
-      <td><a href="https://warframe.market/items/${esc(r.slug)}" target="_blank" rel="noopener">${esc(r.name)}</a></td>
+      <td><a href="https://warframe.market/items/${esc(r.slug)}" target="_blank" rel="noopener">${esc(r.name)}</a>
+        <a class="muted" href="https://wiki.warframe.com/w/${encodeURIComponent(r.name.replace(/ /g, "_"))}" target="_blank" rel="noopener" title="Find ${esc(r.name)} on the Warframe Wiki"> · sources</a></td>
       <td class="r">${r.sell != null ? plat(r.sell) : `<span class="faint">…</span>`}</td>
       <td class="r">${r.buy != null ? plat(r.buy) : `<span class="faint">…</span>`}</td>
       <td class="r">${r.ducats ? duc(r.ducats) : ""}</td></tr>`).join("") || `<tr><td colspan="4" class="muted">Nothing on warframe.market matches.</td></tr>`;
