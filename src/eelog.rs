@@ -34,9 +34,8 @@ static NAME_RES: LazyLock<[Regex; 3]> = LazyLock::new(|| {
 static MASTERY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"OnMasteryIconReady1\(Loaded:[^)]*?/Rank(\d+)(?:to(\d+))?_").unwrap());
 /// The reward screen opens on OpenVoidProjectionRewardScreen (logged with an `RMI` suffix, so
-/// this stays a substring test). `Created .../ProjectionRewardChoice.swf`
-/// follows 2 ms later and `Got rewards` 0.36 s later; the 8 s debounce keeps them from scanning
-/// three times. `Pause countdown done` (wfinfo-ng's trigger) never fires on current builds.
+/// this stays a substring test). The choice interface and the other messages are fallback
+/// triggers: the interface can be created again after the selection has already closed.
 pub const REWARD_TRIGGERS: [&str; 4] = [
     "VoidProjections: OpenVoidProjectionRewardScreen",
     "Pause countdown done",
@@ -47,6 +46,13 @@ pub const REWARD_TRIGGERS: [&str; 4] = [
 pub const SYNC_HINTS: [&str; 4] =
     ["EndOfMatch.lua: Mission Succeeded", "EndOfMatch.lua: Mission Failed", "ExitLevel", "Inventory updated"];
 const REWARD_DEBOUNCE: f64 = 8.0;
+const REWARD_FALLBACK_DEBOUNCE: f64 = 30.0;
+
+fn reward_trigger_due(line: &str, last_reward: f64, time: f64) -> bool {
+    let Some(trigger) = REWARD_TRIGGERS.iter().find(|t| line.contains(**t)) else { return false };
+    let gap = if *trigger == REWARD_TRIGGERS[0] { REWARD_DEBOUNCE } else { REWARD_FALLBACK_DEBOUNCE };
+    time - last_reward > gap
+}
 
 /// Display names carry a trailing platform glyph from the private-use area (U+E000 for PC).
 /// "Logged in <name>" prints the bare name and every later line the glyph form, so never compare
@@ -135,16 +141,22 @@ fn explicit_account(line: &str) -> Option<String> {
 /// logins, explicit ids, id candidates and the local player's mastery badges. Reward screens and
 /// syncs are left out (they are over). The order matters: one game session can log out and in
 /// with another account, and everything after a login belongs to that account.
-pub fn scan_log(path: &Path) -> Vec<LogEvent> {
+fn scan_log(path: &Path, end: u64) -> (Vec<LogEvent>, Vec<u8>) {
     const MAX_BYTES: u64 = 64_000_000;
     let mut events = Vec::new();
-    let Ok(mut f) = fs::File::open(path) else { return events };
-    let size = f.metadata().map(|m| m.len()).unwrap_or(0);
-    let _ = f.seek(SeekFrom::Start(size.saturating_sub(MAX_BYTES)));
-    let mut raw = Vec::new();
-    if f.read_to_end(&mut raw).is_err() {
-        return events;
+    let Ok(mut f) = fs::File::open(path) else { return (events, Vec::new()) };
+    let start = end.saturating_sub(MAX_BYTES);
+    if f.seek(SeekFrom::Start(start)).is_err() {
+        return (events, Vec::new());
     }
+    let mut raw = Vec::new();
+    if f.take(end - start).read_to_end(&mut raw).is_err() {
+        return (events, Vec::new());
+    }
+    let pending = match raw.iter().rposition(|b| *b == b'\n') {
+        Some(last) => raw.split_off(last + 1),
+        None => std::mem::take(&mut raw),
+    };
     let text = String::from_utf8_lossy(&raw);
     let mut player: Option<String> = None;
     let mut badge = None;
@@ -173,7 +185,7 @@ pub fn scan_log(path: &Path) -> Vec<LogEvent> {
             }
         }
     }
-    events
+    (events, pending)
 }
 
 fn tail(s: &str, n: usize) -> String {
@@ -449,11 +461,12 @@ impl LogWatcher {
             };
             if current.as_ref() != Some(&path) {
                 self.status().path = Some(path.clone());
-                self.replay(&path);
                 let meta = fs::metadata(&path).ok();
-                pos = meta.as_ref().map_or(0, |m| m.len()); // only follow new lines
+                pos = meta.as_ref().map_or(0, |m| m.len());
                 inode = meta.as_ref().map_or(0, file_id);
                 lines.clear();
+                let pending = self.replay(&path, pos);
+                lines.push(&pending);
                 current = Some(path.clone());
             }
             if let Ok(meta) = fs::metadata(&path) {
@@ -482,8 +495,8 @@ impl LogWatcher {
     }
 
     /// Reads what an existing log already says (logins, ids, mastery) when it is first found.
-    fn replay(&mut self, path: &Path) {
-        let events = scan_log(path);
+    fn replay(&mut self, path: &Path, end: u64) -> Vec<u8> {
+        let (events, pending) = scan_log(path, end);
         // Following the live log goes on with the name the existing part ended on.
         for ev in &events {
             if let LogEvent::Name(name, _) = ev {
@@ -494,11 +507,12 @@ impl LogWatcher {
             (self.emit)(ev);
         }
         (self.emit)(LogEvent::Replayed);
+        pending
     }
 
     fn handle(&mut self, line: &str) {
         if let Some(name) = player_name(line) {
-            if self.player.as_deref() != Some(name.as_str()) {
+            if self.player.as_deref() != Some(name.as_str()) || line.contains("Logged in ") {
                 self.player = Some(name.clone());
                 (self.emit)(LogEvent::Name(name, true));
             }
@@ -515,8 +529,9 @@ impl LogWatcher {
         }
         if REWARD_TRIGGERS.iter().any(|t| line.contains(t)) {
             self.status().note(line);
-            if now() - self.last_reward > REWARD_DEBOUNCE {
-                self.last_reward = now();
+            let time = now();
+            if reward_trigger_due(line, self.last_reward, time) {
+                self.last_reward = time;
                 (self.emit)(LogEvent::RewardScreen);
             }
         } else if SYNC_HINTS.iter().any(|h| line.contains(h)) {
@@ -531,12 +546,60 @@ mod tests {
     use super::*;
 
     #[test]
+    fn late_choice_creation_is_not_a_new_reward_screen() {
+        let open = "VoidProjections: OpenVoidProjectionRewardScreen";
+        let created = "Created /Lotus/Interface/ProjectionRewardChoice.swf";
+        assert!(reward_trigger_due(open, f64::NEG_INFINITY, 100.0));
+        assert!(!reward_trigger_due(created, 100.0, 100.004));
+        assert!(!reward_trigger_due("Got rewards", 100.0, 105.0));
+        assert!(!reward_trigger_due(created, 100.0, 117.0));
+        assert!(reward_trigger_due(open, 100.0, 117.0));
+        assert!(reward_trigger_due(created, 100.0, 131.0));
+        assert!(!reward_trigger_due("unrelated line", 100.0, 150.0));
+    }
+
+    #[test]
+    fn logging_back_into_the_same_account_emits_another_login() {
+        let names = Arc::new(Mutex::new(Vec::new()));
+        let received = Arc::clone(&names);
+        let mut watcher = LogWatcher {
+            path_of: Box::new(|| None),
+            emit: Box::new(move |event| {
+                if let LogEvent::Name(name, live) = event {
+                    received.lock().unwrap().push((name, live));
+                }
+            }),
+            status: Arc::new(Mutex::new(LogStatus::default())),
+            player: None,
+            last_reward: f64::NEG_INFINITY,
+        };
+        watcher.handle("Sys [Info]: Logged in Tenno");
+        watcher.handle("Sys [Info]: Player name changed to Tenno");
+        watcher.handle("Sys [Info]: Logged in Tenno");
+        assert_eq!(*names.lock().unwrap(), [("Tenno".into(), true), ("Tenno".into(), true)]);
+    }
+
+    #[test]
     fn a_line_cut_in_two_is_read_once_whole() {
         let mut buf = LineBuffer::default();
         assert!(buf.push(b"13.945 Sys [Info]: Logged in tenno").is_empty());
         let lines = buf.push(b"player\r\n1.0 next\r\n");
         assert_eq!(lines, ["13.945 Sys [Info]: Logged in tennoplayer", "1.0 next"]);
         assert_eq!(player_name(&lines[0]).as_deref(), Some("tennoplayer"));
+    }
+
+    #[test]
+    fn replay_snapshot_keeps_a_partial_login_for_the_live_watcher() {
+        let path = std::env::temp_dir().join(format!("wfp-eelog-snapshot-{}.log", std::process::id()));
+        let partial = b"1.0 Sys [Info]: Logged in Ten";
+        fs::write(&path, [partial.as_slice(), b"no\n"].concat()).unwrap();
+        let (events, pending) = scan_log(&path, partial.len() as u64);
+        fs::remove_file(&path).unwrap();
+        assert!(events.is_empty());
+        let mut lines = LineBuffer::default();
+        assert!(lines.push(&pending).is_empty());
+        let followed = lines.push(b"no\n");
+        assert_eq!(player_name(&followed[0]).as_deref(), Some("Tenno"));
     }
 
     #[test]
@@ -588,8 +651,9 @@ mod tests {
              9.5 Script [Info]: ThemedSquadOverlay.lua: OnMasteryIconReady1(Loaded: /Lotus/Interface/Icons/MasteryRanks/NewMasteryRanks/Rank34to36_d.png)\n"
         );
         let path = std::env::temp_dir().join(format!("wfp-eelog-test-{}.log", std::process::id()));
-        fs::write(&path, log).unwrap();
-        let events = scan_log(&path);
+        fs::write(&path, &log).unwrap();
+        let (events, pending) = scan_log(&path, log.len() as u64);
+        assert!(pending.is_empty());
         let _ = fs::remove_file(&path);
         let shown: Vec<String> = events
             .iter()

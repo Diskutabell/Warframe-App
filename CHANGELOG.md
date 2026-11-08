@@ -25,6 +25,10 @@
 
 - Game-data and market caches keep usable data when a response is invalid. Cache errors are
   reported rather than silently replacing good data.
+- Memory scans can read inventory across adjacent memory regions and retry smaller reads when
+  larger reads fail. Repeated logins and scans delayed by cooldown are handled, and incomplete
+  captures are less likely to replace a more complete inventory.
+- A late duplicate reward-screen log event no longer triggers another scan immediately.
 
 ## 0.4.1 - 2026-11-06
 
