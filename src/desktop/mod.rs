@@ -127,6 +127,7 @@ pub fn run(state: Arc<State>, url: &str, backend: Backend) -> Result<()> {
             match ev {
                 UiEvent::ShowWindow => window.present(),
                 UiEvent::Rewards { result, fresh } => overlays.show_rewards(&result, fresh),
+                UiEvent::HideRewards => overlays.hide_rewards(),
                 UiEvent::Riven(r) => overlays.show_riven(&r),
                 UiEvent::TestOverlay => overlays.show_test(),
                 UiEvent::HideForCapture(ack) => {

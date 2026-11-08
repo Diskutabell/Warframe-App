@@ -5,7 +5,9 @@
 //! (`web/overlay.html`) in transparent, always-on-top windows that never take focus from the game.
 //! Like the GTK overlays they are hidden and re-shown, never destroyed.
 
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tao::dpi::LogicalSize;
@@ -73,6 +75,7 @@ pub fn open_url(url: &str) {
 enum Event {
     Ui(UiEvent),
     Hide(Which),
+    Ready(Which),
 }
 
 #[derive(Clone, Copy)]
@@ -85,10 +88,24 @@ const STRIP_W: f64 = 1000.0;
 const STRIP_H: f64 = 168.0;
 const RIVEN_W: f64 = 470.0;
 
+fn fit_rect(game: Rect, width: i32, height: i32, x: i32, y: i32) -> Rect {
+    let width = width.clamp(1, game.width.max(1));
+    let height = height.clamp(1, game.height.max(1));
+    Rect {
+        x: x.clamp(game.x, game.x + game.width.max(1) - width),
+        y: y.clamp(game.y, game.y + game.height.max(1) - height),
+        width,
+        height,
+    }
+}
+
 /// One overlay window with its page.
 struct Overlay {
     window: Window,
     webview: WebView,
+    ready: Cell<bool>,
+    pending: RefCell<Vec<String>>,
+    hide_at: Cell<Option<Instant>>,
 }
 
 impl Overlay {
@@ -117,12 +134,23 @@ impl Overlay {
             .with_url(format!("{url}overlay.html"))
             .with_transparent(true)
             .with_ipc_handler(move |req| {
-                if req.body() == "hide" {
-                    let _ = proxy.send_event(Event::Hide(which));
+                let event = match req.body().as_str() {
+                    "hide" => Some(Event::Hide(which)),
+                    "ready" => Some(Event::Ready(which)),
+                    _ => None,
+                };
+                if let Some(event) = event {
+                    let _ = proxy.send_event(event);
                 }
             })
             .build(&window)?;
-        Ok(Overlay { window, webview })
+        Ok(Overlay {
+            window,
+            webview,
+            ready: Cell::new(false),
+            pending: RefCell::new(Vec::new()),
+            hide_at: Cell::new(None),
+        })
     }
 
     fn hwnd(&self) -> HWND {
@@ -137,8 +165,8 @@ impl Overlay {
     /// Shows the page with `result` at `rect` (screen pixels) for `secs` seconds; 0 keeps the
     /// timer of an overlay already showing.
     fn show(&self, rect: Rect, kind: &str, result: &impl serde::Serialize, secs: u32) {
-        let json = serde_json::to_string(result).unwrap_or_else(|_| "null".into());
-        let _ = self.webview.evaluate_script(&format!("render({kind:?}, {json}, {secs})"));
+        self.hide_at.set(Some(Instant::now() + Duration::from_secs(secs as u64)));
+        self.render(kind, result, secs);
         // SAFETY: the window lives as long as `self`. SWP_NOACTIVATE: shown without focus.
         unsafe {
             SetWindowPos(
@@ -154,14 +182,50 @@ impl Overlay {
     }
 
     fn update(&self, kind: &str, result: &impl serde::Serialize) {
-        let json = serde_json::to_string(result).unwrap_or_else(|_| "null".into());
-        let _ = self.webview.evaluate_script(&format!("render({kind:?}, {json}, 0)"));
+        self.render(kind, result, 0);
+    }
+
+    fn render(&self, kind: &str, result: &impl serde::Serialize, secs: u32) {
+        let json = match serde_json::to_string(result) {
+            Ok(json) => json,
+            Err(e) => {
+                eprintln!("could not serialize overlay: {e}");
+                return;
+            }
+        };
+        let script = format!("render({kind:?}, {json}, {secs})");
+        if self.ready.get() {
+            self.evaluate(&script);
+        } else {
+            self.pending.borrow_mut().push(script);
+        }
+    }
+
+    fn evaluate(&self, script: &str) {
+        if let Err(e) = self.webview.evaluate_script(script) {
+            eprintln!("could not update overlay: {e}");
+        }
+    }
+
+    fn ready(&self) {
+        self.ready.set(true);
+        for script in self.pending.borrow_mut().drain(..) {
+            self.evaluate(&script);
+        }
     }
 
     fn hide(&self) {
+        self.hide_at.set(None);
+        self.pending.borrow_mut().clear();
         // SAFETY: the window lives as long as `self`.
         unsafe {
             ShowWindow(self.hwnd(), SW_HIDE);
+        }
+    }
+
+    fn expire(&self, now: Instant) {
+        if self.hide_at.get().is_some_and(|deadline| now >= deadline) {
+            self.hide();
         }
     }
 }
@@ -181,14 +245,14 @@ impl Overlays {
     fn strip_rect(&self) -> Rect {
         let s = self.state.settings();
         let (g, scale) = self.game();
-        let w = ((STRIP_W * scale) as i32).min(g.width - 40).max(300);
+        let w = ((STRIP_W * scale) as i32).min((g.width - 40).max(1));
         let y = g.y + (g.height as f64 * s.overlay_y_percent / 100.0) as i32;
-        Rect { x: g.x + (g.width - w) / 2, y, width: w, height: (STRIP_H * scale) as i32 }
+        fit_rect(g, w, (STRIP_H * scale) as i32, g.x + (g.width - w) / 2, y)
     }
 
     fn show_rewards(&self, r: &RewardResult, fresh: bool) {
         let s = self.state.settings();
-        if !s.overlay_enabled || r.items.is_empty() {
+        if !s.overlay_enabled || (r.items.is_empty() && r.error.is_none()) {
             return;
         }
         if !fresh {
@@ -217,12 +281,33 @@ impl Overlays {
         let y = (g.y + (g.height as f64 * s.riven_overlay_y_percent / 100.0) as i32 - h / 2)
             .min(g.y + g.height - h - 20)
             .max(g.y + 20);
-        self.riven.show(Rect { x, y, width: w, height: h }, "riven", r, s.riven_overlay_seconds.max(5));
+        self.riven.show(fit_rect(g, w, h, x, y), "riven", r, s.riven_overlay_seconds.max(5));
     }
 
     fn hide_all(&self) {
         self.strip.hide();
         self.riven.hide();
+    }
+
+    fn expire(&self, now: Instant) {
+        self.strip.expire(now);
+        self.riven.expire(now);
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        [self.strip.hide_at.get(), self.riven.hide_at.get()].into_iter().flatten().min()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlays_stay_inside_the_game_on_small_and_offset_screens() {
+        let game = Rect { x: -1600, y: 200, width: 400, height: 300 };
+        assert_eq!(fit_rect(game, 1000, 168, -2000, 500), Rect { x: -1600, y: 332, width: 400, height: 168 });
+        assert_eq!(fit_rect(game, 470, 600, 0, -100), Rect { x: -1600, y: 200, width: 400, height: 300 });
     }
 }
 
@@ -273,7 +358,6 @@ pub fn run(state: Arc<State>, url: &str, _backend: Backend) -> Result<()> {
     };
 
     event_loop.run(move |event, _, flow| {
-        *flow = ControlFlow::Wait;
         // Owned by the loop, so they live as long as it runs.
         let _ = (&webview, &context);
         match event {
@@ -287,6 +371,7 @@ pub fn run(state: Arc<State>, url: &str, _backend: Backend) -> Result<()> {
                     window.set_focus();
                 }
                 UiEvent::Rewards { result, fresh } => overlays.show_rewards(&result, fresh),
+                UiEvent::HideRewards => overlays.strip.hide(),
                 UiEvent::Riven(r) => overlays.show_riven(&r),
                 UiEvent::TestOverlay => overlays.show_test(),
                 UiEvent::HideForCapture(ack) => {
@@ -297,7 +382,13 @@ pub fn run(state: Arc<State>, url: &str, _backend: Backend) -> Result<()> {
             },
             TaoEvent::UserEvent(Event::Hide(Which::Strip)) => overlays.strip.hide(),
             TaoEvent::UserEvent(Event::Hide(Which::Riven)) => overlays.riven.hide(),
+            TaoEvent::UserEvent(Event::Ready(Which::Strip)) => overlays.strip.ready(),
+            TaoEvent::UserEvent(Event::Ready(Which::Riven)) => overlays.riven.ready(),
             _ => {}
+        }
+        overlays.expire(Instant::now());
+        if !matches!(*flow, ControlFlow::ExitWithCode(_)) {
+            *flow = overlays.next_deadline().map_or(ControlFlow::Wait, ControlFlow::WaitUntil);
         }
     })
 }

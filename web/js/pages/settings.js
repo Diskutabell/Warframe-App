@@ -124,7 +124,7 @@ export default {
 
       ${section("Reward screen and riven overlays", `
         ${toggle("ocr_enabled", "Read the reward screen when it opens", "Triggered by the game log; the hotkey below works any time.")}
-        ${toggle("overlay_enabled", "Show prices over the game", "A strip under the reward cards; hides itself, hovering keeps it.")}
+        ${toggle("overlay_enabled", "Show prices over the game", linux ? "A strip under the reward cards; hides itself, hovering keeps it." : "A strip under the reward cards; hides itself after the selected time.")}
         ${number("overlay_seconds", "Hide the price strip after", "Seconds.", { min: 3, max: 120 })}
         ${number("overlay_y_percent", "Price strip height", "% of the screen from the top.", { min: 0, max: 100, step: 0.5 })}
         ${toggle("riven_overlay_enabled", "Show riven grades over the game", "After a riven scan with the hotkey.")}

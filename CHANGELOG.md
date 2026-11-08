@@ -4,6 +4,7 @@
 
 ### Added
 
+- A test overlay in Settings and clearer messages when a reward scan fails.
 - A farming planner for equipment goals, with parts, relics, known drop sources and crafting
   materials. Goals are saved per account.
 - Ctrl+K searches mods, resources, gear and names in loaded drop tables. Item, part and relic
@@ -29,6 +30,12 @@
   larger reads fail. Repeated logins and scans delayed by cooldown are handled, and incomplete
   captures are less likely to replace a more complete inventory.
 - A late duplicate reward-screen log event no longer triggers another scan immediately.
+- Windows overlays expire using a native timer, and reward scan errors are shown instead of an
+  empty panel. Older reward scans no longer overwrite newer results.
+- Automatic reward scans wait until the game has received the rewards, and the strip closes when
+  the selection ends. Gold reward text is also read by the OCR.
+- Windows screenshots target the game's client area, and overlay positioning, focus handling and
+  hotkey error reporting have been improved.
 
 ## 0.4.1 - 2026-11-06
 

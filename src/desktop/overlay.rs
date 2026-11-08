@@ -280,6 +280,12 @@ impl Overlays {
             if let Some(p) = slot.borrow().as_ref() {
                 p.hide();
             }
+
+            pub fn hide_rewards(&self) {
+                if let Some(panel) = self.strip.borrow().as_ref() {
+                    panel.hide();
+                }
+            }
         }
     }
 
@@ -287,14 +293,25 @@ impl Overlays {
 
     pub fn show_rewards(&self, r: &RewardResult, fresh: bool) {
         let s = self.state.settings();
-        if !s.overlay_enabled || r.items.is_empty() {
+        if !s.overlay_enabled || (r.items.is_empty() && r.error.is_none()) {
             return;
         }
         let panel = self.panel(&self.strip, "warframeproject-rewards", true);
         if !fresh && !panel.visible() {
             return; // a price update for a strip the user already closed
         }
-        self.fill_strip(&panel, &r.items, r.best.as_deref());
+        if r.items.is_empty() {
+            panel.clear();
+            let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
+            body.style_context().add_class("wfp-panel");
+            body.add(&label("Reward scan", "wfp-weapon"));
+            let message = label(r.error.as_deref().unwrap_or("No reward names recognized."), "wfp-warn");
+            message.set_line_wrap(true);
+            body.add(&message);
+            panel.body.add(&body);
+        } else {
+            self.fill_strip(&panel, &r.items, r.best.as_deref());
+        }
         if fresh || !panel.visible() {
             let g = self.game_rect();
             let w = STRIP_W.min(g.width - 40).max(300);

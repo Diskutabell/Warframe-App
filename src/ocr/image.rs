@@ -214,7 +214,7 @@ fn coefficients(in_size: usize, out_size: usize) -> (Vec<i32>, Vec<(usize, usize
     (weights, bounds, ksize)
 }
 
-/// The four images tesseract reads on the reward screen.
+/// The images tesseract reads on the reward screen.
 ///
 /// Reward names sit just above the vertical centre; ultrawide screens keep a 16:9 UI area. The
 /// band is deliberately generous - the leftmost card sits near x=0.10 on a 4-reward screen, and
@@ -224,8 +224,8 @@ fn coefficients(in_size: usize, out_size: usize) -> (Vec<i32>, Vec<(usize, usize
 /// the first line of the name under it. In luminance those are the same value, so a grey
 /// threshold eats the overlapped letters ("Yareli Prime Chassis" came back as "Yarel asslIs").
 /// Blue minus red separates them by hue: the text survives and the gold drops to zero. The grey
-/// pair stays as the fallback for a non-default UI theme, where the names are not blue at all.
-pub fn reward_variants(frame: &Rgb) -> [Gray; 4] {
+/// pair stays as the fallback for other themes; red minus blue also isolates gold text.
+pub fn reward_variants(frame: &Rgb) -> [Gray; 6] {
     let (w, h) = (frame.width as i64, frame.height as i64);
     let ui_w = w.min(((h * 16) as f64 / 9.0) as i64);
     let x0 = (w - ui_w) / 2;
@@ -239,9 +239,12 @@ pub fn reward_variants(frame: &Rgb) -> [Gray; 4] {
     let grey = grey.resize_bicubic(grey.width * 2, grey.height * 2);
     let blue = band_rgb.channel(2).subtract(&band_rgb.channel(0)).autocontrast();
     let blue = blue.resize_bicubic(blue.width * 2, blue.height * 2);
+    let gold = band_rgb.channel(0).subtract(&band_rgb.channel(2)).autocontrast();
+    let gold = gold.resize_bicubic(gold.width * 2, gold.height * 2);
     let inverted = grey.invert();
     let blue_hard = blue.threshold(120);
-    [grey, inverted, blue, blue_hard]
+    let gold_hard = gold.threshold(120);
+    [grey, inverted, blue, blue_hard, gold, gold_hard]
 }
 
 /// The whole frame for a riven card, which can sit anywhere: grey, stretched, enlarged 1.5x.
@@ -270,5 +273,15 @@ mod tests {
     fn identity_resize_returns_the_input() {
         let g = Gray { width: 3, height: 2, data: vec![1, 2, 3, 4, 5, 6] };
         assert_eq!(g.resize_bicubic(3, 2), g);
+    }
+
+    #[test]
+    fn reward_variants_include_gold_text() {
+        let mut frame = Rgb { width: 100, height: 100, data: vec![0; 100 * 100 * 3] };
+        let i = (40 * frame.width + 50) * 3;
+        frame.data[i..i + 3].copy_from_slice(&[200, 150, 40]);
+        let variants = reward_variants(&frame);
+        assert!(variants[4].data.iter().any(|&pixel| pixel > 0));
+        assert!(variants[5].data.contains(&255));
     }
 }
