@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Mastery cards.** Switch between the table and larger cards, and filter for Prime or non-Prime
+  items.
+
+### Changed
+
+- Mastery says "parts collected" rather than "ready to build" when blueprint and component counts
+  are combined and resources have not been checked.
+
 ## 0.4.1 - 2026-11-06
 
 ### Changed
