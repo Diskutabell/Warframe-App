@@ -33,27 +33,11 @@ static NAME_RES: LazyLock<[Regex; 3]> = LazyLock::new(|| {
 /// (Rank1to3 ... Rank49to51).
 static MASTERY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"OnMasteryIconReady1\(Loaded:[^)]*?/Rank(\d+)(?:to(\d+))?_").unwrap());
-/// The reward screen opens on OpenVoidProjectionRewardScreen (logged with an `RMI` suffix, so
-/// this stays a substring test). The choice interface and the other messages are fallback
-/// triggers: the interface can be created again after the selection has already closed.
-pub const REWARD_TRIGGERS: [&str; 4] = [
-    "VoidProjections: OpenVoidProjectionRewardScreen",
-    "Pause countdown done",
-    "Got rewards",
-    "Created /Lotus/Interface/ProjectionRewardChoice.swf",
-];
+const REWARD_READY: &str = "ProjectionRewardChoice.lua: Got rewards";
+const REWARD_CLOSED: &str = "ProjectionRewardChoice.lua: Relic reward screen shut down";
 /// Lines that suggest the account state changed on the server.
 pub const SYNC_HINTS: [&str; 4] =
     ["EndOfMatch.lua: Mission Succeeded", "EndOfMatch.lua: Mission Failed", "ExitLevel", "Inventory updated"];
-const REWARD_DEBOUNCE: f64 = 8.0;
-const REWARD_FALLBACK_DEBOUNCE: f64 = 30.0;
-
-fn reward_trigger_due(line: &str, last_reward: f64, time: f64) -> bool {
-    let Some(trigger) = REWARD_TRIGGERS.iter().find(|t| line.contains(**t)) else { return false };
-    let gap = if *trigger == REWARD_TRIGGERS[0] { REWARD_DEBOUNCE } else { REWARD_FALLBACK_DEBOUNCE };
-    time - last_reward > gap
-}
-
 /// Display names carry a trailing platform glyph from the private-use area (U+E000 for PC).
 /// "Logged in <name>" prints the bare name and every later line the glyph form, so never compare
 /// a log name without stripping it.
@@ -357,6 +341,7 @@ pub enum LogEvent {
     /// The local player's mastery badge: (low, high), high None when exact.
     Mastery(u32, Option<u32>),
     RewardScreen,
+    RewardScreenClosed,
     Sync,
     /// The log as it was when the watcher found it has been read back.
     Replayed,
@@ -431,14 +416,13 @@ pub struct LogWatcher {
     emit: Handler,
     status: Arc<Mutex<LogStatus>>,
     player: Option<String>,
-    last_reward: f64,
+    reward_active: bool,
 }
 
 impl LogWatcher {
     pub fn spawn(path_of: PathGetter, emit: Handler) -> Arc<Mutex<LogStatus>> {
         let status = Arc::new(Mutex::new(LogStatus::default()));
-        let mut watcher =
-            LogWatcher { path_of, emit, status: Arc::clone(&status), player: None, last_reward: f64::NEG_INFINITY };
+        let mut watcher = LogWatcher { path_of, emit, status: Arc::clone(&status), player: None, reward_active: false };
         std::thread::Builder::new().name("eelog".into()).spawn(move || watcher.run()).expect("spawning eelog");
         status
     }
@@ -460,6 +444,7 @@ impl LogWatcher {
                 continue;
             };
             if current.as_ref() != Some(&path) {
+                self.reward_active = false;
                 self.status().path = Some(path.clone());
                 let meta = fs::metadata(&path).ok();
                 pos = meta.as_ref().map_or(0, |m| m.len());
@@ -474,6 +459,7 @@ impl LogWatcher {
                     // The game restarted and recreated its log.
                     (pos, inode) = (0, file_id(&meta));
                     lines.clear();
+                    self.reward_active = false;
                 }
                 if meta.len() > pos {
                     self.status().last_activity = now();
@@ -527,12 +513,17 @@ impl LogWatcher {
         for (id, sure) in candidate_ids(line, self.player.as_deref()) {
             (self.emit)(LogEvent::Candidate(id, sure, tail(line.trim(), 200)));
         }
-        if REWARD_TRIGGERS.iter().any(|t| line.contains(t)) {
+        if line.contains(REWARD_READY) {
             self.status().note(line);
-            let time = now();
-            if reward_trigger_due(line, self.last_reward, time) {
-                self.last_reward = time;
+            if !self.reward_active {
+                self.reward_active = true;
                 (self.emit)(LogEvent::RewardScreen);
+            }
+        } else if line.contains(REWARD_CLOSED) {
+            self.status().note(line);
+            if self.reward_active {
+                self.reward_active = false;
+                (self.emit)(LogEvent::RewardScreenClosed);
             }
         } else if SYNC_HINTS.iter().any(|h| line.contains(h)) {
             self.status().note(line);
@@ -546,16 +537,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn late_choice_creation_is_not_a_new_reward_screen() {
-        let open = "VoidProjections: OpenVoidProjectionRewardScreen";
-        let created = "Created /Lotus/Interface/ProjectionRewardChoice.swf";
-        assert!(reward_trigger_due(open, f64::NEG_INFINITY, 100.0));
-        assert!(!reward_trigger_due(created, 100.0, 100.004));
-        assert!(!reward_trigger_due("Got rewards", 100.0, 105.0));
-        assert!(!reward_trigger_due(created, 100.0, 117.0));
-        assert!(reward_trigger_due(open, 100.0, 117.0));
-        assert!(reward_trigger_due(created, 100.0, 131.0));
-        assert!(!reward_trigger_due("unrelated line", 100.0, 150.0));
+    fn reward_scan_waits_for_rewards_and_ignores_late_interface_creation() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&events);
+        let mut watcher = LogWatcher {
+            path_of: Box::new(|| None),
+            emit: Box::new(move |event| match event {
+                LogEvent::RewardScreen => captured.lock().unwrap().push("ready"),
+                LogEvent::RewardScreenClosed => captured.lock().unwrap().push("closed"),
+                _ => {}
+            }),
+            status: Arc::new(Mutex::new(LogStatus::default())),
+            player: None,
+            reward_active: false,
+        };
+        for line in [
+            "VoidProjections: OpenVoidProjectionRewardScreenRMI",
+            "Created /Lotus/Interface/ProjectionRewardChoice.swf",
+            "ProjectionRewardChoice.lua: Pause countdown done",
+            "ProjectionRewardChoice.lua: Got rewards",
+            "ProjectionRewardChoice.lua: Got rewards",
+            "ProjectionRewardChoice.lua: Relic reward screen shut down",
+            "Created /Lotus/Interface/ProjectionRewardChoice.swf",
+            "ProjectionRewardChoice.lua: Relic reward screen shut down",
+            "ProjectionRewardChoice.lua: Got rewards",
+            "ProjectionRewardChoice.lua: Relic reward screen shut down",
+        ] {
+            watcher.handle(line);
+        }
+        assert_eq!(*events.lock().unwrap(), ["ready", "closed", "ready", "closed"]);
     }
 
     #[test]
@@ -571,7 +581,7 @@ mod tests {
             }),
             status: Arc::new(Mutex::new(LogStatus::default())),
             player: None,
-            last_reward: f64::NEG_INFINITY,
+            reward_active: false,
         };
         watcher.handle("Sys [Info]: Logged in Tenno");
         watcher.handle("Sys [Info]: Player name changed to Tenno");

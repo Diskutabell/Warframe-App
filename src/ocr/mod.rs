@@ -41,7 +41,7 @@ pub fn read_rewards(frame: &Rgb, names: &Names) -> Result<(Vec<RewardMatch>, Str
         bail!("tesseract is not installed, so the reward screen cannot be read.");
     }
     let variants = image::reward_variants(frame);
-    // Four independent tesseract passes: run them side by side, not one after another.
+    // Independent tesseract passes: run them side by side, not one after another.
     let passes: Vec<Result<Vec<tesseract::TsvWord>>> = std::thread::scope(|s| {
         let jobs: Vec<_> = variants.iter().map(|v| s.spawn(move || tesseract::words(v, 11))).collect();
         jobs.into_iter().map(|j| j.join().unwrap_or_else(|_| bail!("tesseract thread panicked"))).collect()

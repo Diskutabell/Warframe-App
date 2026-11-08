@@ -168,6 +168,7 @@ pub enum UiEvent {
         result: Arc<RewardResult>,
         fresh: bool,
     },
+    HideRewards,
     Riven(Arc<RivenResult>),
     TestOverlay,
     /// Hide the overlays before a screenshot, so a scan never reads our own text; acknowledged
@@ -382,7 +383,13 @@ impl State {
             riven: Mutex::new(None),
             memscan: Mutex::new(MemscanStatus { state: "idle", last_attempt: f64::NEG_INFINITY, ..Default::default() }),
             scan_lock: Mutex::new(()),
-            reward_scan: Mutex::new(RewardScan { started: f64::NEG_INFINITY, done: true, generation: 0, result: None }),
+            reward_scan: Mutex::new(RewardScan {
+                started: f64::NEG_INFINITY,
+                done: true,
+                generation: 0,
+                screen_generation: 0,
+                result: None,
+            }),
             reward_done: std::sync::Condvar::new(),
             log: Mutex::new(None),
             ui: Mutex::new(None),
@@ -556,11 +563,23 @@ impl State {
             }
             LogEvent::RewardScreen => {
                 if self.settings().ocr_enabled {
+                    let screen = {
+                        let mut scan = lock(&self.reward_scan);
+                        scan.invalidate();
+                        scan.screen_generation
+                    };
+                    self.reward_done.notify_all();
                     let me = Arc::clone(self);
                     std::thread::spawn(move || {
-                        me.scan_rewards(Duration::from_millis(600));
+                        me.scan_rewards_for(Duration::from_millis(600), Some(screen));
                     });
                 }
+            }
+            LogEvent::RewardScreenClosed => {
+                let mut scan = lock(&self.reward_scan);
+                scan.invalidate();
+                self.ui(UiEvent::HideRewards);
+                self.reward_done.notify_all();
             }
             LogEvent::Sync => self.schedule_memscan(Duration::from_secs(3), 2),
         }
@@ -1610,8 +1629,15 @@ impl State {
 
     /// Screenshots the reward screen, reads the names, and prices them.
     pub fn scan_rewards(&self, delay: Duration) -> Arc<RewardResult> {
+        self.scan_rewards_for(delay, None).expect("a manual reward scan is not cancelled before starting")
+    }
+
+    fn scan_rewards_for(&self, delay: Duration, screen: Option<u64>) -> Option<Arc<RewardResult>> {
         std::thread::sleep(delay);
         let mut slot = lock(&self.reward_scan);
+        if screen.is_some_and(|screen| screen != slot.screen_generation) {
+            return None;
+        }
         if now() - slot.started < COALESCE {
             // The same screen as a scan that just started: share its result, prices included.
             let (done, _) = self
@@ -1619,9 +1645,12 @@ impl State {
                 .wait_timeout_while(slot, Duration::from_secs(15), |s| !s.done)
                 .unwrap_or_else(|e| e.into_inner());
             if let Some(r) = &done.result {
-                return Arc::clone(r);
+                return Some(Arc::clone(r));
             }
             slot = done;
+            if screen.is_some_and(|screen| screen != slot.screen_generation) {
+                return None;
+            }
         }
         slot.started = now();
         slot.done = false;
@@ -1641,13 +1670,16 @@ impl State {
             Ok(r) => r,
             Err(e) => {
                 self.event(&format!("Reward scan failed: {e}"), "warn");
-                return self.publish_rewards(
+                return Some(self.publish_rewards(
                     RewardResult { t: now(), error: Some(e.to_string()), ..Default::default() },
                     true,
                     generation,
-                );
+                ));
             }
         };
+        if screen.is_some() && !lock(&self.reward_scan).is_current(generation) {
+            return None;
+        }
         // Owned and needed are the playing account's, whichever account the window shows.
         let (account, v) = self.game_view();
         let needed = v.needed_parts();
@@ -1685,6 +1717,9 @@ impl State {
 
         let slugs: Vec<Option<String>> = items.iter().map(|i| i.slug.clone()).collect();
         let prices = self.market.fetch_now(&slugs, Duration::from_secs(6));
+        if screen.is_some() && !lock(&self.reward_scan).is_current(generation) {
+            return None;
+        }
         for it in &mut items {
             if let Some(sell) = it.slug.as_ref().and_then(|s| prices.get(s)).and_then(|p| p.sell) {
                 it.price = Some(sell);
@@ -1726,7 +1761,7 @@ impl State {
                 .collect();
             notifier::send("Relic rewards", &lines.join("\n"));
         }
-        self.publish_rewards(RewardResult { items, best, ..base }, false, generation)
+        Some(self.publish_rewards(RewardResult { items, best, ..base }, false, generation))
     }
 
     fn riven_failed(&self, weapon: Option<String>, text: &str, error: String) -> Arc<RivenResult> {
@@ -1858,10 +1893,18 @@ struct RewardScan {
     started: f64,
     done: bool,
     generation: u64,
+    screen_generation: u64,
     result: Option<Arc<RewardResult>>,
 }
 
 impl RewardScan {
+    fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.screen_generation = self.screen_generation.wrapping_add(1);
+        self.started = f64::NEG_INFINITY;
+        self.done = true;
+        self.result = None;
+    }
     fn is_current(&self, generation: u64) -> bool {
         self.generation == generation
     }
@@ -1893,11 +1936,23 @@ mod tests {
 
     #[test]
     fn older_reward_scan_cannot_finish_the_newer_scan() {
-        let mut scan = RewardScan { started: 10.0, done: false, generation: 2, result: None };
+        let mut scan = RewardScan { started: 10.0, done: false, generation: 2, screen_generation: 0, result: None };
         assert!(!scan.is_current(1));
         scan.finish(1);
         assert!(!scan.done);
         assert!(scan.is_current(2));
+        scan.finish(2);
+        assert!(scan.done);
+    }
+
+    #[test]
+    fn closing_reward_screen_invalidates_pending_and_running_scans() {
+        let mut scan = RewardScan { started: 10.0, done: false, generation: 2, screen_generation: 5, result: None };
+        scan.invalidate();
+        assert_ne!(scan.screen_generation, 5);
+        assert!(!scan.is_current(2));
+        assert!(scan.done);
+        assert_eq!(scan.started, f64::NEG_INFINITY);
         scan.finish(2);
         assert!(scan.done);
     }

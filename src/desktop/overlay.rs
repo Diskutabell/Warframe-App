@@ -280,6 +280,12 @@ impl Overlays {
             if let Some(p) = slot.borrow().as_ref() {
                 p.hide();
             }
+
+            pub fn hide_rewards(&self) {
+                if let Some(panel) = self.strip.borrow().as_ref() {
+                    panel.hide();
+                }
+            }
         }
     }
 
