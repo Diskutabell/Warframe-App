@@ -15,9 +15,6 @@
 
 - Mastery says "parts collected" rather than "ready to build" when blueprint and component counts
   are combined and resources have not been checked.
-
-### Changed
-
 - Part counts can include both blueprints and crafted parts. The planner shows component recipes
   even for held parts, and its materials total assumes all components still need crafting. It can
   miss recipes and required equipment; check the foundry before buying or farming materials.
