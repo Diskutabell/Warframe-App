@@ -1,10 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 - 2026-11-08
 
 ### Added
 
-- A test overlay in Settings and clearer messages when a reward scan fails.
+- **The window floats on Hyprland and Sway.** It opens at its own size instead of being tiled
+  into the layout. The app sets the window rule in the running compositor at every start; no
+  config file is touched.
+- A failed reward scan shows its error in the price strip instead of an empty panel.
 - A farming planner for equipment goals, with parts, relics, known drop sources and crafting
   materials. Goals are saved per account.
 - Ctrl+K searches mods, resources, gear and names in loaded drop tables. Item, part and relic
