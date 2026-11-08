@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.6.0 - 2026-11-08
+
+### Changed
+
+- **The reward screen is read card by card.** The app finds the cards by the rarity bar under
+  each of them, then reads only the rows the names use. Names on other screens (the relic
+  selection screen lists a relic's possible rewards) are no longer taken for rewards, and a
+  reading takes about 0.3 s instead of a second. Checked on every frame of five real reward
+  screens and on twenty more in the red Stalker theme at 1200p and 4K.
+- **It starts sooner.** The scan begins when the log says the reward screen opened and watches
+  the screen until the cards turn over. The game writes its log in batches: "Got rewards", which
+  the scan used to wait for, reached the file up to 15 seconds late, as the screen was closing.
+- **New price panels**, one under each card, sized like the cards: platinum, ducats, how many
+  you own, needed and vaulted, and a BEST tag on the pick worth the most. Clicks go through to
+  the game, and there is no close button.
+- **The panels leave with the reward screen.** The app checks the cards are still there and
+  takes the panels down within a second of them going, without waiting for the log.
+- The interface scale comes from the game's `EE.cfg`; other scales are found on their own.
+- `warframeproject replay` takes several frames and prints one line for each.
+
+### Removed
+
+- The "price strip height" setting: the panels sit under the cards.
+
+### Fixed
+
+- Names found on a screen that is not the reward screen are no longer recorded in the reward
+  history.
+- A hovered card's tooltip no longer hides the reward cards from the scan.
+
 ## 0.5.0 - 2026-11-08
 
 ### Added
