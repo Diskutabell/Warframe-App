@@ -11,6 +11,7 @@ mod art;
 mod clock;
 mod config;
 mod difflib;
+mod drops;
 mod eelog;
 mod gamedata;
 mod history;
