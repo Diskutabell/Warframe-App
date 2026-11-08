@@ -38,8 +38,8 @@ const DUCAT_UID: &str = "/Lotus/Types/Items/MiscItems/PrimeBucks";
 /// A reward scan started this recently already covers the screen: the F9 hotkey and the
 /// automatic trigger routinely fire for the same reward screen within a second of each other.
 const COALESCE: f64 = 3.0;
-/// Memory scans run at most this often, retries excepted.
-const MEMSCAN_GAP: f64 = 90.0;
+/// Minimum time between the starts of memory scans.
+const MEMSCAN_GAP: f64 = 10.0;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Event {
@@ -130,6 +130,34 @@ pub struct MemscanStatus {
     /// The game process that refused access; it is not asked again, a restarted game is.
     #[serde(skip)]
     denied_pid: Option<u32>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ScheduledScan {
+    Superseded,
+    Cancelled,
+    Wait,
+    Start,
+}
+
+impl MemscanStatus {
+    fn start_scheduled(&mut self, due: f64, enabled: bool, pid: Option<u32>, time: f64) -> ScheduledScan {
+        if self.next != Some(due) {
+            return ScheduledScan::Superseded;
+        }
+        if !enabled || (pid.is_some() && pid == self.denied_pid) {
+            self.next = None;
+            return ScheduledScan::Cancelled;
+        }
+        if self.state == "scanning" || time - self.last_attempt < MEMSCAN_GAP {
+            return ScheduledScan::Wait;
+        }
+        self.next = None;
+        self.state = "scanning";
+        self.progress = 0.0;
+        self.last_attempt = time;
+        ScheduledScan::Start
+    }
 }
 
 /// What the engine asks of the desktop shell, if one is running.
@@ -293,6 +321,36 @@ fn owner(d: &Data, game: &str, xp: &IndexMap<String, i64>) -> Owner {
         (Some(false), None) => Owner::Stranger,
         _ => Owner::Unknown,
     }
+}
+
+fn choose_capture(
+    d: &Data,
+    game: &str,
+    sections: &memscan::Sections,
+    captures: Vec<Value>,
+) -> (Option<Value>, Option<String>, Option<Vec<String>>) {
+    let mut held_by = None;
+    let mut missing = None;
+    for capture in captures {
+        match owner(d, game, &sources::xp_map(capture.get("XPInfo"))) {
+            Owner::Game | Owner::Unknown => {
+                let absent = sections.missing(&capture);
+                if absent.is_empty() {
+                    return (Some(capture), held_by, missing);
+                }
+                if missing.is_none() {
+                    missing = Some(absent);
+                }
+            }
+            Owner::Other(name) => {
+                held_by.get_or_insert(name);
+            }
+            Owner::Stranger => {
+                held_by.get_or_insert_with(|| "another account".to_string());
+            }
+        }
+    }
+    (None, held_by, missing)
 }
 
 impl State {
@@ -463,7 +521,12 @@ impl State {
     fn on_log(self: &Arc<Self>, ev: LogEvent) {
         match ev {
             LogEvent::Name(name, live) => self.on_login(&name, live),
-            LogEvent::Replayed => self.follow_game(false),
+            LogEvent::Replayed => {
+                self.follow_game(false);
+                if memscan::find_game_pid().is_some() {
+                    self.schedule_memscan(Duration::from_secs(3), 2);
+                }
+            }
             LogEvent::Account(id, name) => {
                 let key = {
                     let mut d = lock(&self.data);
@@ -499,7 +562,7 @@ impl State {
                     });
                 }
             }
-            LogEvent::Sync => self.schedule_memscan(Duration::from_secs(8), 2),
+            LogEvent::Sync => self.schedule_memscan(Duration::from_secs(3), 2),
         }
     }
 
@@ -529,8 +592,10 @@ impl State {
                 self.request_profile(&key);
             }
         }
-        // Logged in: the inventory arrives a little later.
-        self.schedule_memscan(Duration::from_secs(45), 2);
+        if live {
+            // The inventory can be overwritten shortly after it arrives.
+            self.schedule_memscan(Duration::from_secs(3), 2);
+        }
     }
 
     /// Shows the account the game is logged in to. A login seen live always moves the window to
@@ -634,40 +699,35 @@ impl State {
             st.next = Some(due);
         }
         let me = Arc::clone(self);
-        std::thread::Builder::new()
-            .name("memscan".into())
-            .spawn(move || {
-                std::thread::sleep(delay);
-                {
-                    let mut st = lock(&me.memscan);
-                    if st.next != Some(due) {
-                        return; // superseded by an earlier one
-                    }
-                    st.next = None;
+        if let Err(e) = std::thread::Builder::new().name("memscan".into()).spawn(move || {
+            std::thread::sleep(delay);
+            let pid = loop {
+                let enabled = me.settings().memory_scan_enabled;
+                let pid = memscan::find_game_pid();
+                let mut st = lock(&me.memscan);
+                match st.start_scheduled(due, enabled, pid, now()) {
+                    ScheduledScan::Superseded | ScheduledScan::Cancelled => return,
+                    ScheduledScan::Start => break pid,
+                    ScheduledScan::Wait => {}
                 }
-                me.memscan_now(retries);
-            })
-            .ok();
+                drop(st);
+                std::thread::sleep(Duration::from_secs(1));
+            };
+            me.memscan_now(pid, retries);
+        }) {
+            let mut st = lock(&self.memscan);
+            if st.next == Some(due) {
+                st.next = None;
+            }
+            if st.state != "scanning" {
+                st.state = "error";
+            }
+            st.detail = Some(format!("Could not schedule the memory scan: {e}"));
+            eprintln!("could not schedule the memory scan: {e}");
+        }
     }
 
-    fn memscan_now(self: &Arc<Self>, retries: u8) {
-        if !self.settings().memory_scan_enabled {
-            return;
-        }
-        let pid = memscan::find_game_pid();
-        {
-            let mut st = lock(&self.memscan);
-            // One scan at a time, and the game's memory is not combed again within the gap.
-            if st.state == "scanning"
-                || now() - st.last_attempt < MEMSCAN_GAP
-                || (pid.is_some() && pid == st.denied_pid)
-            {
-                return;
-            }
-            st.state = "scanning";
-            st.progress = 0.0;
-            st.last_attempt = now();
-        }
+    fn memscan_now(self: &Arc<Self>, pid: Option<u32>, retries: u8) {
         let result = match pid {
             Some(pid) => memscan::scan_inventory(pid, |p| lock(&self.memscan).progress = py_round(p, 3)),
             None => Err(ScanError::NotRunning),
@@ -690,9 +750,7 @@ impl State {
             }
         };
         if retry && retries > 0 {
-            // A retry is not held to the gap: the sync that asked for it is still fresh.
-            lock(&self.memscan).last_attempt = f64::NEG_INFINITY;
-            self.schedule_memscan(Duration::from_secs(if retries > 1 { 30 } else { 90 }), retries - 1);
+            self.schedule_memscan(Duration::from_secs(if retries > 1 { 10 } else { 30 }), retries - 1);
         }
     }
 
@@ -715,44 +773,28 @@ impl State {
                 "Waiting for the game's \"Logged in\" line, which says whose inventory this is.".into(),
             );
         };
-        let (chosen, held_by, game_name) = {
-            let d = lock(&self.data);
-            let mut held_by = None;
-            let mut chosen = None;
-            for capture in captures {
-                match owner(&d, &game, &sources::xp_map(capture.get("XPInfo"))) {
-                    Owner::Game | Owner::Unknown => {
-                        chosen = Some(capture);
-                        break;
-                    }
-                    Owner::Other(name) => {
-                        held_by.get_or_insert(name);
-                    }
-                    Owner::Stranger => {
-                        held_by.get_or_insert_with(|| "another account".to_string());
-                    }
-                }
-            }
-            (chosen, held_by, d.name_of(&game))
-        };
-        let Some(obj) = chosen else {
-            let whose = held_by.map_or_else(|| "another account's".to_string(), |n| format!("{n}'s"));
-            return self.capture_held_back(format!(
-                "The game still holds {whose} inventory; {game_name}'s is read after the next mission."
-            ));
-        };
-
         let file = accounts::dir(&game).join("memscan_sections.json");
         let mut sections: memscan::Sections = crate::config::read_json(&file).unwrap_or_default();
-        let missing = sections.missing(&obj);
-        if !missing.is_empty() && !sections.refuse() {
-            let _ = fs::create_dir_all(accounts::dir(&game));
-            let _ = crate::config::write_json(&file, &sections);
-            return self.capture_held_back(format!(
-                "The game held only part of {game_name}'s inventory just now ({} missing), so the last complete one is kept.",
-                missing.join(", ")
-            ));
-        }
+        let (chosen, held_by, missing, game_name) = {
+            let d = lock(&self.data);
+            let (chosen, held_by, missing) = choose_capture(&d, &game, &sections, captures);
+            (chosen, held_by, missing, d.name_of(&game))
+        };
+        let obj = match (chosen, missing) {
+            (Some(obj), _) => obj,
+            (None, Some(missing)) => {
+                return self.capture_held_back(format!(
+                    "The game held only part of {game_name}'s inventory just now ({} missing), so the last complete one is kept.",
+                    missing.join(", ")
+                ));
+            }
+            (None, None) => {
+                let whose = held_by.map_or_else(|| "another account's".to_string(), |n| format!("{n}'s"));
+                return self.capture_held_back(format!(
+                    "The game still holds {whose} inventory; {game_name}'s is read after the next mission."
+                ));
+            }
+        };
         // The same sync, read again with nothing new in it: leave the inventory and the log alone.
         let keys = obj.as_object().map_or(0, |o| o.len());
         let sync = obj["LastInventorySync"].as_f64();
@@ -771,8 +813,12 @@ impl State {
         match stored {
             Ok(inv) => {
                 sections.learn(&obj);
-                let _ = fs::create_dir_all(accounts::dir(&game));
-                let _ = crate::config::write_json(&file, &sections);
+                let saved = fs::create_dir_all(accounts::dir(&game))
+                    .map_err(anyhow::Error::from)
+                    .and_then(|_| crate::config::write_json(&file, &sections));
+                if let Err(e) = saved {
+                    eprintln!("could not save memory scan expectations: {e:#}");
+                }
                 st.state = "ok";
                 st.detail = None;
                 st.last =
@@ -1010,6 +1056,12 @@ impl State {
             acc.inventory = None;
         }
         let _ = fs::remove_file(accounts::dir(&key).join("inventory.json"));
+        let sections = accounts::dir(&key).join("memscan_sections.json");
+        if let Err(e) = fs::remove_file(&sections) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                d.push_event(format!("Could not reset memory scan expectations: {e}"), "warn");
+            }
+        }
     }
 
     fn watch_inventory_file(&self) {
@@ -1798,6 +1850,39 @@ fn matches_json(items: &[RewardItem]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scheduled_scans_wait_for_the_active_scan_and_cooldown() {
+        let mut status =
+            MemscanStatus { state: "scanning", last_attempt: 100.0, next: Some(103.0), ..Default::default() };
+        assert_eq!(status.start_scheduled(103.0, true, Some(1), 103.0), ScheduledScan::Wait);
+        assert_eq!(status.next, Some(103.0));
+        status.state = "idle";
+        assert_eq!(status.start_scheduled(103.0, true, Some(1), 109.0), ScheduledScan::Wait);
+        assert_eq!(status.start_scheduled(103.0, true, Some(1), 110.0), ScheduledScan::Start);
+        assert_eq!(status.state, "scanning");
+        assert_eq!(status.next, None);
+        assert_eq!(status.start_scheduled(103.0, true, Some(1), 111.0), ScheduledScan::Superseded);
+        status.next = Some(120.0);
+        assert_eq!(status.start_scheduled(120.0, false, Some(1), 120.0), ScheduledScan::Cancelled);
+        assert_eq!(status.next, None);
+    }
+
+    #[test]
+    fn a_complete_capture_is_preferred_over_a_newer_fragment() {
+        let data = Data { accounts: vec![Account::new("alpha".into(), "Alpha".into())], ..Data::default() };
+        let whole = json!({"MiscItems": [], "Suits": [], "LastInventorySync": 1});
+        let fragment = json!({"MiscItems": [], "LastInventorySync": 2});
+        let mut sections = memscan::Sections::default();
+        for _ in 0..3 {
+            sections.learn(&whole);
+        }
+        let (chosen, _, _) = choose_capture(&data, "alpha", &sections, vec![fragment.clone(), whole.clone()]);
+        assert_eq!(chosen, Some(whole));
+        let (chosen, _, missing) = choose_capture(&data, "alpha", &sections, vec![fragment]);
+        assert!(chosen.is_none());
+        assert_eq!(missing, Some(vec!["Suits".to_string()]));
+    }
 
     fn account(key: &str, xp: &[(&str, i64)]) -> Account {
         let mut acc = Account::new(key.into(), key.to_uppercase());

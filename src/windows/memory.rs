@@ -19,7 +19,7 @@ use windows_sys::Win32::System::Memory::{
 };
 use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
 
-use super::{MAX_REGION, ScanError};
+use super::ScanError;
 
 /// Nothing to rule out up front: only opening the process can tell.
 pub fn availability() -> Result<(), String> {
@@ -100,7 +100,7 @@ impl Memory {
                 && info.Type == MEM_PRIVATE
                 && info.Protect & PAGE_READWRITE != 0
                 && info.Protect & PAGE_GUARD == 0;
-            if readable && size <= MAX_REGION {
+            if readable {
                 out.push((start, start + size));
             }
             match (info.BaseAddress as usize).checked_add(info.RegionSize) {
