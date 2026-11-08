@@ -74,6 +74,45 @@ fn items_file() -> PathBuf {
     config::dirs().cache.join("wfm_items.json")
 }
 
+fn valid_item_list(data: &Value) -> bool {
+    data.as_array().is_some_and(|items| !items.is_empty() && items.iter().any(|item| item["slug"].as_str().is_some()))
+}
+
+fn price_from_orders(value: &Value, time: f64) -> anyhow::Result<Price> {
+    let data = &value["data"];
+    let orders = |side: &str| -> anyhow::Result<Vec<i64>> {
+        let list = data[side].as_array().ok_or_else(|| anyhow::anyhow!("missing {side} orders"))?;
+        list.iter()
+            .map(|order| {
+                order["platinum"].as_i64().filter(|p| *p >= 0).ok_or_else(|| anyhow::anyhow!("invalid {side} price"))
+            })
+            .collect()
+    };
+    let mut sells = orders("sell")?;
+    let buys = orders("buy")?;
+    sells.sort_unstable();
+    let top3 = &sells[..sells.len().min(3)];
+    Ok(Price {
+        sell: sells.first().copied(),
+        sell_avg: (!top3.is_empty())
+            .then(|| crate::difflib::py_round(top3.iter().map(|p| *p as f64).sum::<f64>() / top3.len() as f64, 1)),
+        buy: buys.iter().max().copied(),
+        t: time,
+        err: None,
+    })
+}
+
+fn reserve_slot(next: &Mutex<Instant>, deadline: Option<Instant>) -> anyhow::Result<Duration> {
+    let mut next = next.lock().unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    let start = (*next).max(now);
+    if deadline.is_some_and(|end| start >= end) {
+        anyhow::bail!("market request deadline expired");
+    }
+    *next = start + MIN_INTERVAL;
+    Ok(start - now)
+}
+
 impl Market {
     pub fn new(settings: Arc<RwLock<Settings>>) -> Arc<Market> {
         let market = Arc::new(Market {
@@ -99,25 +138,28 @@ impl Market {
         [("Language", "en".into()), ("Platform", platform), ("Crossplay", "true".into())]
     }
 
-    fn get(&self, path: &str) -> anyhow::Result<Value> {
-        self.wait_for_slot();
+    fn get(&self, path: &str, deadline: Option<Instant>) -> anyhow::Result<Value> {
+        self.wait_for_slot(deadline)?;
         let headers = self.headers();
         let refs: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
-        net::get_json(&format!("{API}{path}"), &refs, Duration::from_secs(20))
+        let timeout = match deadline {
+            Some(end) => end
+                .checked_duration_since(Instant::now())
+                .filter(|d| !d.is_zero())
+                .ok_or_else(|| anyhow::anyhow!("market request deadline expired"))?
+                .min(Duration::from_secs(20)),
+            None => Duration::from_secs(20),
+        };
+        net::get_json(&format!("{API}{path}"), &refs, timeout)
     }
 
     /// Blocks until this caller may send the next request.
-    fn wait_for_slot(&self) {
-        let wait = {
-            let mut next = self.next_slot.lock().unwrap_or_else(|e| e.into_inner());
-            let now = Instant::now();
-            let start = (*next).max(now);
-            *next = start + MIN_INTERVAL;
-            start - now
-        };
+    fn wait_for_slot(&self, deadline: Option<Instant>) -> anyhow::Result<()> {
+        let wait = reserve_slot(&self.next_slot, deadline)?;
         if !wait.is_zero() {
             std::thread::sleep(wait);
         }
+        Ok(())
     }
 
     fn set_error(&self, e: Option<String>) {
@@ -127,16 +169,27 @@ impl Market {
     /// The item list (names, ducats, art, game references), refreshed once a day.
     pub fn load_items(&self) {
         let mut cached: Option<Value> = config::read_json(&items_file());
-        let stale = cached.as_ref().is_none_or(|c| now() - c["t"].as_f64().unwrap_or(0.0) > ITEMS_MAX_AGE);
+        let stale = cached
+            .as_ref()
+            .is_none_or(|c| !valid_item_list(&c["data"]) || now() - c["t"].as_f64().unwrap_or(0.0) > ITEMS_MAX_AGE);
         if stale {
-            match self.get("/items") {
-                Ok(v) => {
+            match self.get("/items", None) {
+                Ok(v) if valid_item_list(&v["data"]) => {
                     let fresh = json!({"t": now(), "data": v["data"]});
-                    let _ = config::write_json(&items_file(), &fresh);
+                    if let Err(e) = config::write_json(&items_file(), &fresh) {
+                        eprintln!("could not cache warframe.market item list: {e:#}");
+                    }
                     cached = Some(fresh);
+                    self.set_error(None);
+                }
+                Ok(_) => {
+                    self.set_error(Some("warframe.market returned an invalid item list; using cached data".into()))
                 }
                 Err(e) => self.set_error(Some(format!("warframe.market item list unavailable: {e}"))),
             }
+        }
+        if cached.as_ref().is_none_or(|c| !valid_item_list(&c["data"])) {
+            return;
         }
         let mut items = Items::default();
         for it in cached.as_ref().and_then(|c| c["data"].as_array()).into_iter().flatten() {
@@ -248,37 +301,27 @@ impl Market {
             if Instant::now() > deadline {
                 break;
             }
-            if let Some(p) = self.fetch(slug) {
+            if let Some(p) = self.fetch(slug, Some(deadline)) {
                 out.insert(slug.clone(), p);
             }
         }
         out
     }
 
-    fn fetch(&self, slug: &str) -> Option<Price> {
-        let entry = match self.get(&format!("/orders/item/{slug}/top")) {
-            Ok(v) => {
-                let plat = |side: &str| -> Vec<i64> {
-                    v["data"][side].as_array().into_iter().flatten().filter_map(|o| o["platinum"].as_i64()).collect()
-                };
-                let mut sells = plat("sell");
-                sells.sort_unstable();
-                let buys = plat("buy");
-                let top3 = &sells[..sells.len().min(3)];
-                Price {
-                    sell: sells.first().copied(),
-                    sell_avg: (!top3.is_empty())
-                        .then(|| crate::difflib::py_round(top3.iter().sum::<i64>() as f64 / top3.len() as f64, 1)),
-                    buy: buys.iter().max().copied(),
-                    t: now(),
-                    err: None,
+    fn fetch(&self, slug: &str, deadline: Option<Instant>) -> Option<Price> {
+        let entry = match self.get(&format!("/orders/item/{slug}/top"), deadline) {
+            Ok(v) => match price_from_orders(&v, now()) {
+                Ok(price) => price,
+                Err(e) => {
+                    self.set_error(Some(format!("warframe.market returned invalid orders for {slug}: {e:#}")));
+                    return self.cached(slug);
                 }
-            }
+            },
             Err(e) => match e.downcast_ref::<net::HttpStatus>() {
                 // A 404 is an answer ("no such item"); remember it so it is not asked again soon.
-                Some(status) => Price { sell: None, sell_avg: None, buy: None, t: now(), err: Some(status.0) },
-                None => {
-                    self.set_error(Some(format!("warframe.market unreachable: {e}")));
+                Some(net::HttpStatus(404)) => Price { sell: None, sell_avg: None, buy: None, t: now(), err: Some(404) },
+                _ => {
+                    self.set_error(Some(format!("warframe.market price unavailable for {slug}: {e}")));
                     return self.cached(slug);
                 }
             },
@@ -292,7 +335,10 @@ impl Market {
     fn save_if_dirty(&self) {
         if self.dirty.swap(false, Ordering::Relaxed) {
             let snapshot = self.prices.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            let _ = config::write_json(&prices_file(), &snapshot);
+            if let Err(e) = config::write_json(&prices_file(), &snapshot) {
+                self.dirty.store(true, Ordering::Relaxed);
+                eprintln!("could not save market prices: {e:#}");
+            }
         }
     }
 
@@ -314,7 +360,7 @@ impl Market {
             if let Some(slug) = slug {
                 let fresh = self.cached(&slug).is_some_and(|p| now() - p.t <= self.ttl());
                 if !fresh {
-                    self.fetch(&slug);
+                    self.fetch(&slug, None);
                 }
             }
             if last_save.elapsed() > Duration::from_secs(10) {
@@ -373,6 +419,44 @@ pub fn slot_glyph(category: &str, uid: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn item_list_rejects_empty_or_unexpected_responses() {
+        assert!(valid_item_list(&json!([{"slug": "ash_prime_set"}])));
+        assert!(!valid_item_list(&json!([])));
+        assert!(!valid_item_list(&json!([{"name": "Ash Prime"}])));
+        assert!(!valid_item_list(&json!({"error": "temporarily unavailable"})));
+        assert!(!valid_item_list(&Value::Null));
+    }
+
+    #[test]
+    fn orders_require_valid_prices_but_allow_empty_sides() {
+        let price = price_from_orders(
+            &json!({"data": {"sell": [{"platinum": 20}, {"platinum": 10}], "buy": [{"platinum": 7}]}}),
+            42.0,
+        )
+        .unwrap();
+        assert_eq!((price.sell, price.sell_avg, price.buy, price.t), (Some(10), Some(15.0), Some(7), 42.0));
+        let empty = price_from_orders(&json!({"data": {"sell": [], "buy": []}}), 42.0).unwrap();
+        assert_eq!((empty.sell, empty.buy), (None, None));
+        for invalid in [
+            json!({"data": {}}),
+            json!({"data": {"sell": [{}], "buy": []}}),
+            json!({"data": {"sell": [], "buy": [{"platinum": -1}]}}),
+        ] {
+            assert!(price_from_orders(&invalid, 42.0).is_err());
+        }
+    }
+
+    #[test]
+    fn expired_market_deadline_does_not_consume_a_request_slot() {
+        let reserved = Instant::now() + Duration::from_secs(5);
+        let next = Mutex::new(reserved);
+        assert!(reserve_slot(&next, Some(reserved)).is_err());
+        assert_eq!(*next.lock().unwrap(), reserved);
+        assert!(reserve_slot(&next, Some(reserved + Duration::from_secs(1))).is_ok());
+        assert_eq!(*next.lock().unwrap(), reserved + MIN_INTERVAL);
+    }
 
     #[test]
     fn slot_glyphs_for_parts_the_market_does_not_list() {

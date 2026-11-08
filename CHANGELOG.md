@@ -12,6 +12,11 @@
 - Mastery says "parts collected" rather than "ready to build" when blueprint and component counts
   are combined and resources have not been checked.
 
+### Fixed
+
+- Game-data and market caches keep usable data when a response is invalid. Cache errors are
+  reported rather than silently replacing good data.
+
 ## 0.4.1 - 2026-11-06
 
 ### Changed
