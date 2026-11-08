@@ -5,6 +5,7 @@
 
 pub mod image;
 pub mod matcher;
+pub mod reward;
 pub mod riven;
 pub mod screenshot;
 pub mod tesseract;
@@ -35,7 +36,12 @@ pub fn detect_tools(setting: ScreenshotTool) -> Tools {
     }
 }
 
-/// The reward names in a frame, left to right, and the text they were read from.
+/// The reward names anywhere in the middle of a frame, left to right, and the text they were
+/// read from.
+///
+/// Only for the hotkey, on a frame where `reward::find_layout` saw no cards: it reads a wide band
+/// and cannot tell a reward screen from another screen listing the same names (the relic
+/// selection screen shows a relic's possible rewards), so its results are not recorded.
 pub fn read_rewards(frame: &Rgb, names: &Names) -> Result<(Vec<RewardMatch>, String)> {
     if which("tesseract").is_none() {
         bail!("tesseract is not installed, so the reward screen cannot be read.");

@@ -106,6 +106,13 @@ pub fn columns(words: &[Word]) -> Vec<Vec<&Word>> {
         .collect()
 }
 
+/// The best reward name in one card's words (in reading order), if any reaches its threshold.
+pub fn best_name(words: &[&Word], names: &Names) -> Option<RewardMatch> {
+    let hit = find_names(words, names).into_iter().next()?;
+    let (name, uid) = &names.entries[hit.entry];
+    Some(RewardMatch { name: name.clone(), uid: uid.clone(), score: py_round(hit.score, 3) })
+}
+
 /// A name found in one run of words, with the left edge of its first word.
 #[derive(Clone, Debug)]
 struct Hit {
@@ -357,6 +364,23 @@ mod tests {
                 ("Braton Prime Receiver", 0.952)
             ]
         );
+    }
+
+    #[test]
+    fn one_cards_name_is_its_best_window() {
+        let n = names(&["Sevagoth Prime Systems Blueprint", "Sevagoth Prime Blueprint"]);
+        // A wrapped name with the card's border read as letters around it.
+        let words = [
+            word("L", 0, 0),
+            word("Sevagoth", 10, 20),
+            word("Prime", 80, 20),
+            word("Systems", 130, 21),
+            word("Blueprint", 40, 46),
+            word("l", 200, 46),
+        ];
+        let refs: Vec<&Word> = words.iter().collect();
+        let found = best_name(&refs, &n).expect("a name");
+        assert_eq!((found.name.as_str(), found.score), ("Sevagoth Prime Systems Blueprint", 1.0));
     }
 
     #[test]

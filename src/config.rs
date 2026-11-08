@@ -145,9 +145,8 @@ pub struct Settings {
     /// Announce finished foundry builds (needs an inventory).
     pub notify_foundry: bool,
     pub overlay_enabled: bool,
+    /// The longest the price panels stay up; they go with the reward screen, usually sooner.
     pub overlay_seconds: u32,
-    /// Vertical position of the reward strip, % of the game window's height.
-    pub overlay_y_percent: f64,
     pub overlay_backend: OverlayBackend,
     /// Bulk prices; reward-screen prices refresh after 15 min regardless.
     pub price_cache_minutes: u32,
@@ -178,7 +177,6 @@ impl Default for Settings {
             notify_foundry: false,
             overlay_enabled: true,
             overlay_seconds: 15,
-            overlay_y_percent: 58.0,
             overlay_backend: OverlayBackend::Auto,
             price_cache_minutes: 360,
         }

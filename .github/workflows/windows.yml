@@ -40,8 +40,9 @@ jobs:
           # The C runtime goes into the exe too, so it runs without the Visual C++ redistributable.
           RUSTFLAGS: -C target-feature=+crt-static
 
-      # Draws four reward names the way the game lays them out and has the exe read them, with
-      # nothing but Windows itself on PATH: proves the packed OCR is complete.
+      # Draws a reward screen as the game lays it out at 1920x1080 and 100% interface scale - four
+      # cards, 242 px wide, centred, each name bottom-aligned above its rarity bar - and has the exe
+      # read it with nothing but Windows itself on PATH: proves the packed OCR is complete.
       - name: Read a reward screen with the exe
         shell: powershell
         run: |
@@ -50,12 +51,18 @@ jobs:
           $bmp = New-Object System.Drawing.Bitmap 1920, 1080
           $g = [System.Drawing.Graphics]::FromImage($bmp)
           $g.Clear([System.Drawing.Color]::FromArgb(11, 18, 24))
-          $font = New-Object System.Drawing.Font("Arial", 24, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)
+          $font = New-Object System.Drawing.Font("Arial", 20, [System.Drawing.FontStyle]::Bold, [System.Drawing.GraphicsUnit]::Pixel)
           $brush = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(190, 220, 255))
-          $centred = New-Object System.Drawing.StringFormat
-          $centred.Alignment = [System.Drawing.StringAlignment]::Center
+          $outline = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(12, 8, 10))
+          $bar = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(130, 78, 56))
+          $bottom = New-Object System.Drawing.StringFormat
+          $bottom.Alignment = [System.Drawing.StringAlignment]::Center
+          $bottom.LineAlignment = [System.Drawing.StringAlignment]::Far
           for ($i = 0; $i -lt 4; $i++) {
-            $g.DrawString($names[$i], $font, $brush, (New-Object System.Drawing.RectangleF (174 + 413 * $i), 410, 333, 120), $centred)
+            $x = 476 + 242 * $i
+            $g.DrawString($names[$i], $font, $brush, (New-Object System.Drawing.RectangleF ($x + 6), 390, 230, 67), $bottom)
+            $g.FillRectangle($outline, $x + 4, 473, 234, 11)
+            $g.FillRectangle($bar, $x + 4, 476, 234, 5)
           }
           $bmp.Save("$PWD\frame.png", [System.Drawing.Imaging.ImageFormat]::Png)
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"

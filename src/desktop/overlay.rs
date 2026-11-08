@@ -1,32 +1,26 @@
-//! The in-game overlays: the reward price strip and the riven grade panel.
+//! The in-game overlays: the price panels under the reward cards and the riven grade panel.
 //!
-//! Native GTK widgets, updated directly when a scan finishes, so a re-shown strip never shows
+//! Native GTK widgets, updated directly when a scan finishes, so a re-shown panel never shows
 //! the previous mission's rewards. Windows are hidden and re-shown, never destroyed.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gtk::prelude::*;
-use gtk::{gdk, glib, pango};
+use gtk::{gdk, gdk_pixbuf, gio, glib, pango};
 use gtk_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
 use super::Backend;
 use crate::compositor::{self, Rect};
+use crate::ocr::reward;
 use crate::rivens::Graded;
 use crate::state::{RewardItem, RewardResult, RivenResult, State};
 
 const CSS: &str = r#"
 window.wfp-overlay { background-color: transparent; }
-.wfp-bar { background-color: rgba(14, 22, 29, 0.92); border: 1px solid #2d4150; border-radius: 4px; padding: 6px; }
-.wfp-card { background-color: rgba(33, 50, 64, 0.55); border-top: 3px solid #2d4150; padding: 8px 12px; }
-.wfp-card.best { border-top-color: #d4b26a; background-color: rgba(56, 52, 34, 0.6); }
-.wfp-name { font-family: "Rajdhani", "Arial Narrow", sans-serif; font-weight: 600; font-size: 15px; color: #e9e4d6; }
-.wfp-price { font-family: "Rajdhani", "Arial Narrow", sans-serif; font-weight: 700; font-size: 34px; color: #d4b26a; }
-.wfp-line, .wfp-muted { font-family: "Source Sans 3", "Noto Sans", sans-serif; font-size: 13px; color: #a3b0b8; }
-.wfp-close { color: #a3b0b8; background: none; border: none; box-shadow: none; padding: 0 6px; min-height: 0; min-width: 0; font-size: 18px; }
-.wfp-close:hover { color: #e9e4d6; }
 .wfp-panel { background-color: rgba(8, 10, 14, 0.93); border: 1px solid #2d4150; border-left: 3px solid #d4b26a; border-radius: 4px; padding: 14px 16px; }
 .wfp-weapon { font-family: "Rajdhani", sans-serif; font-weight: 700; font-size: 23px; color: #eeeeee; }
 .wfp-dots { color: #d4b26a; font-size: 15px; }
@@ -34,14 +28,43 @@ window.wfp-overlay { background-color: transparent; }
 .wfp-row { border-top: 1px solid #1e2b36; padding: 6px 0; }
 .wfp-grade { font-family: "Rajdhani", sans-serif; font-weight: 700; font-size: 17px; }
 .wfp-grade.a { color: #8ce39a; } .wfp-grade.b { color: #d4b26a; } .wfp-grade.c { color: #e2895f; }
+.wfp-muted { font-family: "Source Sans 3", "Noto Sans", sans-serif; font-size: 13px; color: #a3b0b8; }
 .wfp-warn { color: #e2895f; font-size: 13px; }
 .wfp-foot { color: #6d7b88; font-size: 11.5px; }
 "#;
 
+/// The price panels' style for `u` pixels per unit of the reward screen, so they match the size
+/// the game draws its cards at.
+fn panel_css(u: f64) -> String {
+    let px = |v: f64| format!("{:.1}px", v * u);
+    format!(
+        ".wfp-slot {{ background-color: rgba(8, 12, 17, 0.97); border: 1px solid rgba(150, 170, 186, 0.3); \
+           border-radius: {radius}; padding: {pad_v} {pad_h}; }}\n\
+         .wfp-slot.best {{ background-color: rgba(45, 37, 15, 0.97); border-color: #d9b45a; }}\n\
+         .wfp-slot-name {{ font-family: \"Rajdhani\", sans-serif; font-weight: 600; font-size: {name}; color: #a9b7c2; }}\n\
+         .wfp-best {{ font-family: \"Rajdhani\", sans-serif; font-weight: 700; font-size: {tag}; color: #1b1407; \
+           background-color: #d9b45a; border-radius: 2px; padding: 0 {tag_pad}; }}\n\
+         .wfp-plat {{ font-family: \"Rajdhani\", sans-serif; font-weight: 700; font-size: {price}; color: #f1d58b; }}\n\
+         .wfp-plat.none {{ color: #6f7d89; }}\n\
+         .wfp-ducats {{ font-family: \"Rajdhani\", sans-serif; font-weight: 600; font-size: {ducats}; color: #c9aa65; }}\n\
+         .wfp-info {{ font-family: \"Source Sans 3\", \"Noto Sans\", sans-serif; font-size: {info}; color: #8a99a6; }}\n\
+         .wfp-error {{ font-family: \"Source Sans 3\", \"Noto Sans\", sans-serif; font-size: {info}; color: #e2895f; }}\n",
+        radius = px(3.0),
+        pad_v = px(5.0),
+        pad_h = px(9.0),
+        name = px(14.5),
+        tag = px(12.0),
+        tag_pad = px(4.0),
+        price = px(27.0),
+        ducats = px(16.0),
+        info = px(13.0),
+    )
+}
+
 const DOTS: [&str; 6] = ["", "●○○○○", "●●○○○", "●●●○○", "●●●●○", "●●●●●"];
-const STRIP_W: i32 = 1000;
-const STRIP_H: i32 = 168;
 const RIVEN_W: i32 = 470;
+/// The space between two panels, like the space between two cards.
+const PANEL_GAP: f64 = 8.0;
 
 fn escape(s: &str) -> String {
     glib::markup_escape_text(s).to_string()
@@ -72,7 +95,8 @@ struct Panel {
 }
 
 impl Panel {
-    fn new(backend: Backend, namespace: &str, close: bool) -> Rc<Panel> {
+    /// A click-through panel never takes the pointer: clicks land on the game under it.
+    fn new(backend: Backend, namespace: &str, click_through: bool) -> Rc<Panel> {
         let window = match backend {
             Backend::LayerShell => {
                 let w = gtk::Window::new(gtk::WindowType::Toplevel);
@@ -103,11 +127,15 @@ impl Panel {
             window.set_visual(Some(&visual));
         }
         window.style_context().add_class("wfp-overlay");
-        window.add_events(gdk::EventMask::ENTER_NOTIFY_MASK | gdk::EventMask::LEAVE_NOTIFY_MASK);
+        if click_through {
+            // An empty input region: the panels sit over the reward screen while the cards are
+            // being picked, and must never catch a click meant for the game.
+            window.input_shape_combine_region(Some(&gtk::cairo::Region::create()));
+        } else {
+            window.add_events(gdk::EventMask::ENTER_NOTIFY_MASK | gdk::EventMask::LEAVE_NOTIFY_MASK);
+        }
 
-        let layers = gtk::Overlay::new();
         let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        layers.add(&body);
         let panel = Rc::new(Panel {
             window,
             body,
@@ -115,21 +143,7 @@ impl Panel {
             held: Cell::new(false),
             ticking: Cell::new(false),
         });
-        if close {
-            let x = gtk::Button::with_label("×");
-            x.style_context().add_class("wfp-close");
-            x.set_halign(gtk::Align::End);
-            x.set_valign(gtk::Align::Start);
-            x.set_tooltip_text(Some("Hide"));
-            let p = Rc::downgrade(&panel);
-            x.connect_clicked(move |_| {
-                if let Some(p) = p.upgrade() {
-                    p.hide();
-                }
-            });
-            layers.add_overlay(&x);
-        }
-        panel.window.add(&layers);
+        panel.window.add(&panel.body);
         // Hovering keeps it open; leaving gives it three more seconds.
         let p = Rc::downgrade(&panel);
         panel.window.connect_enter_notify_event(move |_, _| {
@@ -162,8 +176,8 @@ impl Panel {
         self.window.is_visible()
     }
 
-    /// Shows the panel at `rect` (GDK coordinates) for `secs` seconds.
-    fn show(self: &Rc<Self>, backend: Backend, rect: Rect, secs: u32) {
+    /// Moves the panel to `rect` (GDK coordinates).
+    fn place(&self, backend: Backend, rect: Rect) {
         self.window.set_size_request(rect.width, rect.height);
         self.window.resize(rect.width, rect.height);
         match backend {
@@ -179,6 +193,11 @@ impl Panel {
             }
             Backend::X11 => self.window.move_(rect.x, rect.y),
         }
+    }
+
+    /// Shows the panel at `rect` (GDK coordinates) for `secs` seconds.
+    fn show(self: &Rc<Self>, backend: Backend, rect: Rect, secs: u32) {
+        self.place(backend, rect);
         self.held.set(false);
         self.hide_at.set(Some(Instant::now() + Duration::from_secs(secs.max(4) as u64)));
         self.window.show_all();
@@ -221,21 +240,40 @@ pub struct Overlays {
     state: Arc<State>,
     strip: RefCell<Option<Rc<Panel>>>,
     riven: RefCell<Option<Rc<Panel>>>,
+    /// The price panels' style, rewritten when the size of the cards changes.
+    panel_css: gtk::CssProvider,
+    panel_unit: Cell<f64>,
+    /// The bundled currency icons, by name and height.
+    icons: RefCell<HashMap<(&'static str, i32), gdk_pixbuf::Pixbuf>>,
 }
 
 impl Overlays {
     pub fn new(backend: Backend, state: Arc<State>) -> Overlays {
+        let panel_css = gtk::CssProvider::new();
         let css = gtk::CssProvider::new();
         if css.load_from_data(CSS.as_bytes()).is_ok() {
             if let Some(screen) = gdk::Screen::default() {
                 gtk::StyleContext::add_provider_for_screen(&screen, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+                gtk::StyleContext::add_provider_for_screen(
+                    &screen,
+                    &panel_css,
+                    gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+                );
             }
         }
-        Overlays { backend, state, strip: RefCell::new(None), riven: RefCell::new(None) }
+        Overlays {
+            backend,
+            state,
+            strip: RefCell::new(None),
+            riven: RefCell::new(None),
+            panel_css,
+            panel_unit: Cell::new(0.0),
+            icons: RefCell::new(HashMap::new()),
+        }
     }
 
-    fn panel(&self, slot: &RefCell<Option<Rc<Panel>>>, namespace: &str, close: bool) -> Rc<Panel> {
-        slot.borrow_mut().get_or_insert_with(|| Panel::new(self.backend, namespace, close)).clone()
+    fn panel(&self, slot: &RefCell<Option<Rc<Panel>>>, namespace: &str, click_through: bool) -> Rc<Panel> {
+        slot.borrow_mut().get_or_insert_with(|| Panel::new(self.backend, namespace, click_through)).clone()
     }
 
     /// Where Warframe's window is, in GDK coordinates.
@@ -290,93 +328,151 @@ impl Overlays {
         }
     }
 
-    // ------------------------------------------------------------ the reward strip
+    // ------------------------------------------------------------ the price panels
 
     pub fn show_rewards(&self, r: &RewardResult, fresh: bool) {
-        let s = self.state.settings();
-        if !s.overlay_enabled || (r.items.is_empty() && r.error.is_none()) {
+        if !self.state.settings().overlay_enabled || (r.items.is_empty() && r.error.is_none()) {
             return;
         }
+        self.put_rewards(r, fresh);
+    }
+
+    pub fn show_test(&self) {
+        // The test panels always show, even with the reward overlay switched off.
+        let scale = self.state.ui_scales().first().copied().unwrap_or(1.0);
+        self.put_rewards(&RewardResult::sample(scale), true);
+    }
+
+    /// Lays one panel under each card, where the game draws the cards at the scale they were
+    /// found at. Names found without cards get as many panels where that many cards would be.
+    fn put_rewards(&self, r: &RewardResult, fresh: bool) {
         let panel = self.panel(&self.strip, "warframeproject-rewards", true);
         if !fresh && !panel.visible() {
-            return; // a price update for a strip the user already closed
+            return; // a price update for panels already taken down with their screen
         }
+        let scale = r.scale.or_else(|| self.state.ui_scales().first().copied()).unwrap_or(1.0);
+        // An error has no cards to sit under: one panel the width of two cards, in the middle.
+        let cards = if r.items.is_empty() { 2 } else { r.cards.unwrap_or(r.items.len()).max(1) };
+        let g = self.game_rect();
+        let u = reward::unit(g.width as f64, g.height as f64, scale);
+        // Text smaller than this is unreadable; the panels then grow downwards.
+        let text_u = u.max(0.75);
+        let c = reward::CARD_W * u;
+        let gap = (PANEL_GAP * u).round();
+        let rect = Rect {
+            x: (g.x as f64 + g.width as f64 / 2.0 - cards as f64 * c / 2.0 + gap / 2.0).round() as i32,
+            y: (g.y as f64 + g.height as f64 / 2.0 - reward::PANEL_TOP * u).round() as i32,
+            width: (cards as f64 * c - gap).round() as i32,
+            height: (reward::PANEL_H * text_u).round() as i32,
+        };
+        self.style_panels(text_u);
+        panel.clear();
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, gap as i32);
+        row.set_homogeneous(true);
+        row.set_vexpand(true);
         if r.items.is_empty() {
-            panel.clear();
-            let body = gtk::Box::new(gtk::Orientation::Vertical, 8);
-            body.style_context().add_class("wfp-panel");
-            body.add(&label("Reward scan", "wfp-weapon"));
-            let message = label(r.error.as_deref().unwrap_or("No reward names recognized."), "wfp-warn");
-            message.set_line_wrap(true);
-            body.add(&message);
-            panel.body.add(&body);
+            let message = r.error.as_deref().unwrap_or("No reward names recognized.");
+            row.add(&self.error_panel(message));
         } else {
-            self.fill_strip(&panel, &r.items, r.best.as_deref());
+            for k in 0..cards {
+                // Items read without cards are in order; a card read without a name stays empty.
+                let item = r.items.iter().enumerate().find(|(i, it)| it.slot.unwrap_or(*i) == k).map(|(_, it)| it);
+                match item {
+                    Some(it) => row.add(&self.item_panel(it, r.best.as_deref() == Some(it.name.as_str()), text_u)),
+                    None => row.add(&gtk::Box::new(gtk::Orientation::Vertical, 0)),
+                }
+            }
         }
+        panel.body.add(&row);
         if fresh || !panel.visible() {
-            let g = self.game_rect();
-            let w = STRIP_W.min(g.width - 40).max(300);
-            let y = g.y + (g.height as f64 * s.overlay_y_percent / 100.0) as i32;
-            panel.show(
-                self.backend,
-                Rect { x: g.x + (g.width - w) / 2, y, width: w, height: STRIP_H },
-                s.overlay_seconds,
-            );
+            panel.show(self.backend, rect, self.state.settings().overlay_seconds);
         } else {
+            panel.place(self.backend, rect);
             panel.window.show_all();
         }
     }
 
-    fn fill_strip(&self, panel: &Panel, items: &[RewardItem], best: Option<&str>) {
-        panel.clear();
-        let bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        bar.style_context().add_class("wfp-bar");
-        bar.set_homogeneous(true);
-        bar.set_vexpand(true);
-        for it in items {
-            let card = gtk::Box::new(gtk::Orientation::Vertical, 2);
-            card.style_context().add_class("wfp-card");
-            if best == Some(it.name.as_str()) {
-                card.style_context().add_class("best");
-            }
-            let name = label(&it.name, "wfp-name");
-            name.set_line_wrap(true);
-            name.set_lines(2);
-            name.set_ellipsize(pango::EllipsizeMode::End);
-            name.set_height_request(36);
-            name.set_valign(gtk::Align::Start);
-            card.add(&name);
-            let price = it.price.map_or("?".to_string(), |p| p.to_string());
-            card.add(&markup(&format!("{price}<span size=\"small\" foreground=\"#a3b0b8\">p</span>"), "wfp-price"));
-            let mut bits = Vec::new();
-            if let Some(d) = it.ducats.filter(|d| *d > 0) {
-                bits.push(format!("{d}d"));
-            }
-            bits.push(format!("own {}", it.have));
-            if it.needed > it.have {
-                bits.push("<span foreground=\"#7fc8c2\" weight=\"600\">needed</span>".into());
-            }
-            if it.vaulted == Some(true) {
-                bits.push("<span foreground=\"#df8a63\">vaulted</span>".into());
-            }
-            let line = markup(&bits.join(" · "), "wfp-line");
-            line.set_ellipsize(pango::EllipsizeMode::End);
-            card.add(&line);
-            bar.add(&card);
+    fn style_panels(&self, u: f64) {
+        if (self.panel_unit.get() - u).abs() > 1e-3 && self.panel_css.load_from_data(panel_css(u).as_bytes()).is_ok() {
+            self.panel_unit.set(u);
         }
-        panel.body.add(&bar);
     }
 
-    pub fn show_test(&self) {
-        let r = RewardResult::sample();
-        // The test strip always shows, even with the reward overlay switched off.
-        let panel = self.panel(&self.strip, "warframeproject-rewards", true);
-        self.fill_strip(&panel, &r.items, r.best.as_deref());
-        let s = self.state.settings();
-        let g = self.game_rect();
-        let w = STRIP_W.min(g.width - 40).max(300);
-        let y = g.y + (g.height as f64 * s.overlay_y_percent / 100.0) as i32;
-        panel.show(self.backend, Rect { x: g.x + (g.width - w) / 2, y, width: w, height: STRIP_H }, s.overlay_seconds);
+    /// One card's panel: the name it was read as (so a misread shows itself), the platinum it
+    /// fetches, its ducats, and how many are owned, needed and whether it is vaulted.
+    fn item_panel(&self, it: &RewardItem, best: bool, u: f64) -> gtk::Box {
+        let panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        panel.style_context().add_class("wfp-slot");
+        if best {
+            panel.style_context().add_class("best");
+        }
+        let top = gtk::Box::new(gtk::Orientation::Horizontal, (6.0 * u) as i32);
+        let name = label(&it.name, "wfp-slot-name");
+        name.set_ellipsize(pango::EllipsizeMode::End);
+        name.set_hexpand(true);
+        top.add(&name);
+        if best {
+            let tag = label("BEST", "wfp-best");
+            tag.set_valign(gtk::Align::Center);
+            top.add(&tag);
+        }
+        panel.add(&top);
+
+        let money = gtk::Box::new(gtk::Orientation::Horizontal, (4.0 * u) as i32);
+        if let Some(icon) = self.icon("platinum", (20.0 * u).round() as i32) {
+            money.add(&gtk::Image::from_pixbuf(Some(&icon)));
+        }
+        let price = label(&it.price.map_or("–".to_string(), |p| p.to_string()), "wfp-plat");
+        if it.price.is_none() {
+            price.style_context().add_class("none");
+        }
+        money.add(&price);
+        if let Some(d) = it.ducats.filter(|d| *d > 0) {
+            let ducats = gtk::Box::new(gtk::Orientation::Horizontal, (3.0 * u) as i32);
+            ducats.set_hexpand(true);
+            ducats.set_halign(gtk::Align::End);
+            if let Some(icon) = self.icon("ducats", (16.0 * u).round() as i32) {
+                ducats.add(&gtk::Image::from_pixbuf(Some(&icon)));
+            }
+            ducats.add(&label(&d.to_string(), "wfp-ducats"));
+            money.add(&ducats);
+        }
+        panel.add(&money);
+
+        let mut bits = vec![format!("owned {}", it.have)];
+        if it.needed > it.have {
+            bits.push("<span foreground=\"#6fd1c6\" weight=\"bold\">needed</span>".into());
+        }
+        if it.vaulted == Some(true) {
+            bits.push("<span foreground=\"#e39a6b\">vaulted</span>".into());
+        }
+        let info = markup(&bits.join("  ·  "), "wfp-info");
+        info.set_ellipsize(pango::EllipsizeMode::End);
+        panel.add(&info);
+        panel
+    }
+
+    fn error_panel(&self, message: &str) -> gtk::Box {
+        let panel = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        panel.style_context().add_class("wfp-slot");
+        panel.add(&label("Reward scan", "wfp-slot-name"));
+        let text = label(message, "wfp-error");
+        text.set_line_wrap(true);
+        panel.add(&text);
+        panel
+    }
+
+    /// A bundled currency icon (`web/icons/<name>.png`), `px` pixels high.
+    fn icon(&self, name: &'static str, px: i32) -> Option<gdk_pixbuf::Pixbuf> {
+        let px = px.max(8);
+        if let Some(icon) = self.icons.borrow().get(&(name, px)) {
+            return Some(icon.clone());
+        }
+        let file = crate::server::Web::get(&format!("icons/{name}.png"))?;
+        let stream = gio::MemoryInputStream::from_bytes(&glib::Bytes::from_owned(file.data.into_owned()));
+        let icon = gdk_pixbuf::Pixbuf::from_stream_at_scale(&stream, -1, px, true, gio::Cancellable::NONE).ok()?;
+        self.icons.borrow_mut().insert((name, px), icon.clone());
+        Some(icon)
     }
 
     // ------------------------------------------------------------ the riven panel

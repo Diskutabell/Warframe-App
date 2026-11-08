@@ -1,30 +1,41 @@
 <!doctype html>
 <!-- The in-game overlays on Windows: one transparent window per overlay loads this page, and the
-     app calls render() with a scan result. On Linux the overlays are GTK widgets instead
+     app calls render() with a scan result and the size to draw at (CSS pixels per unit of the
+     reward screen, as the game draws its cards). On Linux the overlays are GTK widgets instead
      (src/desktop/overlay.rs); the look is the same. -->
 <html>
 <head>
 <meta charset="utf-8">
 <link rel="stylesheet" href="/fonts.css">
 <style>
+  :root { --u: 1px; }
   html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; user-select: none; }
   body { font: 13px "Source Sans 3", "Segoe UI", sans-serif; color: #a3b0b8; }
   #root { height: 100%; box-sizing: border-box; position: relative; }
-  .close { position: absolute; top: 2px; right: 6px; font-size: 18px; color: #a3b0b8; cursor: pointer; }
-  .close:hover { color: #e9e4d6; }
 
-  .bar { display: flex; gap: 6px; height: 100%; box-sizing: border-box; padding: 6px;
-         background: rgba(14, 22, 29, 0.92); border: 1px solid #2d4150; border-radius: 4px; }
-  .card { flex: 1 1 0; min-width: 0; padding: 8px 12px; background: rgba(33, 50, 64, 0.55);
-          border-top: 3px solid #2d4150; display: flex; flex-direction: column; gap: 2px; }
-  .card.best { border-top-color: #d4b26a; background: rgba(56, 52, 34, 0.6); }
-  .name { font: 600 15px "Rajdhani", "Arial Narrow", sans-serif; color: #e9e4d6; height: 36px;
-          overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-  .price { font: 700 34px "Rajdhani", "Arial Narrow", sans-serif; color: #d4b26a; }
-  .price small { font-size: 60%; color: #a3b0b8; }
-  .line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .needed { color: #7fc8c2; font-weight: 600; }
-  .vaulted { color: #df8a63; }
+  /* One panel under each reward card; a card read without a name keeps its place, empty. */
+  .slots { display: flex; gap: calc(8 * var(--u)); height: 100%; }
+  .slot { flex: 1 1 0; min-width: 0; box-sizing: border-box; display: flex; flex-direction: column;
+          justify-content: center; padding: calc(5 * var(--u)) calc(9 * var(--u));
+          background: rgba(8, 12, 17, 0.97); border: 1px solid rgba(150, 170, 186, 0.3); border-radius: calc(3 * var(--u)); }
+  .slot.empty { visibility: hidden; }
+  .slot.best { background: rgba(45, 37, 15, 0.97); border-color: #d9b45a; }
+  .top { display: flex; align-items: center; gap: calc(6 * var(--u)); min-width: 0; }
+  .name { flex: 1; min-width: 0; font: 600 calc(14.5 * var(--u)) "Rajdhani", "Arial Narrow", sans-serif; color: #a9b7c2;
+          white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tag { font: 700 calc(12 * var(--u)) "Rajdhani", sans-serif; color: #1b1407; background: #d9b45a;
+         border-radius: 2px; padding: 0 calc(4 * var(--u)); }
+  .money { display: flex; align-items: center; gap: calc(4 * var(--u)); }
+  .money .p { height: calc(20 * var(--u)); }
+  .plat { font: 700 calc(27 * var(--u)) / 1.15 "Rajdhani", "Arial Narrow", sans-serif; color: #f1d58b; }
+  .plat.none { color: #6f7d89; }
+  .ducats { margin-left: auto; display: flex; align-items: center; gap: calc(3 * var(--u));
+            font: 600 calc(16 * var(--u)) "Rajdhani", sans-serif; color: #c9aa65; }
+  .ducats img { height: calc(16 * var(--u)); }
+  .info { font-size: calc(13 * var(--u)); color: #8a99a6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .needed { color: #6fd1c6; font-weight: 700; }
+  .vaulted { color: #e39a6b; }
+  .err { color: #e2895f; font-size: calc(13 * var(--u)); }
 
   .panel { height: 100%; box-sizing: border-box; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px;
            background: rgba(8, 10, 14, 0.93); border: 1px solid #2d4150; border-left: 3px solid #d4b26a; border-radius: 4px; }
@@ -47,24 +58,32 @@
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
   const root = document.getElementById("root");
 
-  const hide = () => window.ipc.postMessage("hide");
-
-  function strip(r) {
-    if (r.error && !r.items.length) {
-      return `<div class="panel"><div class="weapon">Reward scan</div><div class="warn">${esc(r.error)}</div></div><span class="close" title="Hide" onclick="hide()">×</span>`;
+  function rewards(r) {
+    if (!r.items.length) {
+      return `<div class="slots"><div class="slot"><div class="name">Reward scan</div>
+        <div class="err">${esc(r.error || "No reward names recognized.")}</div></div></div>`;
     }
-    const cards = r.items.map((it) => {
-      const bits = [];
-      if (it.ducats > 0) bits.push(`${it.ducats}d`);
-      bits.push(`own ${it.have}`);
+    // Items read without cards come in order, one panel each.
+    const cards = Math.max(1, r.cards ?? r.items.length);
+    const slots = [];
+    for (let k = 0; k < cards; k++) {
+      const it = r.items.find((x, i) => (x.slot ?? i) === k);
+      if (!it) {
+        slots.push(`<div class="slot empty"></div>`);
+        continue;
+      }
+      const best = r.best === it.name;
+      const bits = [`owned ${it.have}`];
       if (it.needed > it.have) bits.push(`<span class="needed">needed</span>`);
       if (it.vaulted === true) bits.push(`<span class="vaulted">vaulted</span>`);
-      return `<div class="card${r.best === it.name ? " best" : ""}">
-        <div class="name">${esc(it.name)}</div>
-        <div class="price">${it.price ?? "?"}<small>p</small></div>
-        <div class="line">${bits.join(" · ")}</div></div>`;
-    });
-    return `<div class="bar">${cards.join("")}</div><span class="close" title="Hide" onclick="hide()">×</span>`;
+      const ducats = it.ducats > 0 ? `<span class="ducats"><img src="/icons/ducats.png" alt="">${it.ducats}</span>` : "";
+      slots.push(`<div class="slot${best ? " best" : ""}">
+        <div class="top"><span class="name">${esc(it.name)}</span>${best ? `<span class="tag">BEST</span>` : ""}</div>
+        <div class="money"><img class="p" src="/icons/platinum.png" alt="">
+          <span class="plat${it.price == null ? " none" : ""}">${it.price ?? "–"}</span>${ducats}</div>
+        <div class="info">${bits.join(" · ")}</div></div>`);
+    }
+    return `<div class="slots">${slots.join("")}</div>`;
   }
 
   function riven(r) {
@@ -90,8 +109,9 @@
   }
 
   // The native window owns the hide timer, including during delayed price updates.
-  window.render = (kind, result) => {
-    root.innerHTML = kind === "riven" ? riven(result) : strip(result);
+  window.render = (kind, result, unit) => {
+    document.documentElement.style.setProperty("--u", `${unit || 1}px`);
+    root.innerHTML = kind === "riven" ? riven(result) : rewards(result);
   };
   window.ipc.postMessage("ready");
 </script>

@@ -11,7 +11,7 @@ use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use anyhow::Result;
 use indexmap::IndexMap;
@@ -26,7 +26,9 @@ use crate::gamedata::{self, Catalog};
 use crate::market::Market;
 use crate::memscan::{self, ScanError};
 use crate::notifier::{self, Notifier};
-use crate::ocr::{self, matcher::Names, screenshot};
+use crate::ocr::image::Rgb;
+use crate::ocr::matcher::{Names, RewardMatch};
+use crate::ocr::{self, reward, screenshot};
 use crate::rivens::{self, Graded};
 use crate::sources::{self, Inventory, Profile};
 use crate::views::View;
@@ -37,7 +39,26 @@ pub const PROFILE_COOLDOWN: f64 = 300.0;
 const DUCAT_UID: &str = "/Lotus/Types/Items/MiscItems/PrimeBucks";
 /// A reward scan started this recently already covers the screen: the F9 hotkey and the
 /// automatic trigger routinely fire for the same reward screen within a second of each other.
-const COALESCE: f64 = 3.0;
+const COALESCE: f64 = 5.0;
+/// How long a scan looks for the reward cards: from the log's open line they turn over after a
+/// 5 s pause showing the relics, or at once; the hotkey is pressed with them in view.
+const REWARD_WAIT: Duration = Duration::from_secs(12);
+const HOTKEY_WAIT: Duration = Duration::from_secs(1);
+/// Between two looks at the screen while waiting for the cards. A capture with grim takes 20-40 ms;
+/// the other screenshot tools start a whole program each time.
+const REWARD_POLL: Duration = Duration::from_millis(120);
+const SLOW_POLL: Duration = Duration::from_secs(1);
+/// Readings of one screen that found names, at most, while a card is still unread or unsure: one
+/// that stays so is not worth more.
+const REWARD_READS: usize = 3;
+/// A card read at this score or better is not read again. On real screens the wrong names (a
+/// sibling part on a hovered or tinted card) scored 0.77-0.85, and the same card read 1.00 in
+/// the frames before and after.
+const SURE: f64 = 0.9;
+/// Readings of one screen at most, with or without names: what looked like cards may be none.
+const REWARD_ATTEMPTS: usize = 6;
+/// While the prices are up, the screen is checked this often for the cards still being there.
+const CARDS_CHECK: Duration = Duration::from_millis(400);
 /// Minimum time between the starts of memory scans.
 const MEMSCAN_GAP: f64 = 10.0;
 
@@ -59,6 +80,8 @@ pub struct RewardItem {
     pub vaulted: Option<bool>,
     pub ducats: Option<i64>,
     pub price: Option<i64>,
+    /// The card it is on, 0 = leftmost; None when the names were searched for without cards.
+    pub slot: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -68,12 +91,16 @@ pub struct RewardResult {
     pub best: Option<String>,
     pub ocr: String,
     pub error: Option<String>,
+    /// How many cards the screen showed, when it was recognised as the reward screen.
+    pub cards: Option<usize>,
+    /// The interface scale the cards were found at, which places the price panels under them.
+    pub scale: Option<f64>,
 }
 
 impl RewardResult {
-    /// What Settings' "show a test overlay" shows.
-    pub fn sample() -> RewardResult {
-        let item = |name: &str, price: Option<i64>, ducats: Option<i64>, have, needed, vaulted| RewardItem {
+    /// What Settings' "show a test overlay" shows: four cards at interface scale `scale`.
+    pub fn sample(scale: f64) -> RewardResult {
+        let item = |slot, name: &str, price: Option<i64>, ducats: Option<i64>, have, needed, vaulted| RewardItem {
             name: name.into(),
             uid: String::new(),
             score: 1.0,
@@ -83,19 +110,42 @@ impl RewardResult {
             vaulted: Some(vaulted),
             ducats,
             price,
+            slot: Some(slot),
         };
         RewardResult {
             t: crate::now(),
             items: vec![
-                item("Ash Prime Systems Blueprint", Some(25), Some(65), 0, 1, false),
-                item("Braton Prime Barrel", Some(4), Some(15), 2, 0, false),
-                item("Forma Blueprint", None, None, 3, 0, false),
-                item("Fragor Prime Head", Some(6), Some(45), 0, 0, true),
+                item(0, "Ash Prime Systems Blueprint", Some(25), Some(65), 0, 1, false),
+                item(1, "Braton Prime Barrel", Some(4), Some(15), 2, 0, false),
+                item(2, "Forma Blueprint", None, None, 3, 0, false),
+                item(3, "Fragor Prime Head", Some(6), Some(45), 0, 0, true),
             ],
             best: Some("Ash Prime Systems Blueprint".into()),
+            cards: Some(4),
+            scale: Some(scale),
             ..Default::default()
         }
     }
+}
+
+/// The pick worth the most platinum, the leftmost card on a tie. With no price known there is no
+/// best to claim.
+fn best_pick(items: &[RewardItem]) -> Option<String> {
+    items
+        .iter()
+        .filter(|i| i.price.is_some_and(|p| p > 0))
+        .fold(None::<&RewardItem>, |best, i| if best.is_none_or(|b| i.price > b.price) { Some(i) } else { best })
+        .map(|i| i.name.clone())
+}
+
+/// What a look for the reward cards found.
+enum Sighting {
+    /// The screen closed first.
+    Cancelled,
+    /// The cards, the best name read on each, the frame and the words they came from.
+    Cards { frame: Rgb, layout: reward::Layout, names: Vec<Option<RewardMatch>>, text: String },
+    /// No reward cards before the time ran out; the last frame.
+    NoCards(Rgb),
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -286,6 +336,8 @@ pub struct State {
     scan_lock: Mutex<()>,
     reward_scan: Mutex<RewardScan>,
     reward_done: std::sync::Condvar,
+    /// The interface scale the reward cards were last found at when it was not EE.cfg's.
+    found_scale: Mutex<Option<f64>>,
     log: Mutex<Option<Arc<Mutex<LogStatus>>>>,
     ui: Mutex<Option<async_channel::Sender<UiEvent>>>,
     tools: Mutex<(f64, Value)>,
@@ -391,6 +443,7 @@ impl State {
                 result: None,
             }),
             reward_done: std::sync::Condvar::new(),
+            found_scale: Mutex::new(None),
             log: Mutex::new(None),
             ui: Mutex::new(None),
             tools: Mutex::new((f64::NEG_INFINITY, Value::Null)),
@@ -571,7 +624,7 @@ impl State {
                     self.reward_done.notify_all();
                     let me = Arc::clone(self);
                     std::thread::spawn(move || {
-                        me.scan_rewards_for(Duration::from_millis(600), Some(screen));
+                        me.scan_rewards_for(REWARD_WAIT, Some(screen));
                     });
                 }
             }
@@ -1627,19 +1680,30 @@ impl State {
         result
     }
 
-    /// Screenshots the reward screen, reads the names, and prices them.
-    pub fn scan_rewards(&self, delay: Duration) -> Arc<RewardResult> {
-        self.scan_rewards_for(delay, None).expect("a manual reward scan is not cancelled before starting")
+    /// The interface scales to look for the reward cards at: EE.cfg's, then the one they were
+    /// last found at if that differs (the game may write a changed scale only when it exits).
+    /// Empty when neither is known: then every scale is tried.
+    pub fn ui_scales(&self) -> Vec<f64> {
+        let cfg = self.log_path().and_then(|log| eelog::ui_scale(&log));
+        let found = *lock(&self.found_scale);
+        cfg.into_iter().chain(found.filter(|f| cfg.is_none_or(|c| (c - f).abs() > 1e-6))).collect()
     }
 
-    fn scan_rewards_for(&self, delay: Duration, screen: Option<u64>) -> Option<Arc<RewardResult>> {
-        std::thread::sleep(delay);
+    /// Screenshots the reward screen, reads the names, and prices them (the hotkey and the API).
+    pub fn scan_rewards(self: &Arc<Self>) -> Arc<RewardResult> {
+        self.scan_rewards_for(HOTKEY_WAIT, None).expect("a manual reward scan is not cancelled before starting")
+    }
+
+    /// Reads the reward screen: `screen` is the log's reward screen this scan belongs to (None for
+    /// the hotkey), and the scan gives up quietly once that screen has closed.
+    fn scan_rewards_for(self: &Arc<Self>, wait: Duration, screen: Option<u64>) -> Option<Arc<RewardResult>> {
         let mut slot = lock(&self.reward_scan);
         if screen.is_some_and(|screen| screen != slot.screen_generation) {
             return None;
         }
-        if now() - slot.started < COALESCE {
-            // The same screen as a scan that just started: share its result, prices included.
+        if !slot.done || now() - slot.started < COALESCE {
+            // The same screen as a scan still running or just finished: share its result, prices
+            // included.
             let (done, _) = self
                 .reward_done
                 .wait_timeout_while(slot, Duration::from_secs(15), |s| !s.done)
@@ -1662,77 +1726,68 @@ impl State {
         let capture = lock(&self.scan_lock);
         let settings = self.settings();
         self.hide_overlays_for_capture();
-        let read = screenshot::capture(settings.screenshot_tool).and_then(|frame| {
-            let (matches, text) = ocr::read_rewards(&frame, &self.names())?;
-            Ok((frame, matches, text))
-        });
-        let (frame, matches, text) = match read {
-            Ok(r) => r,
-            Err(e) => {
-                self.event(&format!("Reward scan failed: {e}"), "warn");
-                return Some(self.publish_rewards(
-                    RewardResult { t: now(), error: Some(e.to_string()), ..Default::default() },
-                    true,
-                    generation,
-                ));
-            }
+
+        let cancelled = || screen.is_some() && !lock(&self.reward_scan).is_current(generation);
+        // Names are shown as soon as a card is read; the rest of them, and the prices, follow in
+        // place. The choice timer is 15 s and warframe.market can take seconds.
+        let mut shown = false;
+        let mut partial = |layout: &reward::Layout, names: &[Option<RewardMatch>]| {
+            let (_, result) = self.reward_result(names, Some(layout), String::new());
+            self.publish_rewards(result, !shown, generation);
+            shown = true;
         };
-        if screen.is_some() && !lock(&self.reward_scan).is_current(generation) {
+        let (frame, layout, names, text) = match self.find_cards(wait, &cancelled, &mut partial) {
+            Ok(Sighting::Cancelled) => return None,
+            Ok(Sighting::Cards { frame, layout, names, text }) if names.iter().any(Option::is_some) => {
+                (frame, Some(layout), names, text)
+            }
+            Ok(Sighting::Cards { frame, .. } | Sighting::NoCards(frame)) if screen.is_some() => {
+                // The log announced the rewards, but no card with a readable name showed up:
+                // there is nothing to put over the game. The frame is kept to find out why.
+                self.event("Reward screen: no reward card could be read on screen", "warn");
+                drop(capture);
+                ocr::archive("reward", frame, String::new(), json!({"cards": null, "items": []}));
+                return None;
+            }
+            Ok(Sighting::Cards { frame, .. } | Sighting::NoCards(frame)) => {
+                // The hotkey on a screen without readable cards (another theme, a scale they
+                // were not found at): look for names anywhere in the middle of the screen.
+                match ocr::read_rewards(&frame, &self.names()) {
+                    Ok((found, text)) => (frame, None, found.into_iter().map(Some).collect(), text),
+                    Err(e) => return Some(self.reward_scan_failed(&e, generation)),
+                }
+            }
+            Err(e) => return Some(self.reward_scan_failed(&e, generation)),
+        };
+        if cancelled() {
             return None;
         }
-        // Owned and needed are the playing account's, whichever account the window shows.
-        let (account, v) = self.game_view();
-        let needed = v.needed_parts();
-        let mut items: Vec<RewardItem> = matches
-            .iter()
-            .map(|m| {
-                let part = v.cat.parts.get(v.cat.part_alias.get(&m.uid).unwrap_or(&m.uid));
-                let slug = self.market.slug_for(Some(&m.uid), part.and_then(|p| p.slug.as_deref()), Some(&m.name));
-                RewardItem {
-                    name: m.name.clone(),
-                    uid: m.uid.clone(),
-                    score: m.score,
-                    have: v.count(&m.uid),
-                    needed: needed.get(&m.uid).copied().unwrap_or(0),
-                    vaulted: part.map(|p| p.vaulted),
-                    ducats: self.market.ducats(slug.as_deref()),
-                    price: slug.as_deref().and_then(|s| self.market.cached(s)).and_then(|p| p.sell),
-                    slug,
-                }
-            })
-            .collect();
-        // Publish the names at once: the choice timer is ~10 s and warframe.market can take
-        // several seconds. Prices fill in below and the overlay updates in place.
-        let base = RewardResult {
-            t: now(),
-            items: items.clone(),
-            best: None,
-            ocr: tail(&text, 800),
-            error: items.is_empty().then(|| "No reward names recognized.".to_string()),
-        };
-        self.publish_rewards(base.clone(), true, generation);
+        if let Some(layout) = &layout {
+            if !self.ui_scales().iter().any(|s| (s - layout.ui_scale).abs() < 1e-6) {
+                *lock(&self.found_scale) = Some(layout.ui_scale);
+            }
+        }
+        let (account, base) = self.reward_result(&names, layout.as_ref(), tail(&text, 800));
+        self.publish_rewards(base.clone(), !shown, generation);
         // The screen is read; a riven scan may run while the prices load.
         drop(capture);
-        ocr::archive("reward", frame, text, matches_json(&items));
+        ocr::archive("reward", frame, text, matches_json(&base));
+        if let Some(layout) = layout {
+            self.watch_cards(layout, generation);
+        }
 
+        let mut items = base.items.clone();
         let slugs: Vec<Option<String>> = items.iter().map(|i| i.slug.clone()).collect();
         let prices = self.market.fetch_now(&slugs, Duration::from_secs(6));
-        if screen.is_some() && !lock(&self.reward_scan).is_current(generation) {
-            return None;
-        }
         for it in &mut items {
             if let Some(sell) = it.slug.as_ref().and_then(|s| prices.get(s)).and_then(|p| p.sell) {
                 it.price = Some(sell);
             }
         }
-        // "Best" means the most platinum, the leftmost card on a tie; with no price known there is
-        // no best to claim.
-        let best = items
-            .iter()
-            .filter(|i| i.price.is_some_and(|p| p > 0))
-            .fold(None::<&RewardItem>, |best, i| if best.is_none_or(|b| i.price > b.price) { Some(i) } else { best })
-            .map(|i| i.name.clone());
-        if !items.is_empty() {
+        let best = best_pick(&items);
+        // The history keeps what a reward screen offered, even when the screen has closed in the
+        // meantime; names found without cards may be another screen's, so they are not kept.
+        if layout.is_some() && !items.is_empty() {
             history::record(history::Entry {
                 t: now(),
                 drops: items
@@ -1749,6 +1804,9 @@ impl State {
                 account,
             });
         }
+        if cancelled() {
+            return None;
+        }
         if !items.is_empty() && settings.notify {
             let lines: Vec<String> = items
                 .iter()
@@ -1762,6 +1820,160 @@ impl State {
             notifier::send("Relic rewards", &lines.join("\n"));
         }
         Some(self.publish_rewards(RewardResult { items, best, ..base }, false, generation))
+    }
+
+    fn reward_scan_failed(&self, e: &anyhow::Error, generation: u64) -> Arc<RewardResult> {
+        self.event(&format!("Reward scan failed: {e}"), "warn");
+        self.publish_rewards(
+            RewardResult { t: now(), error: Some(e.to_string()), ..Default::default() },
+            true,
+            generation,
+        )
+    }
+
+    /// Looks at the screen until the reward cards are up and read, or `wait` runs out.
+    ///
+    /// The scan starts at the log's open line, seconds before the cards turn over, so the screen is
+    /// captured every `REWARD_POLL` until the cards' rarity bars show. A card may still be fading
+    /// in then: what is read is passed to `partial` and the screen read again, up to
+    /// `REWARD_READS` times, each card keeping the best name any reading gave it.
+    fn find_cards(
+        &self,
+        wait: Duration,
+        cancelled: &dyn Fn() -> bool,
+        partial: &mut dyn FnMut(&reward::Layout, &[Option<RewardMatch>]),
+    ) -> Result<Sighting> {
+        let tool = self.settings().screenshot_tool;
+        let names = self.names();
+        let scales = self.ui_scales();
+        let deadline = Instant::now() + wait;
+        let poll = if screenshot::cheap(tool) { REWARD_POLL } else { SLOW_POLL };
+        let (mut reads, mut attempts) = (0, 0);
+        let mut seen: Option<(Rgb, reward::Layout, Vec<Option<RewardMatch>>, String)> = None;
+        loop {
+            if cancelled() {
+                return Ok(Sighting::Cancelled);
+            }
+            let frame = screenshot::capture(tool)?;
+            let late = Instant::now() >= deadline;
+            // A scale that EE.cfg does not know, or knows wrong: every scale, at the end.
+            let layout = reward::find_layout(&frame, &scales)
+                .or_else(|| if late && !scales.is_empty() { reward::find_layout(&frame, &[]) } else { None });
+            let Some(layout) = layout else {
+                if late {
+                    return Ok(match seen {
+                        Some((frame, layout, names, text)) => Sighting::Cards { frame, layout, names, text },
+                        None => Sighting::NoCards(frame),
+                    });
+                }
+                std::thread::sleep(poll);
+                continue;
+            };
+            let read = reward::read(&frame, &layout, &names)?;
+            attempts += 1;
+            if read.names.iter().any(Option::is_some) {
+                reads += 1;
+            }
+            let (mut merged, before) = match seen.take() {
+                Some((_, l, names, _)) if l.cards == layout.cards => (names.clone(), names),
+                _ => (vec![None; layout.cards], vec![None; layout.cards]),
+            };
+            for (slot, new) in merged.iter_mut().zip(read.names) {
+                if let Some(new) = new {
+                    if slot.as_ref().is_none_or(|old| reward::better(&new, old)) {
+                        *slot = Some(new);
+                    }
+                }
+            }
+            let sure = merged.iter().all(|m| m.as_ref().is_some_and(|m| m.score >= SURE));
+            if late || sure || reads >= REWARD_READS || attempts >= REWARD_ATTEMPTS {
+                return Ok(Sighting::Cards { frame, layout, names: merged, text: read.text });
+            }
+            if merged != before {
+                partial(&layout, &merged);
+            }
+            seen = Some((frame, layout, merged, read.text));
+            std::thread::sleep(poll);
+        }
+    }
+
+    /// The reward items for what the cards say, with everything known without asking the
+    /// market: counts, needs, vaulted, ducats and the cached price. Owned and needed are the
+    /// playing account's, whichever account the window shows; that account is returned too.
+    fn reward_result(
+        &self,
+        names: &[Option<RewardMatch>],
+        layout: Option<&reward::Layout>,
+        ocr: String,
+    ) -> (Option<String>, RewardResult) {
+        let (account, v) = self.game_view();
+        let needed = v.needed_parts();
+        let items: Vec<RewardItem> = names
+            .iter()
+            .enumerate()
+            .filter_map(|(k, m)| {
+                let m = m.as_ref()?;
+                let part = v.cat.parts.get(v.cat.part_alias.get(&m.uid).unwrap_or(&m.uid));
+                let slug = self.market.slug_for(Some(&m.uid), part.and_then(|p| p.slug.as_deref()), Some(&m.name));
+                Some(RewardItem {
+                    name: m.name.clone(),
+                    uid: m.uid.clone(),
+                    score: m.score,
+                    have: v.count(&m.uid),
+                    needed: needed.get(&m.uid).copied().unwrap_or(0),
+                    vaulted: part.map(|p| p.vaulted),
+                    ducats: self.market.ducats(slug.as_deref()),
+                    price: slug.as_deref().and_then(|s| self.market.cached(s)).and_then(|p| p.sell),
+                    slug,
+                    slot: layout.map(|_| k),
+                })
+            })
+            .collect();
+        let result = RewardResult {
+            t: now(),
+            best: best_pick(&items),
+            ocr,
+            error: items.is_empty().then(|| "No reward names recognized.".to_string()),
+            cards: layout.map(|l| l.cards),
+            scale: layout.map(|l| l.ui_scale),
+            items,
+        };
+        (account, result)
+    }
+
+    /// Hides the prices as soon as the cards leave the screen. The log says so too ("Relic reward
+    /// screen shut down"), but a little later, and a line can be missed; this looks for the cards'
+    /// bars every `CARDS_CHECK` and hides after two looks without them. Only with a screenshot
+    /// tool that is quick and silent.
+    fn watch_cards(self: &Arc<Self>, layout: reward::Layout, generation: u64) {
+        let tool = self.settings().screenshot_tool;
+        if !screenshot::cheap(tool) {
+            return;
+        }
+        let me = Arc::clone(self);
+        let watch = move || {
+            let until = Instant::now() + Duration::from_secs(40);
+            let mut misses = 0;
+            while Instant::now() < until {
+                std::thread::sleep(CARDS_CHECK);
+                if !lock(&me.reward_scan).is_current(generation) {
+                    return;
+                }
+                let Ok(frame) = screenshot::capture(tool) else { return };
+                misses = if reward::still_up(&frame, &layout) { 0 } else { misses + 1 };
+                if misses >= 2 {
+                    let mut scan = lock(&me.reward_scan);
+                    if scan.is_current(generation) {
+                        scan.invalidate();
+                        drop(scan);
+                        me.reward_done.notify_all();
+                        me.ui(UiEvent::HideRewards);
+                    }
+                    return;
+                }
+            }
+        };
+        std::thread::Builder::new().name("reward-watch".into()).spawn(watch).ok();
     }
 
     fn riven_failed(&self, weapon: Option<String>, text: &str, error: String) -> Arc<RivenResult> {
@@ -1926,8 +2138,10 @@ impl Drop for ScanFinished<'_> {
     }
 }
 
-fn matches_json(items: &[RewardItem]) -> Value {
-    json!(items.iter().map(|i| json!({"name": i.name, "uid": i.uid, "score": i.score})).collect::<Vec<_>>())
+fn matches_json(r: &RewardResult) -> Value {
+    let items: Vec<Value> =
+        r.items.iter().map(|i| json!({"name": i.name, "uid": i.uid, "score": i.score, "slot": i.slot})).collect();
+    json!({"cards": r.cards, "scale": r.scale, "items": items})
 }
 
 #[cfg(test)]

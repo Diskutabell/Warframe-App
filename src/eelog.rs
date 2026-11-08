@@ -33,12 +33,25 @@ static NAME_RES: LazyLock<[Regex; 3]> = LazyLock::new(|| {
 /// (Rank1to3 ... Rank49to51).
 static MASTERY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"OnMasteryIconReady1\(Loaded:[^)]*?/Rank(\d+)(?:to(\d+))?_").unwrap());
-/// A fissure reward screen in the log (2026-11-08): `VoidProjections: OpenVoidProjectionRewardScreen`,
-/// a 5 s pause (`Pause countdown done`), then `Got rewards` once the cards show, 5.6 s after the
-/// open line. 15 s later the selection ends with `Relic reward screen shut down`. About 17 s after
-/// that the interface is created once more and force-closed, with a second shut-down line.
+/// A fissure reward screen in the log: `VoidProjections: OpenVoidProjectionRewardScreenRMI`, a 5 s
+/// pause showing the relics (`Pause countdown done`, `Relic rewards initialized`,
+/// `GetVoidProjectionRewards`), the cards turning over ~0.5 s later (`Got rewards`), and 15 s
+/// after that `Relic reward screen shut down`. Some screens have no pause.
+///
+/// The game writes its log in delayed batches. Over six screens on 2026-11-08 the open line
+/// reached the file 0.1-1.8 s after it was written, `Got rewards` up to 15 s late - as the screen
+/// closed - and the pause lines once 10.7 s late. So the open line starts the watch, the others
+/// only if it was missed, and the scan itself looks at the screen for the cards.
+///
+/// The 5 s relic display at the start of an endless mission's round shares the interface
+/// (`Relic rewards initialized`, `Reward choice force closed`, `Relic reward screen shut down`)
+/// but has no cards, and none of these lines.
 const REWARD_OPENED: &str = "VoidProjections: OpenVoidProjectionRewardScreen";
-const REWARD_READY: &str = "ProjectionRewardChoice.lua: Got rewards";
+const REWARD_STARTED: [&str; 3] = [
+    "ProjectionRewardChoice.lua: Pause countdown done",
+    "VoidProjections: GetVoidProjectionRewards",
+    "ProjectionRewardChoice.lua: Got rewards",
+];
 const REWARD_CLOSED: &str = "ProjectionRewardChoice.lua: Relic reward screen shut down";
 /// Lines that suggest the account state changed on the server.
 pub const SYNC_HINTS: [&str; 4] =
@@ -72,6 +85,20 @@ pub fn object_ids(line: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// The game's interface scale (Options > Interface > Scale; 1.0 = 100%), from `EE.cfg` beside
+/// the log. The reward screen's cards are laid out at this scale.
+pub fn ui_scale(log: &Path) -> Option<f64> {
+    let cfg = fs::read(log.with_file_name("EE.cfg")).ok()?;
+    ui_scale_in(&String::from_utf8_lossy(&cfg))
+}
+
+/// `Flash.FlashDrawScale=0.85000002`, as the game writes it.
+fn ui_scale_in(cfg: &str) -> Option<f64> {
+    cfg.lines()
+        .find_map(|line| line.trim().strip_prefix("Flash.FlashDrawScale=")?.trim().parse::<f64>().ok())
+        .filter(|s| (0.3..=2.0).contains(s))
 }
 
 /// (low, high) mastery rank from the local player's badge; high is None when exact.
@@ -317,6 +344,13 @@ pub fn find_ee_log() -> Option<PathBuf> {
     f.path.clone()
 }
 
+/// The newest EE.log, searched for right now: for a one-off command that cannot wait for the
+/// background search.
+pub fn find_ee_log_now() -> Option<PathBuf> {
+    search();
+    FOUND.lock().unwrap_or_else(|e| e.into_inner()).path.clone()
+}
+
 pub fn searching() -> bool {
     FOUND.lock().unwrap_or_else(|e| e.into_inner()).searching
 }
@@ -480,8 +514,9 @@ impl LogWatcher {
                     }
                 }
             }
-            // The reward choice timer is ~10 s; don't spend half a second of it here.
-            std::thread::sleep(Duration::from_millis(200));
+            // The reward screen is read the moment its cards are up and its prices hidden the
+            // moment it closes, so the log is looked at often; a look is one stat call.
+            std::thread::sleep(Duration::from_millis(100));
         }
     }
 
@@ -519,10 +554,11 @@ impl LogWatcher {
             (self.emit)(LogEvent::Candidate(id, sure, tail(line.trim(), 200)));
         }
         if line.contains(REWARD_OPENED) {
-            // A new screen: should the last one's shut-down line have been missed, it must not
-            // keep this one from being scanned.
-            self.reward_active = false;
-        } else if line.contains(REWARD_READY) {
+            // A new screen, even should the last one's shut-down line have been missed.
+            self.status().note(line);
+            self.reward_active = true;
+            (self.emit)(LogEvent::RewardScreen);
+        } else if REWARD_STARTED.iter().any(|l| line.contains(l)) {
             self.status().note(line);
             if !self.reward_active {
                 self.reward_active = true;
@@ -546,13 +582,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reward_scan_waits_for_rewards_and_ignores_late_interface_creation() {
+    fn reward_watch_starts_at_the_open_line_once_per_screen() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&events);
         let mut watcher = LogWatcher {
             path_of: Box::new(|| None),
             emit: Box::new(move |event| match event {
-                LogEvent::RewardScreen => captured.lock().unwrap().push("ready"),
+                LogEvent::RewardScreen => captured.lock().unwrap().push("watch"),
                 LogEvent::RewardScreenClosed => captured.lock().unwrap().push("closed"),
                 _ => {}
             }),
@@ -561,24 +597,37 @@ mod tests {
             reward_active: false,
         };
         for line in [
-            "VoidProjections: OpenVoidProjectionRewardScreenRMI",
-            "Created /Lotus/Interface/ProjectionRewardChoice.swf",
-            "ProjectionRewardChoice.lua: Pause countdown done",
-            "ProjectionRewardChoice.lua: Got rewards",
-            "ProjectionRewardChoice.lua: Got rewards",
-            "ProjectionRewardChoice.lua: Relic reward screen shut down",
-            "Created /Lotus/Interface/ProjectionRewardChoice.swf",
-            "ProjectionRewardChoice.lua: Relic reward screen shut down",
-            "ProjectionRewardChoice.lua: Got rewards",
-            "ProjectionRewardChoice.lua: Relic reward screen shut down",
-            // A screen whose shut-down line never came: the next screen is still scanned.
-            "ProjectionRewardChoice.lua: Got rewards",
-            "VoidProjections: OpenVoidProjectionRewardScreen - PostMigration: 0",
-            "ProjectionRewardChoice.lua: Got rewards",
+            // A reward screen, as on 2026-11-08: one watch from the open line on.
+            "3843.388 Sys [Info]: VoidProjections: OpenVoidProjectionRewardScreenRMI",
+            "3848.396 Script [Info]: ProjectionRewardChoice.lua: Pause countdown done",
+            "3848.419 Script [Info]: ProjectionRewardChoice.lua: Relic rewards initialized",
+            "3848.419 Sys [Info]: VoidProjections: GetVoidProjectionRewards",
+            "3848.883 Script [Info]: ProjectionRewardChoice.lua: Got rewards",
+            "3863.885 Script [Info]: ProjectionRewardChoice.lua: Relic reward screen shut down",
+            // The next round's relic display: not a reward screen.
+            "3869.161 Script [Info]: ProjectionRewardChoice.lua: Relic rewards initialized",
+            "3874.153 Script [Info]: ProjectionRewardChoice.lua: Reward choice force closed",
+            "3874.153 Script [Info]: ProjectionRewardChoice.lua: Relic reward screen shut down",
+            // A screen whose open line was missed: its first card line starts the watch.
+            "4010.290 Script [Info]: ProjectionRewardChoice.lua: Relic rewards initialized",
+            "4010.290 Sys [Info]: VoidProjections: GetVoidProjectionRewards",
+            "4010.793 Script [Info]: ProjectionRewardChoice.lua: Got rewards",
+            // A screen whose shut-down line never came: the next open line still starts a watch.
+            "4255.999 Sys [Info]: VoidProjections: OpenVoidProjectionRewardScreenRMI",
+            "4261.477 Script [Info]: ProjectionRewardChoice.lua: Got rewards",
+            "4276.476 Script [Info]: ProjectionRewardChoice.lua: Relic reward screen shut down",
         ] {
             watcher.handle(line);
         }
-        assert_eq!(*events.lock().unwrap(), ["ready", "closed", "ready", "closed", "ready", "ready"]);
+        assert_eq!(*events.lock().unwrap(), ["watch", "closed", "watch", "watch", "closed"]);
+    }
+
+    #[test]
+    fn interface_scale_comes_from_the_config() {
+        let cfg = "Graphics.WindowMode=MODE_BORDERLESS\r\nFlash.FlashDrawScale=0.85000002\r\nFlash.FlashDrawScaleMode=DSM_CUSTOM\r\n";
+        assert_eq!(ui_scale_in(cfg), Some(0.85000002));
+        assert_eq!(ui_scale_in("Flash.FlashDrawScaleMode=DSM_CUSTOM\n"), None);
+        assert_eq!(ui_scale_in("Flash.FlashDrawScale=0\n"), None);
     }
 
     #[test]

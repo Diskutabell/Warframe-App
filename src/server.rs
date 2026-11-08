@@ -6,7 +6,6 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use rust_embed::RustEmbed;
@@ -328,7 +327,7 @@ fn post_api(s: &Arc<State>, path: &str, b: &Value) -> Result<Option<Value>> {
         "manual/pin" => s.set_pinned(&uid()?, b["pinned"].as_bool().unwrap_or(false))?,
         "manual/goal" => s.set_goal(&uid()?, b["selected"].as_bool().unwrap_or(false))?,
         "manual/mastered" => s.set_manual_mastered(&uid()?, b["mastered"].as_bool().unwrap_or(false))?,
-        "rewards/scan" => return Ok(Some(serde_json::to_value(&*s.scan_rewards(Duration::ZERO))?)),
+        "rewards/scan" => return Ok(Some(serde_json::to_value(&*s.scan_rewards())?)),
         "window/show" => s.show_window(),
         "quit" => s.quit(),
         "overlay/test" => s.test_overlay()?,

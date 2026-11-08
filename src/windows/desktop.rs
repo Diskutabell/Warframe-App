@@ -24,6 +24,7 @@ use wry::{NewWindowResponse, WebContext, WebView, WebViewBuilder};
 
 use crate::compositor::{self, Rect};
 use crate::config::{self, Settings};
+use crate::ocr::reward;
 use crate::state::{RewardResult, RivenResult, State, UiEvent};
 
 /// Linux picks an overlay backend here; Windows has only one way.
@@ -84,9 +85,12 @@ enum Which {
     Riven,
 }
 
-const STRIP_W: f64 = 1000.0;
-const STRIP_H: f64 = 168.0;
+/// The size an overlay window starts at, before it is first placed.
+const START_W: f64 = 1000.0;
+const START_H: f64 = 168.0;
 const RIVEN_W: f64 = 470.0;
+/// The space between two price panels, like the space between two cards.
+const PANEL_GAP: f64 = 8.0;
 
 fn fit_rect(game: Rect, width: i32, height: i32, x: i32, y: i32) -> Rect {
     let width = width.clamp(1, game.width.max(1));
@@ -128,8 +132,13 @@ impl Overlay {
             .with_focused(false)
             .with_focusable(false)
             .with_skip_taskbar(true)
-            .with_inner_size(LogicalSize::new(STRIP_W, STRIP_H))
+            .with_inner_size(LogicalSize::new(START_W, START_H))
             .build(target)?;
+        if let Which::Strip = which {
+            // The price panels sit over the reward screen while the cards are being picked:
+            // every click goes through to the game.
+            window.set_ignore_cursor_events(true)?;
+        }
         let webview = WebViewBuilder::new_with_web_context(context)
             .with_url(format!("{url}overlay.html"))
             .with_transparent(true)
@@ -162,11 +171,16 @@ impl Overlay {
         unsafe { IsWindowVisible(self.hwnd()) != 0 }
     }
 
-    /// Shows the page with `result` at `rect` (screen pixels) for `secs` seconds; 0 keeps the
-    /// timer of an overlay already showing.
-    fn show(&self, rect: Rect, kind: &str, result: &impl serde::Serialize, secs: u32) {
+    /// Shows the page with `result` at `rect` (screen pixels) for `secs` seconds. `unit` is the
+    /// size the page draws at: CSS pixels per unit of the reward screen.
+    fn show(&self, rect: Rect, kind: &str, result: &impl serde::Serialize, secs: u32, unit: f64) {
         self.hide_at.set(Some(Instant::now() + Duration::from_secs(secs as u64)));
-        self.render(kind, result, secs);
+        self.render(kind, result, unit);
+        self.place(rect);
+    }
+
+    /// Moves the window to `rect` (screen pixels) and shows it.
+    fn place(&self, rect: Rect) {
         // SAFETY: the window lives as long as `self`. SWP_NOACTIVATE: shown without focus.
         unsafe {
             SetWindowPos(
@@ -181,11 +195,11 @@ impl Overlay {
         }
     }
 
-    fn update(&self, kind: &str, result: &impl serde::Serialize) {
-        self.render(kind, result, 0);
+    fn update(&self, kind: &str, result: &impl serde::Serialize, unit: f64) {
+        self.render(kind, result, unit);
     }
 
-    fn render(&self, kind: &str, result: &impl serde::Serialize, secs: u32) {
+    fn render(&self, kind: &str, result: &impl serde::Serialize, unit: f64) {
         let json = match serde_json::to_string(result) {
             Ok(json) => json,
             Err(e) => {
@@ -193,7 +207,7 @@ impl Overlay {
                 return;
             }
         };
-        let script = format!("render({kind:?}, {json}, {secs})");
+        let script = format!("render({kind:?}, {json}, {unit})");
         if self.ready.get() {
             self.evaluate(&script);
         } else {
@@ -242,12 +256,23 @@ impl Overlays {
         (compositor::game_rect().unwrap_or_else(compositor::game_monitor), compositor::game_scale())
     }
 
-    fn strip_rect(&self) -> Rect {
-        let s = self.state.settings();
-        let (g, scale) = self.game();
-        let w = ((STRIP_W * scale) as i32).min((g.width - 40).max(1));
-        let y = g.y + (g.height as f64 * s.overlay_y_percent / 100.0) as i32;
-        fit_rect(g, w, (STRIP_H * scale) as i32, g.x + (g.width - w) / 2, y)
+    /// Where the price panels go, one under each card as the game draws the cards at the
+    /// interface scale they were found at, and the page's size in CSS pixels per unit. Names found
+    /// without cards get as many panels where that many cards would be.
+    fn rewards_rect(&self, r: &RewardResult) -> (Rect, f64) {
+        let (g, dpi) = self.game();
+        let scale = r.scale.or_else(|| self.state.ui_scales().first().copied()).unwrap_or(1.0);
+        // An error has no cards to sit under: one panel the width of two cards, in the middle.
+        let cards = if r.items.is_empty() { 2 } else { r.cards.unwrap_or(r.items.len()).max(1) };
+        let u = reward::unit(g.width as f64, g.height as f64, scale);
+        // Text smaller than this is unreadable; the panels then grow downwards.
+        let text_u = (u / dpi).max(0.75);
+        let c = reward::CARD_W * u;
+        let gap = (PANEL_GAP * u).round();
+        let x = (g.x as f64 + g.width as f64 / 2.0 - cards as f64 * c / 2.0 + gap / 2.0).round() as i32;
+        let y = (g.y as f64 + g.height as f64 / 2.0 - reward::PANEL_TOP * u).round() as i32;
+        let (w, h) = ((cards as f64 * c - gap).round() as i32, (reward::PANEL_H * text_u * dpi).round() as i32);
+        (fit_rect(g, w, h, x, y), text_u)
     }
 
     fn show_rewards(&self, r: &RewardResult, fresh: bool) {
@@ -255,20 +280,25 @@ impl Overlays {
         if !s.overlay_enabled || (r.items.is_empty() && r.error.is_none()) {
             return;
         }
+        let (rect, unit) = self.rewards_rect(r);
         if !fresh {
-            // Only the prices changed: update a strip that is up, never bring back a closed one.
+            // The rest of the names or the prices: update panels that are up, never bring back
+            // ones taken down with their screen.
             if self.strip.visible() {
-                self.strip.update("rewards", r);
+                self.strip.update("rewards", r, unit);
+                self.strip.place(rect);
             }
             return;
         }
-        self.strip.show(self.strip_rect(), "rewards", r, s.overlay_seconds.max(4));
+        self.strip.show(rect, "rewards", r, s.overlay_seconds.max(4), unit);
     }
 
     fn show_test(&self) {
-        // The test strip always shows, even with the reward overlay switched off.
+        // The test panels always show, even with the reward overlay switched off.
         let s = self.state.settings();
-        self.strip.show(self.strip_rect(), "rewards", &RewardResult::sample(), s.overlay_seconds.max(4));
+        let sample = RewardResult::sample(self.state.ui_scales().first().copied().unwrap_or(1.0));
+        let (rect, unit) = self.rewards_rect(&sample);
+        self.strip.show(rect, "rewards", &sample, s.overlay_seconds.max(4), unit);
     }
 
     fn show_riven(&self, r: &RivenResult) {
@@ -281,7 +311,7 @@ impl Overlays {
         let y = (g.y + (g.height as f64 * s.riven_overlay_y_percent / 100.0) as i32 - h / 2)
             .min(g.y + g.height - h - 20)
             .max(g.y + 20);
-        self.riven.show(fit_rect(g, w, h, x, y), "riven", r, s.riven_overlay_seconds.max(5));
+        self.riven.show(fit_rect(g, w, h, x, y), "riven", r, s.riven_overlay_seconds.max(5), 1.0);
     }
 
     fn hide_all(&self) {

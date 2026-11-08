@@ -40,6 +40,20 @@ pub fn capture(_setting: ScreenshotTool) -> Result<Rgb> {
     crate::compositor::capture()
 }
 
+/// Whether a capture is quick and quiet enough to repeat several times a second.
+#[cfg(windows)]
+pub fn cheap(_setting: ScreenshotTool) -> bool {
+    true
+}
+
+/// Whether a capture is quick and quiet enough to repeat several times a second: grim takes
+/// 20-40 ms for a 2560x1440 output. The other tools start a whole program, and some flash the
+/// screen or play a shutter sound.
+#[cfg(unix)]
+pub fn cheap(setting: ScreenshotTool) -> bool {
+    resolve(setting) == Some(ScreenshotTool::Grim)
+}
+
 #[cfg(unix)]
 const TIMEOUT: Duration = Duration::from_secs(10);
 

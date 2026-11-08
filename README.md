@@ -31,8 +31,9 @@ Linux it runs natively next to the game (no Wine needed for the app itself).
 
 - **Overview:** mastery rank and mastery XP (same total as the in-game profile), currencies,
   relics worth cracking right now, world timers, foundry, pinned items, recent reward screens.
-- **Reward screen overlay:** when the relic reward screen opens, a strip under the cards shows
-  each item's platinum and ducat value and whether you still need it.
+- **Reward screen overlay:** when the relic reward screen opens, a panel under each card shows
+  its platinum and ducat value, how many you own, whether you still need it, and which pick is
+  worth the most. Clicks go through to the game, and the panels leave with the screen.
 - **Riven grades:** press a key with a riven card on screen and every stat gets graded against
   the weapon's disposition.
 - **Standing:** rank progress for every syndicate, rank-up costs, what's left of today's daily
@@ -138,8 +139,10 @@ Keys: **Ctrl+K** or **/** to search, **1-9** and **0** to switch pages, **Esc** 
 | F9 | Scan the relic reward screen | `curl -s -X POST http://127.0.0.1:8642/api/rewards/scan` |
 | F10 | Grade the riven card on screen | `curl -s -X POST http://127.0.0.1:8642/api/riven/scan` |
 
-The reward screen is also scanned automatically once the game logs that the rewards have
-arrived, and the price strip closes when the selection ends; F9 scans whenever you press it.
+The reward screen is also read automatically. The game's log says when one opens, and the app
+then watches the screen until the cards turn over: the log itself reaches the disk in batches,
+often seconds late. The prices go as soon as the cards leave the screen. F9 scans whenever you
+press it.
 `warframeproject trigger` and `warframeproject riven` do the same from a terminal.
 
 On Hyprland, Sway and KDE the overlays sit on the compositor's overlay layer, above fullscreen
@@ -202,6 +205,7 @@ Nothing else is sent anywhere.
 | Problem | Fix |
 |---|---|
 | A scan read the wrong items | Replay the frame: `warframeproject replay ~/.cache/warframeproject/frames/reward-....png` (`--riven` for rivens) and attach that PNG to the bug report. |
+| The reward screen is not read at all | The cards are found by the bar under each of them, at the interface scale the game saved in `EE.cfg` (other scales are tried too). Press F9 with the cards on screen and replay the saved frame as above. |
 | A dock starts an old version after updating | It saved the full `/nix/store/...` path. Point it at `warframeproject` or pin the app again. |
 | The window stays empty | Start it from a terminal and read the output. `WARFRAMEPROJECT_DEBUG=1` turns on the web inspector. |
 | The overlay is behind the game | Settings → *Keep overlays above the game with*: try the other option, then restart. Run the game fullscreen or borderless through the compositor. |
@@ -230,8 +234,10 @@ is plain HTML, CSS and JavaScript modules with no build step; debug builds read 
 reload picks up changes.
 
 Known limitations: part and relic counts need manual tracking, an import or the memory scan; the
-OCR is tuned for the default UI theme; the X11 overlay path hasn't been tested on a real X11
-session; the Windows version has passed its tests but hasn't been used with the real game yet.
+reward reader has been checked on the Fortuna and Stalker interface themes (1080p to 4K, 70-100%
+interface scale), others may read less well; the X11 overlay path hasn't been tested on a real
+X11 session; the Windows version has passed its tests but hasn't been used with the real game
+yet.
 
 ## License
 

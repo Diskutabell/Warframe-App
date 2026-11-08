@@ -104,11 +104,16 @@ enum Command {
     Quit,
     /// Read a saved screenshot (the app keeps the last ones in its cache's frames folder).
     Replay {
-        /// A screenshot (PNG or PPM) of the whole game screen.
-        frame: PathBuf,
+        /// Screenshots (PNG or PPM) of the whole game screen. Several give one line each.
+        #[arg(required = true)]
+        frames: Vec<PathBuf>,
         /// Read it as a riven card instead of a reward screen.
         #[arg(long)]
         riven: bool,
+        /// The game's interface scale in percent when the frame was taken (default: the one in
+        /// the game's EE.cfg now, then any).
+        #[arg(long)]
+        scale: Option<f64>,
     },
 }
 
@@ -129,9 +134,9 @@ fn main() -> ExitCode {
         Command::Quit => local(settings.port, "quit", true, Duration::from_secs(5))
             .map(|_| println!("warframeproject is closing."))
             .with_context(|| format!("warframeproject is not running (port {})", settings.port)),
-        Command::Replay { frame, riven } => {
+        Command::Replay { frames, riven, scale } => {
             net::set_offline(cli.offline);
-            replay(&frame, riven)
+            replay(&frames, riven, scale)
         }
     };
     match result {
@@ -266,36 +271,98 @@ fn riven(port: u16) -> Result<()> {
 }
 
 /// Reads a saved frame offline: the regression check for the OCR.
-fn replay(frame: &std::path::Path, riven: bool) -> Result<()> {
+fn replay(frames: &[PathBuf], riven: bool, scale: Option<f64>) -> Result<()> {
     #[cfg(windows)]
     compositor::unpack_tesseract()?;
     let catalog = gamedata::load(false).context("the game data is needed to know what to look for")?;
+    if riven {
+        for frame in frames {
+            replay_riven(&catalog, frame)?;
+        }
+        return Ok(());
+    }
+    let names = ocr::matcher::Names::new(&catalog.reward_names());
+    // The scale the frames were taken at: as given, else the game's own now, else any.
+    let scales: Vec<f64> = match scale {
+        Some(percent) => vec![percent / 100.0],
+        None => eelog::find_ee_log_now().and_then(|log| eelog::ui_scale(&log)).into_iter().collect(),
+    };
+    if let [frame] = frames {
+        return replay_rewards(frame, &names, &scales);
+    }
+    // A folder of frames: one line each, and only the cards (no search for names without them).
+    for frame in frames {
+        let started = Instant::now();
+        let image = ocr::screenshot::load(frame)?;
+        let file = frame.file_name().map_or_else(|| frame.display().to_string(), |f| f.to_string_lossy().into_owned());
+        let layout = ocr::reward::find_layout(&image, &scales).or_else(|| ocr::reward::find_layout(&image, &[]));
+        match layout {
+            Some(layout) => {
+                let read = ocr::reward::read(&image, &layout, &names)?;
+                let cards: Vec<String> = read
+                    .names
+                    .iter()
+                    .map(|m| m.as_ref().map_or("?".to_string(), |m| format!("{} {:.2}", m.name, m.score)))
+                    .collect();
+                println!(
+                    "{file}: {} card(s) at {:.0}%: {} ({:.2} s)",
+                    layout.cards,
+                    layout.ui_scale * 100.0,
+                    cards.join(" | "),
+                    started.elapsed().as_secs_f64()
+                );
+            }
+            None => println!("{file}: no cards ({:.2} s)", started.elapsed().as_secs_f64()),
+        }
+    }
+    Ok(())
+}
+
+fn replay_riven(catalog: &gamedata::Catalog, frame: &std::path::Path) -> Result<()> {
     let image = ocr::screenshot::load(frame)?;
     let started = Instant::now();
-    if riven {
-        let (read, text) = ocr::read_riven(&image, &catalog.riven_weapons())?;
-        println!("weapon: {}", read.weapon.as_deref().unwrap_or("(none)"));
-        let item = read.weapon.as_deref().and_then(|w| catalog.item_by_name(w));
-        let readings: Vec<(&str, f64, bool)> = read.stats.iter().map(|s| (s.stat, s.value, s.negative)).collect();
-        let counts = item.map(|it| rivens::infer_counts(it, &readings));
-        if let Some((pos, neg, unread)) = counts {
-            println!("rolled {pos} positive(s) + {neg} negative; {unread} stat(s) not readable");
+    let (read, text) = ocr::read_riven(&image, &catalog.riven_weapons())?;
+    println!("weapon: {}", read.weapon.as_deref().unwrap_or("(none)"));
+    let item = read.weapon.as_deref().and_then(|w| catalog.item_by_name(w));
+    let readings: Vec<(&str, f64, bool)> = read.stats.iter().map(|s| (s.stat, s.value, s.negative)).collect();
+    let counts = item.map(|it| rivens::infer_counts(it, &readings));
+    if let Some((pos, neg, unread)) = counts {
+        println!("rolled {pos} positive(s) + {neg} negative; {unread} stat(s) not readable");
+    }
+    for s in &read.stats {
+        let graded =
+            item.zip(counts).and_then(|(it, (p, n, _))| rivens::grade_roll(it, s.stat, s.value, p, n, s.negative));
+        let grade = graded.map_or(String::new(), |g| format!("  {} ({:+.2}%)", g.grade, g.deviation));
+        println!("  {}{} {}{grade}", if s.negative { "-" } else { "+" }, s.value.abs(), s.stat);
+    }
+    eprintln!("--- text\n{text}");
+    eprintln!("--- read in {:.2} s", started.elapsed().as_secs_f64());
+    Ok(())
+}
+
+fn replay_rewards(frame: &std::path::Path, names: &ocr::matcher::Names, scales: &[f64]) -> Result<()> {
+    let image = ocr::screenshot::load(frame)?;
+    let started = Instant::now();
+    let layout = ocr::reward::find_layout(&image, scales).or_else(|| ocr::reward::find_layout(&image, &[]));
+    if let Some(layout) = layout {
+        println!("{} card(s) at interface scale {:.0}%", layout.cards, layout.ui_scale * 100.0);
+        let read = ocr::reward::read(&image, &layout, names)?;
+        for (k, m) in read.names.iter().enumerate() {
+            match m {
+                Some(m) => println!("  {}. {:<40} {:.3}", k + 1, m.name, m.score),
+                None => println!("  {}. (not recognised)", k + 1),
+            }
         }
-        for s in &read.stats {
-            let graded =
-                item.zip(counts).and_then(|(it, (p, n, _))| rivens::grade_roll(it, s.stat, s.value, p, n, s.negative));
-            let grade = graded.map_or(String::new(), |g| format!("  {} ({:+.2}%)", g.grade, g.deviation));
-            println!("  {}{} {}{grade}", if s.negative { "-" } else { "+" }, s.value.abs(), s.stat);
-        }
-        eprintln!("--- text\n{text}");
+        eprintln!("--- text\n{}", read.text);
     } else {
-        let names = ocr::matcher::Names::new(&catalog.reward_names());
-        let (matches, text) = ocr::read_rewards(&image, &names)?;
+        // What the hotkey falls back to; the automatic scan reports nothing here.
+        println!("no reward cards on this frame; names anywhere in the middle:");
+        let (matches, text) = ocr::read_rewards(&image, names)?;
         for m in &matches {
-            println!("{:<40} {:.3}", m.name, m.score);
+            println!("  {:<40} {:.3}", m.name, m.score);
         }
         if matches.is_empty() {
-            println!("(no reward names recognised)");
+            println!("  (none)");
         }
         eprintln!("--- text\n{text}");
     }

@@ -52,6 +52,13 @@ impl Rgb {
         let data = self.data.chunks_exact(3).map(|p| p[c]).collect();
         Gray { width: self.width, height: self.height, data }
     }
+
+    /// How much redder each pixel is than it is green or blue: red text stands out, white and
+    /// gold (red and green both high) do not.
+    pub fn redness(&self) -> Gray {
+        let data = self.data.chunks_exact(3).map(|p| p[0].saturating_sub(p[1].max(p[2]))).collect();
+        Gray { width: self.width, height: self.height, data }
+    }
 }
 
 impl Gray {
@@ -247,6 +254,22 @@ pub fn reward_variants(frame: &Rgb) -> [Gray; 6] {
     [grey, inverted, blue, blue_hard, gold, gold_hard]
 }
 
+/// The images tesseract reads of the reward cards' name rows: dark text on white, enlarged 2x.
+///
+/// The names are drawn in the interface theme's colour. Blue minus red keeps the blue and cyan
+/// themes' text and drops the gold item renders that reach into the first line; redness keeps
+/// red themes' text (Stalker) and drops white and gold renders, which red minus blue keeps -
+/// that one is for the gold themes; brightness alone keeps the white and grey ones. On real
+/// frames each variant took ~0.18 s, against ~1 s for the six variants of the old wide band.
+pub fn name_variants(band: &Rgb) -> [Gray; 4] {
+    let blue = band.channel(2).subtract(&band.channel(0));
+    let gold = band.channel(0).subtract(&band.channel(2));
+    [blue, band.redness(), gold, band.luma()].map(|g| {
+        let g = g.autocontrast().invert();
+        g.resize_bicubic(g.width * 2, g.height * 2)
+    })
+}
+
 /// The whole frame for a riven card, which can sit anywhere: grey, stretched, enlarged 1.5x.
 pub fn riven_frame(frame: &Rgb) -> Gray {
     let grey = frame.luma().autocontrast();
@@ -273,6 +296,19 @@ mod tests {
     fn identity_resize_returns_the_input() {
         let g = Gray { width: 3, height: 2, data: vec![1, 2, 3, 4, 5, 6] };
         assert_eq!(g.resize_bicubic(3, 2), g);
+    }
+
+    #[test]
+    fn name_variants_are_dark_text_on_white_at_twice_the_size() {
+        // Blue text on a dark background, one pixel each.
+        let band = Rgb { width: 2, height: 1, data: vec![57, 105, 192, 20, 16, 24] };
+        let [blue, red, gold, grey] = name_variants(&band);
+        for v in [&blue, &red, &gold, &grey] {
+            assert_eq!((v.width, v.height), (4, 2));
+        }
+        // The text pixel comes out darker than the background in the blue and grey images.
+        assert!(blue.data[0] < blue.data[3]);
+        assert!(grey.data[0] < grey.data[3]);
     }
 
     #[test]
