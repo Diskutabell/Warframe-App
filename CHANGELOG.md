@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Game-data and market caches keep usable data when a response is invalid. Cache errors are
+  reported rather than silently replacing good data.
+
 ## 0.4.1 - 2026-11-06
 
 ### Changed
