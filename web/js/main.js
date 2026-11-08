@@ -13,11 +13,12 @@ import world from "./pages/world.js";
 import standing from "./pages/standing.js";
 import foundry from "./pages/foundry.js";
 import market from "./pages/market.js";
+import farming from "./pages/farming.js";
 import settings from "./pages/settings.js";
 
-export const PAGES = [home, mastery, primes, relics, fissures, world, standing, foundry, market, settings];
-/** The key that opens each page: 1-9, then 0 for the tenth. */
-const pageKey = (i) => String((i + 1) % 10);
+export const PAGES = [home, mastery, primes, relics, fissures, world, standing, foundry, market, farming, settings];
+/** Preserve 1-9 for the original pages and 0 for Settings. */
+const pageKey = (page, i) => page === settings ? "0" : page === farming ? "" : String(i + 1);
 
 /** What every page can read: the latest /api/state, and a way to re-render. */
 export const app = {
@@ -38,7 +39,7 @@ function renderNav() {
   const { page } = route();
   $("#nav").innerHTML = PAGES.map((p, i) =>
     (p.id === "settings" ? `<div class="sep"></div>` : "") +
-    `<a href="#${p.id}" class="${p === page ? "on" : ""}" title="${esc(p.title)} (${pageKey(i)})">${icon(p.icon)}<span>${esc(p.title)}</span></a>`).join("");
+    `<a href="#${p.id}" class="${p === page ? "on" : ""}" title="${esc(p.title)}${pageKey(p, i) ? ` (${pageKey(p, i)})` : ""}">${icon(p.icon)}<span>${esc(p.title)}</span></a>`).join("");
 }
 
 // ------------------------------------------------------------------ the account switcher
@@ -158,7 +159,7 @@ document.addEventListener("keydown", (e) => {
     else if (palette.isOpen()) palette.close();
     else if (drawer.isOpen()) drawer.close();
   } else if (!typing && !e.ctrlKey && !e.altKey && /^[0-9]$/.test(e.key) && !palette.isOpen()) {
-    const p = PAGES[PAGES.findIndex((_, i) => pageKey(i) === e.key)];
+    const p = PAGES.find((page, i) => pageKey(page, i) === e.key);
     if (p) location.hash = "#" + p.id;
   }
 });

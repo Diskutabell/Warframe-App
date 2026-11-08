@@ -202,6 +202,7 @@ function item(x) {
     <div class="bar lotus" style="margin-top:10px"><i style="width:${pct}%"></i></div>
     <div class="row" style="margin-top:12px">
       <button data-mastered="${x.manual ? 0 : 1}">${icon("check")} ${x.manual ? "Unmark as mastered" : "Mark as mastered"}</button>
+      <button data-goal>${x.goal ? "Remove farming goal" : "Set farming goal"}</button>
       <span class="muted" style="font-size:13px">${x.manual ? "Marked by hand." : "If the profile is out of date."}</span>
     </div>
     ${acquisition(x.name, x.drops, x.dropCoverage)}
@@ -270,6 +271,12 @@ function wire(d, x, version) {
   const pin = d.querySelector("[data-pin]");
   if (pin) pin.onclick = async () => {
     if (await act("manual/pin", { uid: x.key, pinned: !x.pinned }, x.pinned ? "Unpinned" : "Pinned to the Overview")) refresh();
+  };
+  const goal = d.querySelector("[data-goal]");
+  if (goal) goal.onclick = async () => {
+    if (await act("manual/goal", { uid: x.uid, selected: !x.goal }, x.goal ? "Goal removed" : "Goal added to Farming")) {
+      refresh();
+    }
   };
   const m = d.querySelector("[data-mastered]");
   if (m) m.onclick = async () => {

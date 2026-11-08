@@ -6,7 +6,7 @@ import * as drawer from "../drawer.js";
 
 const st = { q: "", cat: "", show: "buildable", kind: "", myMr: false };
 const KINDS = [["", "All"], ["gear", "Equipment"], ["craft", "Parts and gear"]];
-const SHOW = [["buildable", "Ready to build"], ["started", "Started"], ["missing", "Not built yet"], ["", "Everything"]];
+const SHOW = [["buildable", "Requirements collected"], ["started", "Started"], ["missing", "Not built yet"], ["", "Everything"]];
 
 export default {
   id: "foundry",
@@ -20,7 +20,7 @@ export default {
     // The low end of a badge band ("16-18") is the rank that is certain.
     const mr = app.state.masteryRank;
     view.innerHTML = `<div class="page">
-      <div class="page-head"><div><h1>Foundry</h1><p>${d.pending.length} building · ${ready} ready to build from parts you hold</p></div></div>
+      <div class="page-head"><div><h1>Foundry</h1><p>${d.pending.length} building · ${ready} with listed requirements collected. Equipment counts may include unbuilt blueprints; check resources and the foundry.</p></div></div>
       ${d.pending.length ? `<div class="card" style="margin-bottom:16px"><div class="card-head"><h2>Building</h2></div>
         <div class="cards">${d.pending.map((f) => `<div class="icard" ${f.known ? `data-uid="${esc(f.uid)}"` : `style="cursor:default"`}>${art(f.image)}
           <div class="body"><span class="name">${esc(f.name)}</span>
@@ -51,7 +51,7 @@ export default {
             <div class="meta"><span>${r.have}/${r.need} ${r.craft ? "needs met" : "parts"}</span>${r.craft
                 ? `<span class="pill">${esc(r.category)}</span>${r.held ? `<span class="pill lotus">have ${fmt(r.held)}</span>` : ""}${r.quantity > 1 ? `<span class="faint">makes ${r.quantity}</span>` : ""}`
                 : statusPill(r.status)}
-              ${r.buildable && r.status !== "mastered" ? `<span class="pill good">ready</span>` : ""}${r.vaulted ? `<span class="pill vaulted">vaulted</span>` : ""}</div>
+              ${r.buildable && r.status !== "mastered" ? `<span class="pill good">${r.craft ? "needs met" : "parts collected"}</span>` : ""}${r.vaulted ? `<span class="pill vaulted">vaulted</span>` : ""}${r.craft ? `<a href="https://wiki.warframe.com/w/${encodeURIComponent(r.name.replace(/ /g, "_"))}" target="_blank" rel="noopener">Where to get</a>` : ""}</div>
           </div></div>`).join("") || `<div class="empty"><b>Nothing here</b>${st.show === "buildable" ? "No item has all its parts yet." : "Try another filter."}</div>`;
     };
     draw();
