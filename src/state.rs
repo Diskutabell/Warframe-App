@@ -382,7 +382,7 @@ impl State {
             riven: Mutex::new(None),
             memscan: Mutex::new(MemscanStatus { state: "idle", last_attempt: f64::NEG_INFINITY, ..Default::default() }),
             scan_lock: Mutex::new(()),
-            reward_scan: Mutex::new(RewardScan { started: f64::NEG_INFINITY, done: true }),
+            reward_scan: Mutex::new(RewardScan { started: f64::NEG_INFINITY, done: true, generation: 0, result: None }),
             reward_done: std::sync::Condvar::new(),
             log: Mutex::new(None),
             ui: Mutex::new(None),
@@ -1579,10 +1579,14 @@ impl State {
         }
     }
 
-    fn publish_rewards(&self, result: RewardResult, fresh: bool) -> Arc<RewardResult> {
+    fn publish_rewards(&self, result: RewardResult, fresh: bool, generation: u64) -> Arc<RewardResult> {
         let result = Arc::new(result);
-        *lock(&self.rewards) = Some(Arc::clone(&result));
-        self.ui(UiEvent::Rewards { result: Arc::clone(&result), fresh });
+        let mut scan = lock(&self.reward_scan);
+        if scan.is_current(generation) {
+            scan.result = Some(Arc::clone(&result));
+            *lock(&self.rewards) = Some(Arc::clone(&result));
+            self.ui(UiEvent::Rewards { result: Arc::clone(&result), fresh });
+        }
         result
     }
 
@@ -1596,15 +1600,18 @@ impl State {
                 .reward_done
                 .wait_timeout_while(slot, Duration::from_secs(15), |s| !s.done)
                 .unwrap_or_else(|e| e.into_inner());
-            drop(done);
-            if let Some(r) = self.rewards() {
-                return r;
+            if let Some(r) = &done.result {
+                return Arc::clone(r);
             }
-            slot = lock(&self.reward_scan);
+            slot = done;
         }
-        *slot = RewardScan { started: now(), done: false };
+        slot.started = now();
+        slot.done = false;
+        slot.generation = slot.generation.wrapping_add(1);
+        slot.result = None;
+        let generation = slot.generation;
         drop(slot);
-        let _finished = ScanFinished(self);
+        let _finished = ScanFinished(self, generation);
         let capture = lock(&self.scan_lock);
         let settings = self.settings();
         self.hide_overlays_for_capture();
@@ -1619,6 +1626,7 @@ impl State {
                 return self.publish_rewards(
                     RewardResult { t: now(), error: Some(e.to_string()), ..Default::default() },
                     true,
+                    generation,
                 );
             }
         };
@@ -1652,7 +1660,7 @@ impl State {
             ocr: tail(&text, 800),
             error: items.is_empty().then(|| "No reward names recognized.".to_string()),
         };
-        self.publish_rewards(base.clone(), true);
+        self.publish_rewards(base.clone(), true, generation);
         // The screen is read; a riven scan may run while the prices load.
         drop(capture);
         ocr::archive("reward", frame, text, matches_json(&items));
@@ -1700,7 +1708,7 @@ impl State {
                 .collect();
             notifier::send("Relic rewards", &lines.join("\n"));
         }
-        self.publish_rewards(RewardResult { items, best, ..base }, false)
+        self.publish_rewards(RewardResult { items, best, ..base }, false, generation)
     }
 
     fn riven_failed(&self, weapon: Option<String>, text: &str, error: String) -> Arc<RivenResult> {
@@ -1831,14 +1839,28 @@ impl State {
 struct RewardScan {
     started: f64,
     done: bool,
+    generation: u64,
+    result: Option<Arc<RewardResult>>,
+}
+
+impl RewardScan {
+    fn is_current(&self, generation: u64) -> bool {
+        self.generation == generation
+    }
+
+    fn finish(&mut self, generation: u64) {
+        if self.is_current(generation) {
+            self.done = true;
+        }
+    }
 }
 
 /// Marks the running reward scan finished, however it ends, and wakes callers sharing it.
-struct ScanFinished<'a>(&'a State);
+struct ScanFinished<'a>(&'a State, u64);
 
 impl Drop for ScanFinished<'_> {
     fn drop(&mut self) {
-        lock(&self.0.reward_scan).done = true;
+        lock(&self.0.reward_scan).finish(self.1);
         self.0.reward_done.notify_all();
     }
 }
@@ -1850,6 +1872,17 @@ fn matches_json(items: &[RewardItem]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn older_reward_scan_cannot_finish_the_newer_scan() {
+        let mut scan = RewardScan { started: 10.0, done: false, generation: 2, result: None };
+        assert!(!scan.is_current(1));
+        scan.finish(1);
+        assert!(!scan.done);
+        assert!(scan.is_current(2));
+        scan.finish(2);
+        assert!(scan.done);
+    }
 
     #[test]
     fn scheduled_scans_wait_for_the_active_scan_and_cooldown() {

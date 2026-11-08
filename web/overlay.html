@@ -47,18 +47,12 @@
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
   const root = document.getElementById("root");
 
-  // Hiding is decided here, so hovering can keep the overlay open: the app only shows the
-  // window, and is told when to hide it again.
-  let hideAt = 0, held = false;
-  const hide = () => { hideAt = 0; window.ipc.postMessage("hide"); };
-  setInterval(() => { if (hideAt && !held && Date.now() >= hideAt) hide(); }, 200);
-  document.addEventListener("mouseenter", () => { held = true; });
-  document.addEventListener("mouseleave", () => {
-    held = false;
-    if (hideAt) hideAt = Math.max(hideAt, Date.now() + 3000);
-  });
+  const hide = () => window.ipc.postMessage("hide");
 
   function strip(r) {
+    if (r.error && !r.items.length) {
+      return `<div class="panel"><div class="weapon">Reward scan</div><div class="warn">${esc(r.error)}</div></div><span class="close" title="Hide" onclick="hide()">×</span>`;
+    }
     const cards = r.items.map((it) => {
       const bits = [];
       if (it.ducats > 0) bits.push(`${it.ducats}d`);
@@ -95,12 +89,11 @@
     return `<div class="panel"><div class="top"><span class="weapon">${esc(r.weapon ?? "Riven")}</span>${dots}</div>${body}</div>`;
   }
 
-  // Called by the app: kind is "rewards" or "riven", seconds how long to stay up (0: keep the
-  // current timer, for a price update of a strip that is already showing).
-  window.render = (kind, result, seconds) => {
+  // The native window owns the hide timer, including during delayed price updates.
+  window.render = (kind, result) => {
     root.innerHTML = kind === "riven" ? riven(result) : strip(result);
-    if (seconds > 0) { held = false; hideAt = Date.now() + seconds * 1000; }
   };
+  window.ipc.postMessage("ready");
 </script>
 </body>
 </html>

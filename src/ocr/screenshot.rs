@@ -116,7 +116,12 @@ pub fn capture(setting: ScreenshotTool) -> Result<Rgb> {
         ScreenshotTool::Auto | ScreenshotTool::Grim => unreachable!("handled above"),
     };
     let result = process::run(Command::new(program(tool)).args(&args), None, TIMEOUT)
-        .and_then(|_| fs::read(&file).with_context(|| format!("{} produced no file", program(tool))))
+        .and_then(|out| {
+            if !out.success {
+                bail!("{} failed: {}", program(tool), String::from_utf8_lossy(&out.stderr).trim());
+            }
+            fs::read(&file).with_context(|| format!("{} produced no file", program(tool)))
+        })
         .and_then(|bytes| decode(&bytes));
     let _ = fs::remove_file(&file);
     result

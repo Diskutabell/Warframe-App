@@ -11,9 +11,9 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
-    DeleteDC, DeleteObject, GetDC, GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint,
-    MonitorFromWindow, ReleaseDC, SRCCOPY, SelectObject,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, ClientToScreen, CreateCompatibleDC, CreateDIBSection,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
+    MonitorFromPoint, MonitorFromWindow, ReleaseDC, SRCCOPY, SelectObject,
 };
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
@@ -21,8 +21,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey, UnregisterHotKey,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetMessageW, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible, MSG, PostThreadMessageW,
-    WM_HOTKEY, WM_QUIT,
+    EnumWindows, GetClientRect, GetMessageW, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible, MSG,
+    PostThreadMessageW, WM_HOTKEY, WM_QUIT,
 };
 use windows_sys::core::BOOL;
 
@@ -134,17 +134,17 @@ fn game_window() -> Option<HWND> {
     search.best.map(|(h, _)| h)
 }
 
-/// Warframe's window in screen pixels.
+/// Warframe's client area in screen pixels, without window borders.
 pub fn game_rect() -> Option<Rect> {
     let hwnd = game_window()?;
     let mut r: RECT = unsafe { std::mem::zeroed() };
-    // SAFETY: a window handle and a RECT to fill.
-    (unsafe { GetWindowRect(hwnd, &mut r) } != 0).then(|| Rect {
-        x: r.left,
-        y: r.top,
-        width: r.right - r.left,
-        height: r.bottom - r.top,
-    })
+    let mut origin = POINT { x: 0, y: 0 };
+    // SAFETY: a window handle and writable structures for the client area and screen origin.
+    if unsafe { GetClientRect(hwnd, &mut r) == 0 || ClientToScreen(hwnd, &mut origin) == 0 } {
+        return None;
+    }
+    let (width, height) = (r.right - r.left, r.bottom - r.top);
+    (width > 0 && height > 0).then_some(Rect { x: origin.x, y: origin.y, width, height })
 }
 
 /// The display scale of the game's monitor (1.0 at 100%, 1.5 at 150%), so overlays drawn in
@@ -175,12 +175,12 @@ pub fn game_monitor() -> Rect {
 
 // ------------------------------------------------------------------ the screenshot
 
-/// Copies the game's monitor off the screen.
+/// Copies the game's client area off the screen, or the primary monitor if the game is not up.
 ///
 /// GDI sees what the desktop shows, which includes a game in borderless or windowed mode. A game
 /// in exclusive fullscreen bypasses the desktop and comes out black: the README says so.
 pub fn capture() -> Result<Rgb> {
-    let m = game_monitor();
+    let m = game_rect().unwrap_or_else(game_monitor);
     let (w, h) = (m.width, m.height);
     if w <= 0 || h <= 0 {
         bail!("no monitor to take a screenshot of");
@@ -308,7 +308,12 @@ fn parse_key(key: &str) -> Option<(u32, u32)> {
 
 /// The thread that owns the registered hotkeys. Windows sends WM_HOTKEY to the thread that
 /// registered the key, so that thread waits for messages and nothing else.
-static HOTKEY_THREAD: Mutex<Option<u32>> = Mutex::new(None);
+struct HotkeyThread {
+    id: u32,
+    handle: std::thread::JoinHandle<()>,
+}
+
+static HOTKEY_THREAD: Mutex<Option<HotkeyThread>> = Mutex::new(None);
 
 /// Registers the scan hotkeys for this session, replacing any registered before. A press calls
 /// the same local endpoint as the Linux binds: `POST /api/<path>`.
@@ -322,18 +327,20 @@ pub fn register_hotkeys(port: u16, keys: &[(&str, &str)]) -> Result<Vec<String>>
         };
         wanted.push((mods, vk, k.to_string(), p.to_string()));
     }
-    let mut owner = HOTKEY_THREAD.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(tid) = owner.take() {
-        // SAFETY: posting a message to a thread id; harmless if the thread is gone.
-        unsafe {
-            PostThreadMessageW(tid, WM_QUIT, 0, 0);
-        }
-    }
     if wanted.is_empty() {
         return Err(UserError::new("Set at least one key first.").into());
     }
+    let mut owner = HOTKEY_THREAD.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(old) = owner.take() {
+        // Wait for the old thread to release its keys before registering replacements.
+        if !old.handle.is_finished() && unsafe { PostThreadMessageW(old.id, WM_QUIT, 0, 0) } == 0 {
+            *owner = Some(old);
+            bail!("could not stop the previous hotkey registration");
+        }
+        old.handle.join().map_err(|_| anyhow::anyhow!("the previous hotkey thread panicked"))?;
+    }
     let (tx, rx) = std::sync::mpsc::channel::<(u32, Vec<String>)>();
-    std::thread::Builder::new().name("hotkeys".into()).spawn(move || {
+    let handle = std::thread::Builder::new().name("hotkeys".into()).spawn(move || {
         // SAFETY: registers keys for this thread and pumps its messages until WM_QUIT; the keys
         // are unregistered before the thread ends.
         unsafe {
@@ -343,7 +350,12 @@ pub fn register_hotkeys(port: u16, keys: &[(&str, &str)]) -> Result<Vec<String>>
                     failed.push(name.clone());
                 }
             }
-            let _ = tx.send((GetCurrentThreadId(), failed));
+            if tx.send((GetCurrentThreadId(), failed)).is_err() {
+                for id in 0..wanted.len() {
+                    UnregisterHotKey(std::ptr::null_mut(), id as i32 + 1);
+                }
+                return;
+            }
             let mut msg: MSG = std::mem::zeroed();
             while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
                 if msg.message == WM_HOTKEY {
@@ -355,7 +367,9 @@ pub fn register_hotkeys(port: u16, keys: &[(&str, &str)]) -> Result<Vec<String>>
                                 .timeout_global(Some(Duration::from_secs(60)))
                                 .build()
                                 .into();
-                            let _ = agent.post(&url).header("Content-Type", "application/json").send("{}");
+                            if let Err(e) = agent.post(&url).header("Content-Type", "application/json").send("{}") {
+                                eprintln!("hotkey request failed: {e}");
+                            }
                         });
                     }
                 }
@@ -366,7 +380,7 @@ pub fn register_hotkeys(port: u16, keys: &[(&str, &str)]) -> Result<Vec<String>>
         }
     })?;
     let (tid, failed) = rx.recv_timeout(Duration::from_secs(5))?;
-    *owner = Some(tid);
+    *owner = Some(HotkeyThread { id: tid, handle });
     if !failed.is_empty() {
         return Err(UserError::new(format!(
             "Another program already uses {}. Pick another key and press Install again.",
