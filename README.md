@@ -39,7 +39,8 @@ Linux it runs natively next to the game (no Wine needed for the app itself).
   limits, medallions you hold, and what each syndicate's offerings are worth in platinum.
 - **Mastery, prime sets, relics:** filterable lists with the parts you have and where to farm the
   rest; relic values and which ones you can crack in open fissures. Item, part and relic details
-  show known mission and enemy drop chances and link to the wiki for other sources.
+  show known mission and enemy drop chances and link to the wiki for other sources. Mastery can be
+  shown as a table or cards and filtered to Prime or non-Prime items.
 - **Fissures and world:** live fissures with the best relic you own for each, cycles, Baro,
   sortie, archon hunt, bounties, the Circuit, Archimedea, alerts, invasions, Nightwave, Darvo.
 - **Foundry and market:** what's building, what you could build, spare parts in platinum and

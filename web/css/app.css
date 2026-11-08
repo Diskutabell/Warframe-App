@@ -258,6 +258,7 @@ input[type=number] { width: 90px; }
 .icard { display: flex; align-items: flex-start; gap: 12px; padding: 12px; border-radius: var(--radius-lg); background: var(--panel); border: 1px solid var(--line); cursor: pointer; min-width: 0; transition: border-color .12s, transform .12s; }
 .icard:hover { border-color: var(--line-2); transform: translateY(-1px); }
 .icard.done { border-color: rgba(127, 209, 139, .35); }
+.icard.mastery-card { width: 100%; text-align: left; font-weight: 400; line-height: normal; }
 .icard .body { flex: 1; min-width: 0; display: grid; gap: 6px; }
 .icard .name { font: 700 16px/1.15 var(--display); letter-spacing: .02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pips { display: flex; gap: 5px; flex-wrap: wrap; }
