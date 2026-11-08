@@ -1,11 +1,12 @@
-//! Asking the compositor where the game is, and installing the scan hotkeys.
+//! Asking the compositor where the game is, floating the main window, and installing the scan
+//! hotkeys.
 
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use serde_json::Value;
 
 use crate::{UserError, process};
@@ -231,6 +232,51 @@ pub fn detect_flavour() -> Option<Flavour> {
     }
 }
 
+/// The main window in Hyprland's rules (RE2 regexes): GTK's program name, set in `desktop::run`,
+/// is the Wayland app id, and the X11 class too (capitalised) when GTK runs through XWayland.
+const MAIN_WINDOW_CLASS: &str = "(?i)^warframeproject$";
+
+/// The command that makes the compositor float the main window from the moment it opens. The
+/// syntax is Hyprland 0.56's (checked with `Hyprland --verify-config`); older releases spell
+/// rules differently and refuse this one.
+fn float_rule(flavour: Flavour, pid: u32) -> (&'static str, Vec<String>) {
+    match flavour {
+        Flavour::HyprlandLua => (
+            "hyprctl",
+            vec![
+                "eval".into(),
+                format!(
+                    "hl.window_rule({{ name = \"warframeproject-float\", match = {{ class = \"{MAIN_WINDOW_CLASS}\" }}, float = true }})"
+                ),
+            ],
+        ),
+        Flavour::Hyprland => (
+            "hyprctl",
+            vec!["keyword".into(), "windowrule".into(), format!("match:class {MAIN_WINDOW_CLASS}, float on")],
+        ),
+        // Sway's criteria can name the process, which covers an XWayland window as well.
+        Flavour::Sway => ("swaymsg", vec![format!("for_window [pid={pid}] floating enable")]),
+    }
+}
+
+/// Has a tiling compositor (Hyprland, Sway) float the main window, so it keeps its own size and
+/// stays out of the tiling layout. Must run before the window is shown: a rule only applies to
+/// windows that open after it, and floating the window later would first squeeze it into a tile.
+/// The rule lives in the running compositor only - no config file is touched - and reloading the
+/// compositor's config drops it, so every start sets it again. Other desktops float windows anyway.
+pub fn float_main_window() -> Result<()> {
+    let Some(flavour) = detect_flavour() else { return Ok(()) };
+    let (cmd, args) = float_rule(flavour, std::process::id());
+    let out = process::run(Command::new(cmd).args(&args), None, QUERY_TIMEOUT)?;
+    let said =
+        String::from_utf8_lossy(if out.stdout.is_empty() { &out.stderr } else { &out.stdout }).trim().to_string();
+    // hyprctl answers "ok", and reports a refusal on stdout with status 0.
+    if !out.success || (cmd == "hyprctl" && said != "ok") {
+        bail!("{cmd} refused the rule: {}", said.chars().take(160).collect::<String>());
+    }
+    Ok(())
+}
+
 /// The config lines for the given (key, API path) pairs.
 pub fn hotkey_lines(flavour: Option<Flavour>, port: u16, keys: &[(&str, &str)]) -> Vec<String> {
     let cmd = |p: &str| format!("curl -s -X POST http://127.0.0.1:{port}/api/{p}");
@@ -357,5 +403,23 @@ mod tests {
             hotkey_lines(Some(Flavour::Sway), 1, &keys),
             ["bindsym F9 exec curl -s -X POST http://127.0.0.1:1/api/rewards/scan"]
         );
+    }
+
+    #[test]
+    fn float_rules_per_flavour() {
+        let rule = |f| {
+            let (cmd, args) = float_rule(f, 4242);
+            format!("{cmd} {}", args.join(" | "))
+        };
+        assert_eq!(
+            rule(Flavour::HyprlandLua),
+            "hyprctl eval | hl.window_rule({ name = \"warframeproject-float\", \
+             match = { class = \"(?i)^warframeproject$\" }, float = true })"
+        );
+        assert_eq!(
+            rule(Flavour::Hyprland),
+            "hyprctl keyword | windowrule | match:class (?i)^warframeproject$, float on"
+        );
+        assert_eq!(rule(Flavour::Sway), "swaymsg for_window [pid=4242] floating enable");
     }
 }

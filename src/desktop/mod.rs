@@ -117,6 +117,10 @@ pub fn run(state: Arc<State>, url: &str, backend: Backend) -> Result<()> {
         backend
     };
     let window = main_window(url);
+    // Before the window opens: a tiling compositor would otherwise fit it into its layout.
+    if let Err(e) = compositor::float_main_window() {
+        eprintln!("the window may open tiled: {e:#}");
+    }
     window.show_all();
 
     let overlays = Rc::new(overlay::Overlays::new(backend, Arc::clone(&state)));

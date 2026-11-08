@@ -138,13 +138,16 @@ Keys: **Ctrl+K** or **/** to search, **1-9** and **0** to switch pages, **Esc** 
 | F9 | Scan the relic reward screen | `curl -s -X POST http://127.0.0.1:8642/api/rewards/scan` |
 | F10 | Grade the riven card on screen | `curl -s -X POST http://127.0.0.1:8642/api/riven/scan` |
 
-The reward screen is also scanned automatically when the game logs that it opened, which can be
-a second late; F9 is instant. `warframeproject trigger` and `warframeproject riven` do the same
-from a terminal.
+The reward screen is also scanned automatically once the game logs that the rewards have
+arrived, and the price strip closes when the selection ends; F9 scans whenever you press it.
+`warframeproject trigger` and `warframeproject riven` do the same from a terminal.
 
 On Hyprland, Sway and KDE the overlays sit on the compositor's overlay layer, above fullscreen
 games. On GNOME and X11 they are popup windows, and on Windows always-on-top windows that never
 take focus. Settings has a button to show a test overlay.
+
+On Hyprland and Sway the window floats at its own size instead of being tiled: the app adds a
+window rule to the running compositor each time it starts, without writing to your config.
 
 ## Linking your account
 
