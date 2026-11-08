@@ -33,6 +33,11 @@ static NAME_RES: LazyLock<[Regex; 3]> = LazyLock::new(|| {
 /// (Rank1to3 ... Rank49to51).
 static MASTERY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"OnMasteryIconReady1\(Loaded:[^)]*?/Rank(\d+)(?:to(\d+))?_").unwrap());
+/// A fissure reward screen in the log (2026-11-08): `VoidProjections: OpenVoidProjectionRewardScreen`,
+/// a 5 s pause (`Pause countdown done`), then `Got rewards` once the cards show, 5.6 s after the
+/// open line. 15 s later the selection ends with `Relic reward screen shut down`. About 17 s after
+/// that the interface is created once more and force-closed, with a second shut-down line.
+const REWARD_OPENED: &str = "VoidProjections: OpenVoidProjectionRewardScreen";
 const REWARD_READY: &str = "ProjectionRewardChoice.lua: Got rewards";
 const REWARD_CLOSED: &str = "ProjectionRewardChoice.lua: Relic reward screen shut down";
 /// Lines that suggest the account state changed on the server.
@@ -513,7 +518,11 @@ impl LogWatcher {
         for (id, sure) in candidate_ids(line, self.player.as_deref()) {
             (self.emit)(LogEvent::Candidate(id, sure, tail(line.trim(), 200)));
         }
-        if line.contains(REWARD_READY) {
+        if line.contains(REWARD_OPENED) {
+            // A new screen: should the last one's shut-down line have been missed, it must not
+            // keep this one from being scanned.
+            self.reward_active = false;
+        } else if line.contains(REWARD_READY) {
             self.status().note(line);
             if !self.reward_active {
                 self.reward_active = true;
@@ -562,10 +571,14 @@ mod tests {
             "ProjectionRewardChoice.lua: Relic reward screen shut down",
             "ProjectionRewardChoice.lua: Got rewards",
             "ProjectionRewardChoice.lua: Relic reward screen shut down",
+            // A screen whose shut-down line never came: the next screen is still scanned.
+            "ProjectionRewardChoice.lua: Got rewards",
+            "VoidProjections: OpenVoidProjectionRewardScreen - PostMigration: 0",
+            "ProjectionRewardChoice.lua: Got rewards",
         ] {
             watcher.handle(line);
         }
-        assert_eq!(*events.lock().unwrap(), ["ready", "closed", "ready", "closed"]);
+        assert_eq!(*events.lock().unwrap(), ["ready", "closed", "ready", "closed", "ready", "ready"]);
     }
 
     #[test]
