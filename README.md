@@ -47,6 +47,10 @@ Linux it runs natively next to the game (no Wine needed for the app itself).
 - **Search:** Ctrl+K also finds mods, resources, gear and names in loaded drop tables. The mod
   catalog is optional and needs to be downloaded at least once; missing sources can be checked
   on the wiki.
+- **Farming planner:** pick equipment goals to see parts, known sources and crafting materials.
+  Goals are saved per account. Counts can combine blueprints with crafted parts, and the materials
+  total assumes components still need crafting; recipes and required equipment may be missing, so
+  check the foundry before spending resources.
 - **Several accounts:** every account that logs in on the machine gets its own data, and the
   window follows the game when you switch.
 - **Search:** Ctrl+K finds any item, part, relic, syndicate or page.

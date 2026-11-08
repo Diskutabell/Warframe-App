@@ -32,6 +32,9 @@ pub struct Manual {
     /// Pinned to the Overview: item, part or build uids, and relic names.
     #[serde(default)]
     pub pinned: Vec<String>,
+    /// Masterable items selected for the farming planner.
+    #[serde(default)]
+    pub goals: Vec<String>,
 }
 
 /// A log line that may hold the account's id, for the user to confirm.

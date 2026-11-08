@@ -4,8 +4,18 @@
 
 ### Added
 
+- A farming planner for equipment goals, with parts, relics, known drop sources and crafting
+  materials. Goals are saved per account.
 - Ctrl+K searches mods, resources, gear and names in loaded drop tables. Item, part and relic
   details show known drop sources and chances, with wiki links for other sources.
+
+### Changed
+
+- Part counts can include both blueprints and crafted parts. The planner shows component recipes
+  even for held parts, and its materials total assumes all components still need crafting. It can
+  miss recipes and required equipment; check the foundry before buying or farming materials.
+- Foundry says "parts collected" rather than promising equipment is ready to build.
+- Farming sits above Settings in the sidebar. Existing number shortcuts stay the same.
 
 ### Fixed
 
