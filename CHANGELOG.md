@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.1 - 2026-11-08
+
+### Added
+
+- **The price panels can sit above the cards** (Settings, "Price panels"). The row under the
+  cards stays in view then, where it shows what the squad picks. Above the cards the panels keep
+  clear of the choice countdown.
+
 ## 0.6.0 - 2026-11-08
 
 ### Changed

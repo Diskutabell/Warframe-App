@@ -1,6 +1,6 @@
 [package]
 name = "warframeproject"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Warframe companion for Linux and Windows: mastery, prime sets, relics, reward-screen prices and riven grades"
