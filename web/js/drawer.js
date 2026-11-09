@@ -148,8 +148,10 @@ export function dropRows(drops) {
 }
 
 export function resourceRows(resources) {
-  return resources.map((r) => `<div class="list-row"><div class="main"><div class="t">${esc(r.name)}</div>
-    <div class="s">${r.have == null ? "Owned: unknown" : `${fmt(r.have)} held`} · ${fmt(r.count)} required${r.have != null && r.have < r.count ? ` · ${fmt(r.count - r.have)} short` : ""}</div></div>
+  return resources.map((r) => `<div class="list-row res-row">${r.image ? `<img class="res-pic" alt="" loading="lazy" decoding="async" src="${esc(artUrl(r.image, 34))}" onerror="this.style.visibility='hidden'">` : `<span class="res-pic"></span>`}
+    <div class="main"><div class="t">${esc(r.name)}</div>
+    <div class="s">${r.have == null ? "Owned: unknown" : `${fmt(r.have)} held`} · ${fmt(r.count)} required${r.have != null && r.have < r.count ? ` · <span class="warn-text">${fmt(r.count - r.have)} short</span>` : ""}</div>
+    ${r.have != null ? `<div class="bar thin ${r.have >= r.count ? "lotus" : "warn"}"><i style="width:${Math.min(100, 100 * r.have / Math.max(1, r.count)).toFixed(0)}%"></i></div>` : ""}</div>
     ${r.drops?.length ? `<button data-open="${esc(`drop:${r.name}`)}">Sources</button>` : `<a href="${esc(wiki(r.name))}" target="_blank" rel="noopener">Wiki</a>`}</div>`).join("");
 }
 
@@ -211,7 +213,7 @@ function item(x) {
       <div class="list-row click" data-open="${esc(r.uid)}"><div class="main"><div class="t">${r.count > 1 ? `${r.count} × ` : ""}${esc(r.name)}</div></div>${r.status ? statusPill(r.status) : ""}</div>`).join("")}</div></div>` : ""}
     ${x.resources.length ? `<div class="dsec"><h2>Resources</h2><div class="chips">${x.resources.map((r) => `<a class="chip res" href="${esc(wiki(r.name))}" target="_blank" rel="noopener" title="Find ${esc(r.name)} on the Warframe Wiki">${r.image ? `<img alt="" width="22" height="22" src="${esc(artUrl(r.image, 22))}" onerror="this.remove()">` : ""}${fmt(r.count)} × ${esc(r.name)}</a>`).join("")}</div>
       ${x.resources.filter((r) => r.drops?.length).map((r) => `<details class="more"><summary>${esc(r.name)} drop sources (${r.drops.length})</summary><div class="list">${dropRows(r.drops)}</div></details>`).join("")}</div>` : ""}
-    ${x.disposition ? `<div class="dsec"><h2>Riven disposition</h2><span class="gold">${"●".repeat(x.dots || 0)}${"○".repeat(5 - (x.dots || 0))}</span> <span class="muted">${x.disposition}×</span></div>` : ""}`;
+`;
 }
 
 function part(x) {

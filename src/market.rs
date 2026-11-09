@@ -19,6 +19,25 @@ pub const ASSETS: &str = "https://warframe.market/static/assets/";
 /// warframe.market asks for at most 3 requests a second; this is shared by every caller.
 const MIN_INTERVAL: Duration = Duration::from_millis(400);
 const ITEMS_MAX_AGE: f64 = 86400.0;
+/// Riven auctions are only searchable through the older API.
+const API_V1: &str = "https://api.warframe.market/v1";
+const SITE: &str = "https://warframe.market/";
+/// The site's list of weapons that take rivens changes with new weapons only.
+const RIVEN_WEAPONS_MAX_AGE: f64 = 7.0 * 86400.0;
+
+/// What warframe.market lists for rivens like one that was read: the same weapon with at least
+/// the same positive stats, for a fixed price.
+#[derive(Clone, Debug, Serialize)]
+pub struct RivenListings {
+    pub count: usize,
+    pub lowest: Option<i64>,
+    pub median: Option<i64>,
+    /// The cheapest of those whose seller is in the game right now.
+    #[serde(rename = "lowestOnline")]
+    pub lowest_online: Option<i64>,
+    /// The same search on the site.
+    pub url: String,
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Price {
@@ -368,6 +387,69 @@ impl Market {
                 last_save = Instant::now();
             }
         }
+    }
+
+    /// The site's slug for a weapon's rivens, by the weapon's uniqueName, else its name.
+    fn riven_weapon_slug(&self, uid: &str, name: &str) -> Option<String> {
+        let file = config::dirs().cache.join("wfm_riven_weapons.json");
+        let mut cached: Option<Value> = config::read_json(&file);
+        let fresh = cached.as_ref().is_some_and(|c| {
+            c["data"].as_array().is_some_and(|a| !a.is_empty())
+                && now() - c["t"].as_f64().unwrap_or(0.0) < RIVEN_WEAPONS_MAX_AGE
+        });
+        if !fresh {
+            match self.get("/riven/weapons", None) {
+                Ok(v) if v["data"].as_array().is_some_and(|a| !a.is_empty()) => {
+                    let list = json!({"t": now(), "data": v["data"]});
+                    let _ = config::write_json(&file, &list);
+                    cached = Some(list);
+                }
+                Ok(_) => eprintln!("warframe.market sent no riven weapons"),
+                Err(e) => eprintln!("warframe.market riven weapons unavailable: {e:#}"),
+            }
+        }
+        let list = cached?;
+        let weapons = list["data"].as_array()?;
+        let by = |f: &dyn Fn(&Value) -> bool| weapons.iter().find(|w| f(w)).and_then(|w| w["slug"].as_str());
+        by(&|w| w["gameRef"].as_str() == Some(uid))
+            .or_else(|| by(&|w| w["i18n"]["en"]["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(name))))
+            .map(str::to_owned)
+    }
+
+    /// Rivens for the same weapon with at least these positives (warframe.market's attribute
+    /// slugs), sold at a fixed price. One search per riven read, through the shared rate limit.
+    pub fn riven_listings(&self, uid: &str, name: &str, positives: &[&str]) -> anyhow::Result<RivenListings> {
+        let weapon = self
+            .riven_weapon_slug(uid, name)
+            .ok_or_else(|| anyhow::anyhow!("warframe.market lists no rivens for {name}"))?;
+        let stats = positives.join(",");
+        let query = format!("type=riven&weapon_url_name={weapon}&positive_stats={stats}&sort_by=price_asc");
+        self.wait_for_slot(None)?;
+        let headers = self.headers();
+        let refs: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let found = net::get_json(
+            &format!("{API_V1}/auctions/search?{query}&buyout_policy=direct"),
+            &refs,
+            Duration::from_secs(20),
+        )?;
+        let auctions = found["payload"]["auctions"].as_array().cloned().unwrap_or_default();
+        let live = |a: &&Value| a["visible"].as_bool() != Some(false) && a["closed"].as_bool() != Some(true);
+        let price = |a: &Value| a["buyout_price"].as_i64().filter(|p| *p > 0);
+        let mut prices: Vec<i64> = auctions.iter().filter(live).filter_map(price).collect();
+        prices.sort_unstable();
+        let lowest_online = auctions
+            .iter()
+            .filter(live)
+            .filter(|a| a["owner"]["status"].as_str() == Some("ingame"))
+            .filter_map(price)
+            .min();
+        Ok(RivenListings {
+            count: prices.len(),
+            lowest: prices.first().copied(),
+            median: (!prices.is_empty()).then(|| prices[prices.len() / 2]),
+            lowest_online,
+            url: format!("{SITE}auctions/search?{query}&polarity=any"),
+        })
     }
 
     /// Market items whose name contains `q`, names starting with it first, shortest first.

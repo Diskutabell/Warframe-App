@@ -24,7 +24,7 @@ use wry::{NewWindowResponse, WebContext, WebView, WebViewBuilder};
 
 use crate::compositor::{self, Rect};
 use crate::config::{self, PanelPosition, Settings};
-use crate::ocr::reward;
+use crate::ocr::{reward, riven};
 use crate::state::{RewardResult, RivenResult, State, UiEvent};
 
 /// Linux picks an overlay backend here; Windows has only one way.
@@ -88,7 +88,6 @@ enum Which {
 /// The size an overlay window starts at, before it is first placed.
 const START_W: f64 = 1000.0;
 const START_H: f64 = 168.0;
-const RIVEN_W: f64 = 470.0;
 
 fn fit_rect(game: Rect, width: i32, height: i32, x: i32, y: i32) -> Rect {
     let width = width.clamp(1, game.width.max(1));
@@ -132,11 +131,9 @@ impl Overlay {
             .with_skip_taskbar(true)
             .with_inner_size(LogicalSize::new(START_W, START_H))
             .build(target)?;
-        if let Which::Strip = which {
-            // The price panels sit over the reward screen while the cards are being picked:
-            // every click goes through to the game.
-            window.set_ignore_cursor_events(true)?;
-        }
+        // The panels sit over the game (the reward screen while the cards are being picked, the
+        // riven screen beside the card): every click goes through to it.
+        window.set_ignore_cursor_events(true)?;
         let webview = WebViewBuilder::new_with_web_context(context)
             .with_url(format!("{url}overlay.html"))
             .with_transparent(true)
@@ -312,17 +309,28 @@ impl Overlays {
         self.strip.show(rect, "rewards", &sample, s.overlay_seconds.max(4), unit, &boxes);
     }
 
-    fn show_riven(&self, r: &RivenResult) {
+    /// The grades beside the riven card in the middle of the screen, sized with the card like the
+    /// price panels. `fresh` is false when only the market listings arrived.
+    fn show_riven(&self, r: &RivenResult, fresh: bool) {
+        if !fresh && !self.riven.visible() {
+            return;
+        }
         let s = self.state.settings();
-        let (g, scale) = self.game();
-        let rows = if r.error.is_some() { 1 } else { r.stats.len().max(1) as i32 };
-        let (w, h) = ((RIVEN_W * scale) as i32, ((118 + 40 * rows) as f64 * scale) as i32);
-        // Beside the card, which the game draws centred.
-        let x = (g.x + (g.width as f64 * s.riven_overlay_x_percent / 100.0) as i32).min(g.x + g.width - w - 20);
-        let y = (g.y + (g.height as f64 * s.riven_overlay_y_percent / 100.0) as i32 - h / 2)
-            .min(g.y + g.height - h - 20)
-            .max(g.y + 20);
-        self.riven.show(fit_rect(g, w, h, x, y), "riven", r, s.riven_overlay_seconds.max(5), 1.0, &[]);
+        let (g, dpi) = self.game();
+        let scale = self.state.ui_scales().first().copied().unwrap_or(1.0);
+        let u = reward::unit(g.width as f64, g.height as f64, scale);
+        let text_u = (u / dpi).max(0.75);
+        let rows = if r.error.is_some() { 1 } else { r.stats.len() };
+        let w = (riven::PANEL_W * text_u * dpi).round() as i32;
+        let h = (riven::panel_height(rows) * text_u * dpi).round() as i32;
+        let x = (g.x as f64 + g.width as f64 / 2.0 + (riven::CARD_HALF_W + riven::PANEL_GAP) * u).round() as i32;
+        let y = (g.y as f64 + g.height as f64 / 2.0 - riven::PANEL_TOP * u).round() as i32;
+        let rect = fit_rect(g, w, h, x, y);
+        if fresh {
+            self.riven.show(rect, "riven", r, s.riven_overlay_seconds.max(5), text_u, &[]);
+        } else {
+            self.riven.update("riven", r, text_u, &[]);
+        }
     }
 
     fn hide_all(&self) {
@@ -413,7 +421,7 @@ pub fn run(state: Arc<State>, url: &str, _backend: Backend) -> Result<()> {
                 }
                 UiEvent::Rewards { result, fresh } => overlays.show_rewards(&result, fresh),
                 UiEvent::HideRewards => overlays.strip.hide(),
-                UiEvent::Riven(r) => overlays.show_riven(&r),
+                UiEvent::Riven { result, fresh } => overlays.show_riven(&result, fresh),
                 UiEvent::TestOverlay => overlays.show_test(),
                 UiEvent::HideForCapture(ack) => {
                     overlays.hide_all();

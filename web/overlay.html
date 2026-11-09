@@ -35,24 +35,35 @@
   .vaulted { color: #e39a6b; }
   .err { color: #e2895f; font-size: calc(13 * var(--u)); }
 
-  .panel { height: 100%; box-sizing: border-box; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px;
-           background: rgba(8, 10, 14, 0.93); border: 1px solid #2d4150; border-left: 3px solid #d4b26a; border-radius: 4px; }
-  .top { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
-  .weapon { font: 700 23px "Rajdhani", sans-serif; color: #eee; }
-  .dots { color: #d4b26a; font-size: 15px; }
-  .row { display: flex; gap: 10px; align-items: baseline; border-top: 1px solid #1e2b36; padding: 6px 0; }
-  .stat { flex: 1; font-size: 16px; color: #eee; }
-  .grade { font: 700 17px "Rajdhani", sans-serif; }
-  .grade.a { color: #8ce39a; } .grade.b { color: #d4b26a; } .grade.c { color: #e2895f; }
-  .dev { width: 8ch; text-align: right; }
-  .warn { color: #e2895f; }
-  .foot { color: #6d7b88; font-size: 11.5px; }
+  /* The riven grades beside the card. */
+  .riven { height: 100%; box-sizing: border-box; display: flex; flex-direction: column; gap: calc(6 * var(--u));
+           padding: calc(9 * var(--u)); background: rgba(8, 12, 17, 0.97); border: 1px solid rgba(150, 170, 186, 0.3);
+           border-top: calc(3 * var(--u)) solid #9a80e8; border-radius: calc(3 * var(--u)); }
+  .rhead { display: flex; align-items: center; gap: calc(8 * var(--u)); }
+  .rhead img { width: calc(40 * var(--u)); height: calc(40 * var(--u)); object-fit: contain; }
+  .rhead .names { flex: 1; min-width: 0; }
+  .weapon { font: 700 calc(21 * var(--u)) / 1.1 "Rajdhani", sans-serif; color: #eeeae0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sub { font-size: calc(13 * var(--u)); color: #8a99a6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .overall { font: 700 calc(20 * var(--u)) "Rajdhani", sans-serif; color: #0b1016; border-radius: calc(3 * var(--u)); padding: 0 calc(4 * var(--u)); }
+  .overall.a { background: #8ce39a; } .overall.b { background: #d9b45a; } .overall.c { background: #e2895f; }
+  .rule { border-top: 1px solid rgba(150, 170, 186, 0.18); padding-top: calc(5 * var(--u)); display: grid; gap: calc(3 * var(--u)); }
+  .line { display: flex; align-items: baseline; gap: calc(8 * var(--u)); min-width: 0; }
+  .grade { width: 2ch; font: 700 calc(17 * var(--u)) "Rajdhani", sans-serif; }
+  .grade.a { color: #8ce39a; } .grade.b { color: #d9b45a; } .grade.c { color: #e2895f; }
+  .stat { flex: 1; min-width: 0; font-size: calc(15 * var(--u)); color: #e9e4d6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dev { font: 600 calc(13 * var(--u)) "Rajdhani", sans-serif; color: #8a99a6; }
+  .roll { height: calc(5 * var(--u)); background: rgba(255, 255, 255, 0.08); position: relative; }
+  .roll i { position: absolute; left: 0; top: 0; bottom: 0; }
+  .roll b { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: rgba(255, 255, 255, 0.35); }
+  .roll.a i { background: #8ce39a; } .roll.b i { background: #d9b45a; } .roll.c i { background: #e2895f; }
+  .price { display: flex; align-items: center; gap: calc(5 * var(--u)); min-width: 0; }
+  .price img { height: calc(17 * var(--u)); }
+  .price .v { font: 700 calc(16 * var(--u)) "Rajdhani", sans-serif; color: #f1d58b; }
 </style>
 </head>
 <body>
 <div id="root"></div>
 <script>
-  const DOTS = ["", "●○○○○", "●●○○○", "●●●○○", "●●●●○", "●●●●●"];
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
   const root = document.getElementById("root");
 
@@ -83,26 +94,34 @@
     return slots.join("");
   }
 
+  const gradeClass = (g) => (g[0] === "A" ? "a" : g[0] === "B" ? "b" : "c");
+  const UNITS = { "Punch Through": "m", "Combo Duration": "s", "Initial Combo": "" };
+
   function riven(r) {
-    let body;
-    if (r.error) {
-      body = `<div>${esc(r.error)}</div>`;
-    } else {
-      const p = r.positives ?? 0, n = r.negatives ?? 0;
-      const unread = r.unread === 1 ? " · 1 stat not readable" : r.unread > 1 ? ` · ${r.unread} stats not readable` : "";
-      const rows = r.stats.map((g) => {
-        const cls = g.grade[0] === "A" ? "a" : g.grade[0] === "B" ? "b" : "c";
-        return `<div class="row"><span class="stat">${g.negative ? "−" : "+"}<b>${Math.abs(g.value)}</b> ${esc(g.stat)}</span>
-          <span class="grade ${cls}">${esc(g.grade)}</span>
-          <span class="dev">${g.deviation > 0 ? "+" : ""}${g.deviation.toFixed(2)}%</span></div>`;
-      });
-      body = `<div>${p} positive${p === 1 ? "" : "s"}${n > 0 ? " + negative" : ""}${unread}</div>${rows.join("")}`;
-      if (r.stats.some((g) => g.outOfRange)) body += `<div class="warn">Values outside ±10%: the stat count or weapon looks wrong.</div>`;
-      if (r.stats.some((g) => g.signConflict)) body += `<div class="warn">A stat shows a sign it cannot roll with: the sign was misread.</div>`;
-      body += `<div class="foot">Grades compare the roll with an average roll, not with what is useful.</div>`;
-    }
-    const dots = r.disposition != null ? `<span class="dots">${DOTS[r.dots ?? 0] ?? ""} ${r.disposition}×</span>` : "";
-    return `<div class="panel"><div class="top"><span class="weapon">${esc(r.weapon ?? "Riven")}</span>${dots}</div>${body}</div>`;
+    const p = r.positives, n = r.negatives;
+    let sub = r.error ? "Riven" : `${p} positives${n > 0 ? " + 1 negative" : ""}`;
+    if (!r.error && r.unread) sub += ` · ${r.unread} not readable`;
+    const head = `<div class="rhead">${r.image ? `<img src="/api/art?s=80&u=${encodeURIComponent(r.image)}" alt="" onerror="this.remove()">` : ""}
+      <div class="names"><div class="weapon">${esc(r.weapon ?? "Riven")}</div><div class="sub">${esc(sub)}</div></div>
+      ${r.overall ? `<span class="overall ${gradeClass(r.overall)}" title="The average roll">${esc(r.overall)}</span>` : ""}</div>`;
+    if (r.error) return `<div class="riven">${head}<div class="err">${esc(r.error)}</div></div>`;
+    const rows = r.stats.map((g) => {
+      const c = gradeClass(g.grade), at = Math.max(0, Math.min(100, (g.deviation + 10) * 5));
+      return `<div class="rule"><div class="line"><span class="grade ${c}">${esc(g.grade)}</span>
+        <span class="stat">${g.negative ? "−" : "+"}<b>${Math.abs(g.value)}${UNITS[g.stat] ?? "%"}</b> ${esc(g.stat)}</span>
+        <span class="dev">${g.deviation > 0 ? "+" : ""}${g.deviation.toFixed(1)}%</span></div>
+        <div class="roll ${c}"><i style="width:${at}%"></i><b></b></div></div>`;
+    }).join("");
+    const warn = (r.stats.some((g) => g.outOfRange) ? `<div class="err">Some values are outside the ±10% a roll can land in: a stat was misread.</div>` : "")
+      + (r.stats.some((g) => g.signConflict) ? `<div class="err">A stat shows a sign it cannot roll with: the sign was misread.</div>` : "");
+    const m = r.market;
+    const listed = m && m.count > 0
+      ? `<span class="v">${m.lowest}</span><span class="sub">lowest${m.median != null ? ` · ${m.median} median` : ""}${m.lowestOnline != null ? ` · ${m.lowestOnline} in game` : ""} · ${m.count} listed</span>`
+      : `<span class="sub">${m ? "No listings with these positives" : r.marketError ? "warframe.market did not answer" : "Looking up listings…"}</span>`;
+    const med = (k) => r.traded?.[k]?.median;
+    const sold = [med("unrolled") != null ? `${Math.round(med("unrolled"))} unrolled` : "", med("rerolled") != null ? `${Math.round(med("rerolled"))} rerolled` : ""].filter(Boolean).join(" · ");
+    return `<div class="riven">${head}${rows}${warn}<div class="rule"><div class="price"><img src="/icons/platinum.png" alt="">${listed}</div>
+      <div class="sub">warframe.market, same weapon and positives</div>${sold ? `<div class="sub">Sold lately: ${sold}</div>` : ""}</div></div>`;
   }
 
   // The native window owns the hide timer, including during delayed price updates.

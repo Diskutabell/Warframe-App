@@ -78,6 +78,14 @@ export const archonPortrait = (boss) => {
   return who ? `NarmerSortie/NarmerArchon${who}.png` : null;
 };
 
+// The codex's picture for each mission type (CodexGameModes); kinds without one draw nothing.
+const MISSION_SCENES = {
+  Assassination: "Assassination", Capture: "Capture", Defense: "Defense", Excavation: "Excavation",
+  Extermination: "Exterminate", Hijack: "Hijack", Interception: "Interception", "Mobile Defense": "MobileDefense",
+  Rescue: "Rescue", Sabotage: "Sabotage", Spy: "Spy", Survival: "Survival", Recovery: "Recovery",
+};
+export const missionScene = (mission) => (MISSION_SCENES[mission] ? `CodexGameModes/${MISSION_SCENES[mission]}.png` : null);
+
 const RELICS = { Lith: "Lith", Meso: "Meso", Neo: "Neo", Axi: "Axi", Requiem: "Immortal" };
 export const relicIcon = (era) => (RELICS[era] ? `Relics/Relic${RELICS[era]}A.png` : null);
 

@@ -180,11 +180,24 @@ impl View {
         Some(json!({
             "quantity": recipe.quantity, "credits": recipe.credits, "seconds": recipe.seconds,
             "ingredients": recipe.ingredients.iter().map(|need| json!({
-                "uid": need.uid, "name": need.name, "count": need.count,
+                "uid": need.uid, "name": need.name, "count": need.count, "image": self.icon_of(&need.uid, &need.name),
                 "have": if self.inv.is_some() || self.manual.counts.contains_key(&need.uid) { Some(self.count(&need.uid)) } else { None },
                 "drops": self.cat.drops.for_name(&need.name, false)
             })).collect::<Vec<_>>()
         }))
+    }
+
+    /// A resource's picture: WFCD's art for exactly that name, else the game's own icon (which
+    /// for some resources is their store bundle's: Polymer Bundle's is a crate of weapons), else
+    /// WFCD's art for the start of the name.
+    fn icon_of(&self, uid: &str, name: &str) -> Option<String> {
+        self.exact_art(name)
+            .or_else(|| self.cat.inventory.get(uid).and_then(|e| e.icon.clone()))
+            .or_else(|| self.cat.art_by_name(name))
+    }
+
+    fn exact_art(&self, name: &str) -> Option<String> {
+        gamedata::image_url(self.cat.art.get(&gamedata::art_key(name)).map(String::as_str))
     }
 
     /// Owned count for any uid. Prime parts combine the blueprint and the crafted component, and a
@@ -254,6 +267,83 @@ impl View {
             owned: self.owned(&it.uid),
             building,
         }
+    }
+
+    /// Everything in the inventory: equipment and every counted stack, with a name, a picture,
+    /// the kind it is filed under and, for what can be traded, its cached price and ducats.
+    /// Prices are never requested from here: a page of 1,300 rows would flood the queue.
+    pub fn inventory(&self) -> Value {
+        let Some(inv) = self.inv.as_deref() else {
+            return json!({"items": [], "source": null});
+        };
+        let mut rows: Vec<Value> = Vec::new();
+        let mut row = |uid: &str, count: i64| {
+            let (name, kind, image) = self.inventory_entry(uid);
+            let slug = self.market.slug_for(Some(uid), None, Some(&name));
+            let known = slug.as_deref().is_some_and(|s| self.market.name(s).is_some());
+            let slug = slug.filter(|_| known);
+            rows.push(json!({
+                "uid": uid, "name": name, "kind": kind, "count": count, "image": image,
+                "price": self.price(slug.as_deref(), false), "ducats": self.market.ducats(slug.as_deref()),
+                "slug": slug,
+            }));
+        };
+        for (uid, e) in &inv.equipment {
+            row(uid, e.count);
+        }
+        for (uid, count) in inv.counts.iter().filter(|(_, c)| **c > 0) {
+            if !inv.equipment.contains_key(uid) {
+                row(uid, *count);
+            }
+        }
+        json!({"items": rows, "source": inv.source, "imported": inv.imported, "currencies": inv.currencies})
+    }
+
+    /// (name, kind, picture) for anything an inventory holds: the catalog's names for equipment,
+    /// parts and relics, the game's export for the rest, and the uid's last word when neither
+    /// knows it.
+    fn inventory_entry(&self, uid: &str) -> (String, String, Option<String>) {
+        let export = self.cat.inventory.get(uid);
+        // Resources only: WFCD's mod pictures are not on its image host.
+        let resource = export.filter(|e| matches!(e.kind, "Resources" | "Gems and ores" | "Fish"));
+        let named = resource.and_then(|e| e.name.as_deref()).and_then(|n| self.exact_art(n));
+        let icon = named.or_else(|| export.and_then(|e| e.icon.clone()));
+        if let Some(it) = self.cat.items.get(uid) {
+            return (it.name.clone(), it.category.clone(), gamedata::image_url(it.image.as_deref()).or(icon));
+        }
+        if let Some((e, name)) = export.and_then(|e| Some((e, e.name.clone()?))).filter(|(e, _)| e.result.is_none()) {
+            return (name, e.kind.to_string(), icon);
+        }
+        let canon = self.cat.part_alias.get(uid).map(String::as_str);
+        if let Some(part) = canon.and_then(|c| self.cat.parts.get(c)) {
+            let name = if uid.ends_with("Blueprint") && !part.name.ends_with("Blueprint") {
+                format!("{} Blueprint", part.name)
+            } else {
+                part.name.clone()
+            };
+            let kind = if part.name.contains("Prime") { "Prime parts" } else { "Parts" };
+            return (name, kind.to_string(), self.image_for(uid).or(icon));
+        }
+        if let Some((base, refinement)) = self.cat.relic_uids.get(uid) {
+            let era = self.cat.relics.get(base).map_or("", |r| r.era.as_str());
+            let art = match era {
+                "Requiem" => "Immortal",
+                e => e,
+            };
+            let pic = (!art.is_empty()).then(|| format!("{}Icons/Relics/Relic{art}A.png", crate::art::GAME_ART));
+            return (format!("{base} {refinement}"), "Relics".to_string(), pic);
+        }
+        if let Some(e) = export {
+            let name = e
+                .name
+                .clone()
+                .or_else(|| e.result.as_deref().map(|r| format!("{} Blueprint", self.inventory_entry(r).0)));
+            if let Some(name) = name {
+                let pic = icon.or_else(|| e.result.as_deref().and_then(|r| self.inventory_entry(r).2));
+                return (name, e.kind.to_string(), pic);
+            }
+        }
+        (self.cat.name_of(uid), crate::inventory::kind_by_path(uid).to_string(), icon)
     }
 
     pub fn price(&self, slug: Option<&str>, request: bool) -> Option<i64> {
@@ -885,7 +975,7 @@ impl View {
                 "resources": it.components.iter().filter(|c| c.kind == ComponentKind::Resource)
                     .map(|c| json!({"uid": c.uid, "name": c.name, "count": c.count,
                         "have": if self.inv.is_some() || self.manual.counts.contains_key(&c.uid) { Some(self.count(&c.uid)) } else { None },
-                        "image": self.cat.art_by_name(&c.name),
+                        "image": self.icon_of(&c.uid, &c.name),
                         "drops": self.cat.drops.for_name(&c.name, false)}))
                     .collect::<Vec<_>>(),
                 "disposition": it.disposition.map(|d| py_round(d, 3)), "dots": it.dispo_dots,

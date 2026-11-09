@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use serde_json::Value;
 
-use self::image::Rgb;
+use self::image::{Gray, Rgb};
 use self::matcher::{Names, RewardMatch, Word};
 use crate::compositor::which;
 use crate::config::{self, ScreenshotTool};
@@ -80,11 +80,40 @@ pub fn read_rewards(frame: &Rgb, names: &Names) -> Result<(Vec<RewardMatch>, Str
 }
 
 /// The riven card in a frame: weapon, stats and the raw text.
-pub fn read_riven(frame: &Rgb, weapons: &[String]) -> Result<(riven::RivenRead, String)> {
+///
+/// The card the game shows on its own (cycling, the riven's own screen, a fresh roll waiting to
+/// be confirmed) sits in the middle: that area is read first, at each interface scale in
+/// `scales`, so a second card beside it (the old roll on the confirm screen) or the "lock trait"
+/// box cannot mix into the read. Only when no reading there names a weapon and a stat is the
+/// whole frame read, as before.
+pub fn read_riven(frame: &Rgb, weapons: &[String], scales: &[f64]) -> Result<(riven::RivenRead, String)> {
     if which("tesseract").is_none() {
         bail!("tesseract is not installed, so the riven card cannot be read.");
     }
-    // A riven card can sit anywhere, unlike the reward band: read the whole frame.
+    let mut scales: Vec<f64> = scales.to_vec();
+    if scales.is_empty() {
+        scales.push(1.0);
+    }
+    let crops: Vec<Gray> = scales
+        .iter()
+        .filter_map(|&s| riven::card_box(frame.width, frame.height, s))
+        .flat_map(|(x0, y0, x1, y1)| image::riven_card_variants(&frame.crop(x0, y0, x1, y1)))
+        .collect();
+    let reads: Vec<Result<String>> = std::thread::scope(|s| {
+        let jobs: Vec<_> = crops.iter().map(|v| s.spawn(move || tesseract::text(v, 6))).collect();
+        jobs.into_iter().map(|j| j.join().unwrap_or_else(|_| bail!("tesseract thread panicked"))).collect()
+    });
+    let mut best: Option<(riven::RivenRead, String)> = None;
+    for text in reads.into_iter().flatten() {
+        let read = riven::parse(&text, weapons);
+        if read.weapon.is_some() && !read.stats.is_empty() && best.as_ref().is_none_or(|(b, _)| riven::fuller(&read, b))
+        {
+            best = Some((read, text));
+        }
+    }
+    if let Some(found) = best {
+        return Ok(found);
+    }
     let text = tesseract::text(&image::riven_frame(frame), 6)?;
     Ok((riven::parse(&text, weapons), text))
 }

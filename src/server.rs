@@ -269,6 +269,7 @@ fn get_api(s: &Arc<State>, path: &str, q: &HashMap<String, String>) -> Result<Va
     Ok(match path {
         "mastery" => s.view().mastery(),
         "primes" => s.view().primes(),
+        "inventory" => s.view().inventory(),
         "foundry" => {
             let v = s.view();
             let mut items = v.craftable();

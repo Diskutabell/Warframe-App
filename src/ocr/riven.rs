@@ -85,6 +85,9 @@ pub fn stat_after(window: &str) -> Option<&'static str> {
     if let Some((_, stat)) = best {
         return Some(stat);
     }
+    if let Some(stat) = behind_an_icon(words[0]) {
+        return Some(stat);
+    }
     // The card wraps long names, and the wrapped line is what tesseract loses on a busy background:
     // "+57.5% Magazine Capacity" can come out as "+57.5% Magazine". The first word still
     // names the stat if no other wording starts with it - and if it never occurs inside a longer
@@ -97,6 +100,16 @@ pub fn stat_after(window: &str) -> Option<&'static str> {
     let mut owners = WORDING.iter().filter(|(w, _)| w.split(' ').next().is_some_and(close)).map(|(_, s)| *s);
     let stat = owners.next()?;
     owners.all(|s| s == stat).then_some(stat)
+}
+
+/// A damage type's name read with its icon glued on: the card draws the icon right before
+/// "Impact", "Toxin" and the like, and tesseract reads it as letters ("-105% AMlmpact"). The end of
+/// the word must be close to a one-word name.
+fn behind_an_icon(word: &str) -> Option<&'static str> {
+    WORDING.iter().filter(|(w, _)| !w.contains(' ') && w.len() >= 4 && word.len() >= w.len()).find_map(|(w, stat)| {
+        let tail = &word[word.len() - w.len()..];
+        (SequenceMatcher::new(tail, w).ratio() >= 0.8).then_some(*stat)
+    })
 }
 
 fn window_after(blob: &str, end: usize) -> &str {
@@ -149,6 +162,42 @@ pub fn find_weapon(text: &str, weapons: &[String]) -> Option<String> {
         }
     }
     best.filter(|_| score >= 0.82).cloned()
+}
+
+/// Where the text of a riven card shown in the middle of the screen lies, in units of a
+/// 1920x1080 screen at 100% interface scale (see `reward::unit`): the name and the stats below the
+/// card's picture, the card about 280 wide. Measured on the cycling and confirm screens at
+/// 2560x1440 and 85%.
+pub const CARD_HALF_W: f64 = 150.0;
+const CARD_TEXT_TOP: f64 = 70.0;
+const CARD_TEXT_BOTTOM: f64 = 285.0;
+
+/// The grade panel beside such a card, in the same units: its width, how far above the middle
+/// its top sits (level with the top of the card's picture), its height for `rows` stat lines,
+/// and its gap to the card.
+pub const PANEL_W: f64 = 330.0;
+pub const PANEL_TOP: f64 = 95.0;
+pub const PANEL_GAP: f64 = 12.0;
+pub fn panel_height(rows: usize) -> f64 {
+    96.0 + 44.0 * rows.max(1) as f64 + 58.0
+}
+
+/// The pixel box (x0, y0, x1, y1) of that text at `ui_scale`, if it fits on the frame.
+pub fn card_box(width: usize, height: usize, ui_scale: f64) -> Option<(usize, usize, usize, usize)> {
+    let u = super::reward::unit(width as f64, height as f64, ui_scale);
+    let (cx, cy) = (width as f64 / 2.0, height as f64 / 2.0);
+    let x0 = (cx - CARD_HALF_W * u).max(0.0) as usize;
+    let x1 = ((cx + CARD_HALF_W * u) as usize).min(width);
+    let y0 = (cy + CARD_TEXT_TOP * u) as usize;
+    let y1 = ((cy + CARD_TEXT_BOTTOM * u) as usize).min(height);
+    (x1 > x0 + 10 && y1 > y0 + 10).then_some((x0, y0, x1, y1))
+}
+
+/// Whether reading `a` found more of a card than `b`: more stats, then a longer weapon name
+/// ("Kuva Bramma" over "Bramma" when one reading lost a word).
+pub fn fuller(a: &RivenRead, b: &RivenRead) -> bool {
+    let len = |r: &RivenRead| r.weapon.as_ref().map_or(0, |w| w.chars().count());
+    (a.stats.len(), len(a)) > (b.stats.len(), len(b))
 }
 
 /// Pulls the weapon and its rolled stats out of OCR'd riven-card text.
@@ -229,6 +278,16 @@ mod tests {
         assert_eq!(stat_after("Chance"), None);
         assert_eq!(stat_after("Reload - ."), None);
         assert_eq!(stat_after("Punch ~"), Some("Punch Through"));
+    }
+
+    #[test]
+    fn a_damage_types_icon_glued_to_its_name() {
+        // The Kuva Bramma card of 2026-10-25: tesseract read the impact icon as letters.
+        let r = parse("+65% Fire Rate (x2 for\nBows)\nN, 0-105% AMlmpact /", &[]);
+        let got: Vec<(&str, f64)> = r.stats.iter().map(|s| (s.stat, s.value)).collect();
+        assert_eq!(got, [("Fire Rate / Attack Speed", 65.0), ("Impact Damage", -105.0)]);
+        assert_eq!(stat_after("Mmpact"), Some("Impact Damage"));
+        assert_eq!(stat_after("Capacity"), None);
     }
 
     #[test]

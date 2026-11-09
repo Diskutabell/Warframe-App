@@ -118,6 +118,7 @@ const PATHS = {
   refresh: "M20 11a8 8 0 1 0-2.3 5.7 M20 4v7h-7",
   standing: "M12 3l7 3v5c0 4.6-3 8.2-7 10-4-1.8-7-5.4-7-10V6z M8.5 12.5l2.4 2.4 4.6-4.8",
   down: "M6 9l6 6 6-6",
+  inventory: "M4 8l8-4 8 4v9l-8 4-8-4z M4 8l8 4 8-4 M12 12v9",
 };
 export const icon = (name, cls = "") => `<svg class="ic ${cls}" viewBox="0 0 24 24" aria-hidden="true"><path d="${PATHS[name] || ""}"/></svg>`;
 export function hydrateIcons(root = document) {
@@ -146,7 +147,7 @@ export function partPips(parts) {
 // The picture area of each .art size in css/app.css: the box minus its 1 px border.
 const ART_PX = { sm: 30, lg: 70, xl: 102 };
 export const art = (src, cls = "") => (src
-  ? `<img class="art ${cls}" loading="lazy" alt="" src="${esc(artUrl(src, ART_PX[cls] || 42))}" onerror="imgFail(this)" onload="imgDone(this)">`
+  ? `<img class="art ${cls}" loading="lazy" decoding="async" alt="" src="${esc(artUrl(src, ART_PX[cls] || 42))}" onerror="imgFail(this)" onload="imgDone(this)">`
   : `<div class="art ${cls}"></div>`);
 
 export const STATUS = { mastered: "Mastered", leveling: "Leveling", missing: "Not levelled" };

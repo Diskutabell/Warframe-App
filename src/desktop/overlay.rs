@@ -17,21 +17,12 @@ use super::Backend;
 use crate::compositor::{self, Rect};
 use crate::config::PanelPosition;
 use crate::ocr::reward;
-use crate::rivens::Graded;
+use crate::ocr::riven as riven_card;
+use crate::rivens::{self, Graded};
 use crate::state::{RewardItem, RewardResult, RivenResult, State};
 
 const CSS: &str = r#"
 window.wfp-overlay { background-color: transparent; }
-.wfp-panel { background-color: rgba(8, 10, 14, 0.93); border: 1px solid #2d4150; border-left: 3px solid #d4b26a; border-radius: 4px; padding: 14px 16px; }
-.wfp-weapon { font-family: "Rajdhani", sans-serif; font-weight: 700; font-size: 23px; color: #eeeeee; }
-.wfp-dots { color: #d4b26a; font-size: 15px; }
-.wfp-stat { font-family: "Source Sans 3", sans-serif; font-size: 16px; color: #eeeeee; }
-.wfp-row { border-top: 1px solid #1e2b36; padding: 6px 0; }
-.wfp-grade { font-family: "Rajdhani", sans-serif; font-weight: 700; font-size: 17px; }
-.wfp-grade.a { color: #8ce39a; } .wfp-grade.b { color: #d4b26a; } .wfp-grade.c { color: #e2895f; }
-.wfp-muted { font-family: "Source Sans 3", "Noto Sans", sans-serif; font-size: 13px; color: #a3b0b8; }
-.wfp-warn { color: #e2895f; font-size: 13px; }
-.wfp-foot { color: #6d7b88; font-size: 11.5px; }
 "#;
 
 /// The price panels' style for `u` pixels per unit of the reward screen, so they match the size
@@ -49,7 +40,21 @@ fn panel_css(u: f64) -> String {
          .wfp-plat.none {{ color: #6f7d89; }}\n\
          .wfp-ducats {{ font-family: \"Rajdhani\", sans-serif; font-weight: 600; font-size: {ducats}; color: #c9aa65; }}\n\
          .wfp-info {{ font-family: \"Source Sans 3\", \"Noto Sans\", sans-serif; font-size: {info}; color: #8a99a6; }}\n\
-         .wfp-error {{ font-family: \"Source Sans 3\", \"Noto Sans\", sans-serif; font-size: {info}; color: #e2895f; }}\n",
+         .wfp-error {{ font-family: \"Source Sans 3\", \"Noto Sans\", sans-serif; font-size: {info}; color: #e2895f; }}\n\
+         .wfp-riven {{ background-color: rgba(8, 12, 17, 0.97); border: 1px solid rgba(150, 170, 186, 0.3); \
+           border-top: {accent} solid #9a80e8; border-radius: {radius}; padding: {pad_h}; }}\n\
+         .wfp-weapon {{ font-family: \"Rajdhani\", sans-serif; font-weight: 700; font-size: {weapon}; color: #eeeae0; }}\n\
+         .wfp-sub {{ font-family: \"Source Sans 3\", \"Noto Sans\", sans-serif; font-size: {info}; color: #8a99a6; }}\n\
+         .wfp-overall {{ font-family: \"Rajdhani\", sans-serif; font-weight: 700; font-size: {overall}; \
+           border-radius: {radius}; padding: 0 {tag_pad}; color: #0b1016; }}\n\
+         .wfp-overall.a {{ background-color: #8ce39a; }} .wfp-overall.b {{ background-color: #d9b45a; }} \
+         .wfp-overall.c {{ background-color: #e2895f; }}\n\
+         .wfp-stat {{ font-family: \"Source Sans 3\", \"Noto Sans\", sans-serif; font-size: {stat}; color: #e9e4d6; }}\n\
+         .wfp-grade {{ font-family: \"Rajdhani\", sans-serif; font-weight: 700; font-size: {grade}; }}\n\
+         .wfp-grade.a {{ color: #8ce39a; }} .wfp-grade.b {{ color: #d9b45a; }} .wfp-grade.c {{ color: #e2895f; }}\n\
+         .wfp-dev {{ font-family: \"Rajdhani\", sans-serif; font-weight: 600; font-size: {info}; color: #8a99a6; }}\n\
+         .wfp-rule {{ border-top: 1px solid rgba(150, 170, 186, 0.18); padding-top: {pad_v}; }}\n\
+         .wfp-price {{ font-family: \"Rajdhani\", sans-serif; font-weight: 700; font-size: {ducats}; color: #f1d58b; }}\n",
         radius = px(3.0),
         pad_v = px(5.0),
         pad_h = px(9.0),
@@ -59,11 +64,13 @@ fn panel_css(u: f64) -> String {
         price = px(27.0),
         ducats = px(16.0),
         info = px(13.0),
+        accent = px(3.0),
+        weapon = px(21.0),
+        overall = px(20.0),
+        stat = px(15.0),
+        grade = px(17.0),
     )
 }
-
-const DOTS: [&str; 6] = ["", "●○○○○", "●●○○○", "●●●○○", "●●●●○", "●●●●●"];
-const RIVEN_W: i32 = 470;
 
 fn escape(s: &str) -> String {
     glib::markup_escape_text(s).to_string()
@@ -489,80 +496,203 @@ impl Overlays {
 
     // ------------------------------------------------------------ the riven panel
 
-    pub fn show_riven(&self, r: &RivenResult) {
+    /// The grades beside the riven card, which the game draws in the middle of the screen; the
+    /// panel matches the price panels and is sized with the card. `fresh` is false when only the
+    /// market listings arrived, which must not bring back a panel that has timed out.
+    pub fn show_riven(&self, r: &RivenResult, fresh: bool) {
+        let panel = self.panel(&self.riven, "warframeproject-riven", true);
+        if !fresh && !panel.visible() {
+            return;
+        }
         let s = self.state.settings();
-        let panel = self.panel(&self.riven, "warframeproject-riven", false);
+        let scale = self.state.ui_scales().first().copied().unwrap_or(1.0);
+        let g = self.game_rect();
+        let u = reward::unit(g.width as f64, g.height as f64, scale);
+        let text_u = u.max(0.75);
+        self.style_panels(text_u);
         panel.clear();
-        let card = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        card.style_context().add_class("wfp-panel");
+        let card = gtk::Box::new(gtk::Orientation::Vertical, (6.0 * text_u) as i32);
+        card.style_context().add_class("wfp-riven");
         card.set_vexpand(true);
-        let top = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        top.add(&label(r.weapon.as_deref().unwrap_or("Riven"), "wfp-weapon"));
-        if let Some(d) = r.disposition {
-            let dots = DOTS.get(r.dots.unwrap_or(0) as usize).copied().unwrap_or("");
-            let l = label(&format!("{dots} {d}×"), "wfp-dots");
-            l.set_hexpand(true);
-            l.set_xalign(1.0);
-            top.add(&l);
+
+        let top = gtk::Box::new(gtk::Orientation::Horizontal, (8.0 * text_u) as i32);
+        if let Some(pic) = r.image.as_deref().and_then(|url| self.art(url, (40.0 * text_u) as i32)) {
+            top.add(&gtk::Image::from_pixbuf(Some(&pic)));
+        }
+        let names = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let weapon = label(r.weapon.as_deref().unwrap_or("Riven"), "wfp-weapon");
+        weapon.set_ellipsize(pango::EllipsizeMode::End);
+        names.add(&weapon);
+        let sub = match (&r.error, r.positives, r.negatives) {
+            (Some(_), _, _) => "Riven".to_string(),
+            (None, Some(p), Some(n)) => {
+                let mut t = format!("{p} positives{}", if n > 0 { " + 1 negative" } else { "" });
+                match r.unread {
+                    0 => {}
+                    1 => t.push_str(" · 1 not readable"),
+                    k => t.push_str(&format!(" · {k} not readable")),
+                }
+                t
+            }
+            _ => String::new(),
+        };
+        names.add(&label(&sub, "wfp-sub"));
+        names.set_hexpand(true);
+        top.add(&names);
+        if let Some(grade) = r.overall {
+            let badge = label(grade, "wfp-overall");
+            badge.style_context().add_class(grade_class(grade));
+            badge.set_valign(gtk::Align::Center);
+            badge.set_tooltip_text(Some("The average roll"));
+            top.add(&badge);
         }
         card.add(&top);
-        let rows = if let Some(err) = &r.error {
-            card.add(&label(err, "wfp-muted"));
-            1
+
+        if let Some(err) = &r.error {
+            card.add(&wrapped(err, "wfp-error"));
         } else {
-            let (p, n) = (r.positives.unwrap_or(0), r.negatives.unwrap_or(0));
-            let plural = if p == 1 { "" } else { "s" };
-            let unread = match r.unread {
-                0 => String::new(),
-                1 => " · 1 stat not readable".to_string(),
-                k => format!(" · {k} stats not readable"),
-            };
-            card.add(&label(
-                &format!("{p} positive{plural}{}{unread}", if n > 0 { " + negative" } else { "" }),
-                "wfp-muted",
-            ));
             for g in &r.stats {
-                card.add(&stat_row(g));
+                card.add(&stat_row(g, text_u));
             }
             if r.stats.iter().any(|g| g.out_of_range) {
-                card.add(&label("Values outside ±10%: the stat count or weapon looks wrong.", "wfp-warn"));
+                card.add(&wrapped(
+                    "Some values are outside the ±10% a roll can land in: a stat was misread.",
+                    "wfp-error",
+                ));
             }
             if r.stats.iter().any(|g| g.sign_conflict) {
-                card.add(&label("A stat shows a sign it cannot roll with: the sign was misread.", "wfp-warn"));
+                card.add(&wrapped("A stat shows a sign it cannot roll with: the sign was misread.", "wfp-error"));
             }
-            card.add(&label("Grades compare the roll with an average roll, not with what is useful.", "wfp-foot"));
-            r.stats.len().max(1) as i32
-        };
+            card.add(&self.riven_prices(r, text_u));
+        }
         panel.body.add(&card);
 
-        // Beside the card, which the game draws centred.
-        let g = self.game_rect();
-        let h = 118 + 40 * rows;
-        let mut x = g.x + (g.width as f64 * s.riven_overlay_x_percent / 100.0) as i32;
-        let mut y = g.y + (g.height as f64 * s.riven_overlay_y_percent / 100.0) as i32 - h / 2;
-        x = x.min(g.x + g.width - RIVEN_W - 20);
-        y = y.min(g.y + g.height - h - 20).max(g.y + 20);
-        panel.show(self.backend, Rect { x, y, width: RIVEN_W, height: h }, s.riven_overlay_seconds.max(5));
+        // Beside the card, clear of the "fits in" box further right.
+        let (cx, cy) = (g.x as f64 + g.width as f64 / 2.0, g.y as f64 + g.height as f64 / 2.0);
+        let width = (riven_card::PANEL_W * text_u).round() as i32;
+        let rows = if r.error.is_some() { 1 } else { r.stats.len() };
+        let height = (riven_card::panel_height(rows) * text_u).round() as i32;
+        let beside = riven_card::CARD_HALF_W + riven_card::PANEL_GAP;
+        let x = ((cx + beside * u).round() as i32).min(g.x + g.width - width - 8);
+        let y = ((cy - riven_card::PANEL_TOP * u).round() as i32).min(g.y + g.height - height - 8).max(g.y + 8);
+        let rect = Rect { x, y, width, height };
+        if fresh {
+            panel.show(self.backend, rect, s.riven_overlay_seconds.max(5));
+        } else {
+            panel.place(self.backend, rect);
+            panel.window.show_all();
+        }
+    }
+
+    /// What such rivens fetch: listings with the same positives on warframe.market (looked up
+    /// after the grades are shown) and the weapon's recent trades.
+    fn riven_prices(&self, r: &RivenResult, u: f64) -> gtk::Box {
+        let block = gtk::Box::new(gtk::Orientation::Vertical, (3.0 * u) as i32);
+        block.style_context().add_class("wfp-rule");
+        let line = gtk::Box::new(gtk::Orientation::Horizontal, (5.0 * u) as i32);
+        if let Some(icon) = self.icon("platinum", (17.0 * u) as i32) {
+            line.add(&gtk::Image::from_pixbuf(Some(&icon)));
+        }
+        match (&r.market, &r.market_error) {
+            (Some(m), _) if m.count > 0 => {
+                line.add(&label(&format!("{}", m.lowest.unwrap_or(0)), "wfp-price"));
+                let more = match (m.median, m.lowest_online) {
+                    (Some(med), Some(on)) => format!("lowest · {med} median · {on} in game · {} listed", m.count),
+                    (Some(med), None) => format!("lowest · {med} median · {} listed", m.count),
+                    _ => format!("lowest · {} listed", m.count),
+                };
+                let l = label(&more, "wfp-sub");
+                l.set_ellipsize(pango::EllipsizeMode::End);
+                line.add(&l);
+            }
+            (Some(_), _) => line.add(&label("No listings with these positives", "wfp-sub")),
+            (None, Some(_)) => line.add(&label("warframe.market did not answer", "wfp-sub")),
+            (None, None) => line.add(&label("Looking up listings…", "wfp-sub")),
+        }
+        block.add(&line);
+        block.add(&label("warframe.market, same weapon and positives", "wfp-sub"));
+        let median = |kind: &str| r.traded.as_ref().and_then(|t| t[kind]["median"].as_f64());
+        let sold = match (median("unrolled"), median("rerolled")) {
+            (Some(a), Some(b)) => Some(format!("Sold lately: {a:.0} unrolled · {b:.0} rerolled")),
+            (Some(a), None) => Some(format!("Sold lately: {a:.0} unrolled")),
+            (None, Some(b)) => Some(format!("Sold lately: {b:.0} rerolled")),
+            (None, None) => None,
+        };
+        if let Some(sold) = sold {
+            block.add(&label(&sold, "wfp-sub"));
+        }
+        block
+    }
+
+    /// An item picture from the art cache, if it is there: the overlay never waits for a download.
+    fn art(&self, url: &str, px: i32) -> Option<gdk_pixbuf::Pixbuf> {
+        let art = crate::art::cached(url, 128)?;
+        let stream = gio::MemoryInputStream::from_bytes(&glib::Bytes::from_owned(art.bytes));
+        gdk_pixbuf::Pixbuf::from_stream_at_scale(&stream, px, px, true, gio::Cancellable::NONE).ok()
     }
 }
 
-fn stat_row(g: &Graded) -> gtk::Box {
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-    row.style_context().add_class("wfp-row");
-    let sign = if g.negative { "−" } else { "+" };
-    let stat = markup(&format!("{sign}<b>{}</b> {}", g.value.abs(), escape(g.stat)), "wfp-stat");
-    stat.set_hexpand(true);
-    row.add(&stat);
-    let grade = label(g.grade, "wfp-grade");
-    grade.style_context().add_class(match g.grade.chars().next() {
+fn grade_class(grade: &str) -> &'static str {
+    match grade.chars().next() {
         Some('A') => "a",
         Some('B') => "b",
         _ => "c",
-    });
-    row.add(&grade);
-    let dev = label(&format!("{}{:.2}%", if g.deviation > 0.0 { "+" } else { "" }, g.deviation), "wfp-muted");
-    dev.set_width_chars(8);
-    dev.set_xalign(1.0);
-    row.add(&dev);
+    }
+}
+
+fn wrapped(text: &str, class: &str) -> gtk::Label {
+    let l = label(text, class);
+    l.set_line_wrap(true);
+    l.set_max_width_chars(40);
+    l
+}
+
+/// One stat: its grade, the value as the card shows it, how far it is from an average roll, and
+/// a bar showing where in the roll window (90-110% of the average) it landed.
+fn stat_row(g: &Graded, u: f64) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Vertical, (3.0 * u) as i32);
+    row.style_context().add_class("wfp-rule");
+    let line = gtk::Box::new(gtk::Orientation::Horizontal, (8.0 * u) as i32);
+    let grade = label(g.grade, "wfp-grade");
+    grade.style_context().add_class(grade_class(g.grade));
+    grade.set_width_chars(2);
+    line.add(&grade);
+    let sign = if g.negative { "−" } else { "+" };
+    let unit = rivens::stat(g.stat).map_or("", |s| s.unit.suffix());
+    let stat = markup(&format!("{sign}<b>{}{unit}</b> {}", g.value.abs(), escape(g.stat)), "wfp-stat");
+    stat.set_hexpand(true);
+    stat.set_ellipsize(pango::EllipsizeMode::End);
+    line.add(&stat);
+    line.add(&label(&format!("{}{:.1}%", if g.deviation > 0.0 { "+" } else { "" }, g.deviation), "wfp-dev"));
+    row.add(&line);
+    row.add(&roll_bar(g, u));
     row
+}
+
+/// The roll window as a track, with a mark where this roll landed; better rolls sit right.
+fn roll_bar(g: &Graded, u: f64) -> gtk::DrawingArea {
+    let bar = gtk::DrawingArea::new();
+    bar.set_size_request(-1, (5.0 * u).max(3.0) as i32);
+    // deviation runs from -10 (worst) to +10 (best).
+    let at = ((g.deviation + 10.0) / 20.0).clamp(0.0, 1.0);
+    let colour = match grade_class(g.grade) {
+        "a" => (0.55, 0.89, 0.60),
+        "b" => (0.85, 0.71, 0.35),
+        _ => (0.89, 0.54, 0.37),
+    };
+    bar.connect_draw(move |w, cr| {
+        let (width, height) = (w.allocated_width() as f64, w.allocated_height() as f64);
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.08);
+        cr.rectangle(0.0, 0.0, width, height);
+        let _ = cr.fill();
+        cr.set_source_rgb(colour.0, colour.1, colour.2);
+        cr.rectangle(0.0, 0.0, width * at, height);
+        let _ = cr.fill();
+        // The average roll.
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.35);
+        cr.rectangle(width / 2.0 - 0.5, 0.0, 1.0, height);
+        let _ = cr.fill();
+        glib::Propagation::Proceed
+    });
+    bar
 }

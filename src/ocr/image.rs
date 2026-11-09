@@ -271,6 +271,15 @@ pub fn name_variants(band: &Rgb) -> [Gray; 4] {
 }
 
 /// The whole frame for a riven card, which can sit anywhere: grey, stretched, enlarged 1.5x.
+/// The middle of a riven card, as dark text on white at twice the size: the card's text is a pale
+/// lilac on a dark body. Plain brightness, and the same thresholded, which drops the faint pattern
+/// of the card's body that tesseract otherwise reads as letters.
+pub fn riven_card_variants(card: &Rgb) -> [Gray; 2] {
+    let grey = card.luma().autocontrast();
+    let big = grey.resize_bicubic(grey.width * 2, grey.height * 2);
+    [big.invert(), big.threshold(110).invert()]
+}
+
 pub fn riven_frame(frame: &Rgb) -> Gray {
     let grey = frame.luma().autocontrast();
     grey.resize_bicubic(grey.width * 3 / 2, grey.height * 3 / 2)

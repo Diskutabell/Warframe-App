@@ -18,11 +18,36 @@ function spareRows(rows) {
 
 function checkRows(rows) {
   return rows.map((r) => `<tr>
-      <td><a href="https://warframe.market/items/${esc(r.slug)}" target="_blank" rel="noopener">${esc(r.name)}</a>
-        <a class="muted" href="https://wiki.warframe.com/w/${encodeURIComponent(r.name.replace(/ /g, "_"))}" target="_blank" rel="noopener" title="Find ${esc(r.name)} on the Warframe Wiki"> · sources</a></td>
+      <td><div class="row">${art(r.image, "sm")}<div><a href="https://warframe.market/items/${esc(r.slug)}" target="_blank" rel="noopener">${esc(r.name)}</a>
+        <a class="muted" href="https://wiki.warframe.com/w/${encodeURIComponent(r.name.replace(/ /g, "_"))}" target="_blank" rel="noopener" title="Find ${esc(r.name)} on the Warframe Wiki"> · sources</a></div></div></td>
       <td class="r">${r.sell != null ? plat(r.sell) : `<span class="faint">…</span>`}</td>
       <td class="r">${r.buy != null ? plat(r.buy) : `<span class="faint">…</span>`}</td>
       <td class="r">${r.ducats ? duc(r.ducats) : ""}</td></tr>`).join("") || `<tr><td colspan="4" class="muted">Nothing on warframe.market matches.</td></tr>`;
+}
+
+const UNITS = { "Punch Through": "m", "Combo Duration": "s", "Initial Combo": "" };
+const gradeClass = (g) => (g?.[0] === "A" ? "a" : g?.[0] === "B" ? "b" : "c");
+
+/** The last riven the hotkey read: the same grades and prices as the panel over the game. */
+function rivenCard(r) {
+  if (!r || (!r.weapon && !r.error)) {
+    return `<div class="empty"><b>No riven read yet</b>Open a riven in the game so its card shows (cycling it, or its own screen) and press the riven hotkey (F10 unless you changed it in Settings).</div>`;
+  }
+  if (r.error) return `<div class="callout">${esc(r.error)}</div>`;
+  const m = r.market;
+  const med = (k) => r.traded?.[k]?.median;
+  return `<div class="riv-head">${art(r.image, "lg")}<div class="grow"><div class="riv-weapon">${esc(r.weapon)}</div>
+      <div class="muted">${r.positives} positives${r.negatives ? " + 1 negative" : ""}${r.unread ? ` · ${r.unread} not readable` : ""} · ${esc(new Date(r.t * 1000).toLocaleString())}</div></div>
+      ${r.overall ? `<span class="riv-overall ${gradeClass(r.overall)}" title="The average roll">${esc(r.overall)}</span>` : ""}</div>
+    <div class="riv-stats">${r.stats.map((g) => `<div class="riv-stat"><span class="riv-grade ${gradeClass(g.grade)}">${esc(g.grade)}</span>
+      <span class="grow">${g.negative ? "−" : "+"}<b>${Math.abs(g.value)}${UNITS[g.stat] ?? "%"}</b> ${esc(g.stat)}</span><span class="muted num">${g.deviation > 0 ? "+" : ""}${g.deviation.toFixed(1)}%</span>
+      <div class="riv-roll ${gradeClass(g.grade)}"><i style="width:${Math.max(0, Math.min(100, (g.deviation + 10) * 5))}%"></i></div></div>`).join("")}</div>
+    <div class="tiles" style="margin-top:12px">
+      <div class="tile"><b>${m?.count ? plat(m.lowest) : "–"}</b><span>${m ? `lowest of ${fmt(m.count)} listed with these positives` : r.marketError ? "warframe.market did not answer" : "looking up listings…"}</span></div>
+      <div class="tile"><b>${m?.median != null ? plat(m.median) : "–"}</b><span>median listing</span></div>
+      <div class="tile"><b>${med("rerolled") != null ? plat(Math.round(med("rerolled"))) : "–"}</b><span>sold lately, rerolled</span></div>
+      <div class="tile"><b>${med("unrolled") != null ? plat(Math.round(med("unrolled"))) : "–"}</b><span>sold lately, unrolled</span></div></div>
+    ${m?.url ? `<p style="margin:10px 0 0"><a href="${esc(m.url)}" target="_blank" rel="noopener">See these listings on warframe.market</a></p>` : ""}`;
 }
 
 export default {
@@ -30,7 +55,7 @@ export default {
   title: "Market",
   icon: "market",
   async render(view, params, app) {
-    const d = await api("trade");
+    const [d, riven] = await Promise.all([api("trade"), api("riven/result").catch(() => null)]);
     if (d.loading) { setTimeout(() => app.refresh(), 2500); throw new Error("Downloading game data…"); }
     const rows = d.rows;
     const platTotal = rows.reduce((a, r) => a + (r.price || 0) * r.spare, 0);
@@ -57,7 +82,8 @@ export default {
             <thead><tr><th>Item</th><th class="r">Sell</th><th class="r">Buy</th><th class="r">Ducats</th></tr></thead>
             <tbody id="check"><tr><td colspan="4" class="muted">Type two letters or more.</td></tr></tbody></table></div>
         </div>
-      </div></div>`;
+      </div>
+      <div class="card" style="margin-top:16px"><div class="card-head"><h2>Last riven</h2></div>${rivenCard(riven)}</div></div>`;
     for (const b of view.querySelectorAll("#sort button")) {
       b.onclick = () => {
         st.sort = b.dataset.v;

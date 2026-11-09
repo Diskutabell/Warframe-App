@@ -224,6 +224,9 @@ pub struct Catalog {
     pub syndicates: crate::standing::Syndicates,
     /// Reward and enemy blueprint sources indexed by the exact item name.
     pub drops: crate::drops::Drops,
+    /// Names, icons and kinds of everything an inventory holds (`inventory.rs`). Empty until the
+    /// export has been downloaded once.
+    pub inventory: HashMap<String, crate::inventory::Entry>,
     pub loaded_at: Option<f64>,
 }
 
@@ -232,14 +235,17 @@ pub fn image_url(image: Option<&str>) -> Option<String> {
 }
 
 /// Downloads (or revalidates) every file and builds the catalog.
+// One download per source, all side by side; the tuple names what each thread fetched.
+#[allow(clippy::type_complexity)]
 pub fn load(force: bool) -> Result<Catalog> {
     let names: Vec<&str> = MASTERY_FILES.iter().chain(EXTRA_FILES.iter()).copied().collect();
     let regions_path = config::dirs().cache.join("regions.json");
-    let (raw, mods, recipes, regions, syndicates, drops): (
+    let (raw, mods, recipes, regions, syndicates, drops, held): (
         Vec<Result<Value>>,
         Result<Value>,
         Result<Value>,
         Result<Value>,
+        Vec<Result<Value>>,
         Vec<Result<Value>>,
         Vec<Result<Value>>,
     ) = std::thread::scope(|s| {
@@ -269,6 +275,10 @@ pub fn load(force: bool) -> Result<Catalog> {
                 })
             })
             .collect();
+        let held: Vec<_> = crate::inventory::EXPORTS
+            .iter()
+            .map(|f| s.spawn(move || download_to(&format!("{EXPORT_URL}{f}"), &config::dirs().cache.join(f), force)))
+            .collect();
         let panicked = || Err(anyhow!("download thread panicked"));
         (
             jobs.into_iter().map(|j| j.join().unwrap_or_else(|_| panicked())).collect(),
@@ -277,6 +287,7 @@ pub fn load(force: bool) -> Result<Catalog> {
             regions.join().unwrap_or_else(|_| panicked()),
             syndicates.into_iter().map(|j| j.join().unwrap_or_else(|_| panicked())).collect(),
             drops.into_iter().map(|j| j.join().unwrap_or_else(|_| panicked())).collect::<Vec<_>>(),
+            held.into_iter().map(|j| j.join().unwrap_or_else(|_| panicked())).collect::<Vec<_>>(),
         )
     });
     let mut files = IndexMap::new();
@@ -325,6 +336,21 @@ pub fn load(force: bool) -> Result<Catalog> {
                 syndicates.iter().filter_map(|r| r.as_ref().err()).map(|e| format!("{e:#}")).collect();
             eprintln!("syndicate data unavailable: {}", why.join("; "));
         }
+    }
+    // The inventory page names what it can without it.
+    if let Some(Ok(dict)) = syndicates.get(1) {
+        let exports: Vec<(&str, &Value)> = crate::inventory::EXPORTS
+            .iter()
+            .zip(&held)
+            .filter_map(|(f, r)| match r {
+                Ok(v) => Some((*f, v)),
+                Err(e) => {
+                    eprintln!("{f} unavailable, the inventory page names less: {e:#}");
+                    None
+                }
+            })
+            .collect();
+        catalog.inventory = crate::inventory::index(&exports, files.get("ExportRecipes"), dict);
     }
     catalog.loaded_at = Some(now());
     Ok(catalog)
@@ -991,6 +1017,7 @@ pub fn build(raw: &IndexMap<String, Value>) -> Catalog {
         node_xp: HashMap::new(),
         syndicates: crate::standing::Syndicates::default(),
         drops: crate::drops::Drops::default(),
+        inventory: HashMap::new(),
         loaded_at: None,
     }
 }

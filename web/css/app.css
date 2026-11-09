@@ -40,7 +40,9 @@ html, body { margin: 0; height: 100%; }
 body {
   font: 15px/1.45 var(--body);
   color: var(--text);
-  background: radial-gradient(1200px 600px at 70% -10%, #13202b 0%, var(--bg) 60%) fixed, var(--bg);
+  /* Not "fixed": the page scrolls inside #view, and a fixed background is repainted on every
+     scrolled frame. */
+  background: radial-gradient(1200px 600px at 70% -10%, #13202b 0%, var(--bg) 60%), var(--bg);
   display: grid;
   grid-template-columns: var(--rail) 1fr;
   overflow: hidden;
@@ -88,7 +90,8 @@ kbd { font: 600 11px/1 var(--body); color: var(--faint); border: 1px solid var(-
 .dot.gold { background: var(--gold); box-shadow: 0 0 0 3px var(--gold-bg); }
 
 /* ------------------------------------------------------------------ page */
-#view { overflow-y: auto; padding: 26px 34px 60px; min-width: 0; outline: none; }
+/* Its own compositing layer, so a scroll moves already painted tiles instead of repainting. */
+#view { overflow-y: auto; padding: 26px 34px 60px; min-width: 0; outline: none; will-change: transform; overscroll-behavior: contain; }
 .page { max-width: 1480px; margin: 0 auto; animation: fade .18s ease-out; }
 @keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 .page-head { display: flex; align-items: flex-end; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
@@ -461,3 +464,50 @@ a.list-row.plain { color: inherit; text-decoration: none; }
 details.more { margin-top: 10px; }
 details.more summary { cursor: pointer; color: var(--muted); font-size: 13px; padding: 6px 0; }
 details.more summary:hover { color: var(--text); }
+
+/* ------------------------------------------------------------------ inventory */
+.cur-row { margin-bottom: 16px; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
+.tile.cur { display: flex; align-items: center; gap: 12px; }
+.tile.cur img { width: 26px; height: 26px; object-fit: contain; }
+.tile.cur b { font-size: 22px; }
+.tile.cur span { color: var(--muted); font-size: 12.5px; }
+.kind-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: -4px 0 16px; }
+.kind-chips .chip { font: 600 13px/1.2 var(--display); letter-spacing: .03em; padding: 6px 10px; }
+.kind-chips .chip span { color: var(--faint); font-weight: 600; }
+.kind-chips .chip.on { background: var(--panel-2); border-color: rgba(212, 178, 106, .45); color: var(--gold-2); }
+.inv-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 8px; }
+.inv-tile { display: flex; align-items: center; gap: 12px; padding: 8px 12px 8px 8px; min-width: 0; text-align: left;
+  border-radius: var(--radius); background: var(--panel); border: 1px solid var(--line); font: inherit; color: inherit; line-height: normal; }
+.inv-tile.click { cursor: pointer; }
+.inv-tile.click:hover { border-color: var(--line-2); background: var(--panel-2); }
+.inv-pic { width: 52px; height: 52px; flex: none; object-fit: contain; border-radius: 5px; background: #0d151c; }
+.inv-pic.none { display: block; background: #0d151c url("../icons/endo.png") center / 22px no-repeat; opacity: .35; }
+.inv-body { flex: 1; min-width: 0; display: grid; gap: 3px; }
+.inv-name { font: 600 15px/1.2 var(--display); letter-spacing: .02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
+.inv-meta { display: flex; gap: 10px; align-items: baseline; font-size: 12.5px; }
+.inv-kind { color: var(--faint); }
+.inv-count { font: 700 20px/1 var(--display); color: var(--text-2); font-variant-numeric: tabular-nums; }
+
+/* Resource rows (recipes, farming totals): the resource's own icon and how far along it is. */
+.res-row { align-items: center; }
+.res-pic { width: 34px; height: 34px; flex: none; object-fit: contain; border-radius: 5px; background: #0d151c; }
+.res-row .bar { max-width: 260px; margin-top: 5px; }
+.bar.warn i { background: linear-gradient(90deg, #a5583a, var(--warn)); }
+
+/* Fissures: the codex's scene for the mission type. */
+.fis .what { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.fis .scene { width: 54px; height: 36px; flex: none; object-fit: cover; border-radius: 4px; opacity: .9; }
+
+/* The last riven read (Market page). */
+.riv-head { display: flex; align-items: center; gap: 14px; margin-bottom: 10px; }
+.riv-weapon { font: 700 22px/1.1 var(--display); letter-spacing: .02em; }
+.riv-overall, .riv-grade { font: 700 18px/1 var(--display); }
+.riv-overall { padding: 6px 9px; border-radius: 5px; color: #0b1016; }
+.riv-overall.a { background: var(--good); } .riv-overall.b { background: var(--gold); } .riv-overall.c { background: var(--warn); }
+.riv-grade { width: 2.2em; }
+.riv-grade.a { color: var(--good); } .riv-grade.b { color: var(--gold); } .riv-grade.c { color: var(--warn); }
+.riv-stats { display: grid; gap: 2px; }
+.riv-stat { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; padding: 7px 0; border-top: 1px solid #1a2732; }
+.riv-roll { flex-basis: 100%; height: 4px; border-radius: 4px; background: #1e2c38; overflow: hidden; }
+.riv-roll i { display: block; height: 100%; }
+.riv-roll.a i { background: var(--good); } .riv-roll.b i { background: var(--gold); } .riv-roll.c i { background: var(--warn); }

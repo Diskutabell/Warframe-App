@@ -15,6 +15,7 @@ mod drops;
 mod eelog;
 mod gamedata;
 mod history;
+mod inventory;
 mod market;
 mod memscan;
 mod net;
@@ -275,18 +276,18 @@ fn replay(frames: &[PathBuf], riven: bool, scale: Option<f64>) -> Result<()> {
     #[cfg(windows)]
     compositor::unpack_tesseract()?;
     let catalog = gamedata::load(false).context("the game data is needed to know what to look for")?;
-    if riven {
-        for frame in frames {
-            replay_riven(&catalog, frame)?;
-        }
-        return Ok(());
-    }
-    let names = ocr::matcher::Names::new(&catalog.reward_names());
     // The scale the frames were taken at: as given, else the game's own now, else any.
     let scales: Vec<f64> = match scale {
         Some(percent) => vec![percent / 100.0],
         None => eelog::find_ee_log_now().and_then(|log| eelog::ui_scale(&log)).into_iter().collect(),
     };
+    if riven {
+        for frame in frames {
+            replay_riven(&catalog, frame, &scales)?;
+        }
+        return Ok(());
+    }
+    let names = ocr::matcher::Names::new(&catalog.reward_names());
     if let [frame] = frames {
         return replay_rewards(frame, &names, &scales);
     }
@@ -318,10 +319,10 @@ fn replay(frames: &[PathBuf], riven: bool, scale: Option<f64>) -> Result<()> {
     Ok(())
 }
 
-fn replay_riven(catalog: &gamedata::Catalog, frame: &std::path::Path) -> Result<()> {
+fn replay_riven(catalog: &gamedata::Catalog, frame: &std::path::Path, scales: &[f64]) -> Result<()> {
     let image = ocr::screenshot::load(frame)?;
     let started = Instant::now();
-    let (read, text) = ocr::read_riven(&image, &catalog.riven_weapons())?;
+    let (read, text) = ocr::read_riven(&image, &catalog.riven_weapons(), scales)?;
     println!("weapon: {}", read.weapon.as_deref().unwrap_or("(none)"));
     let item = read.weapon.as_deref().and_then(|w| catalog.item_by_name(w));
     let readings: Vec<(&str, f64, bool)> = read.stats.iter().map(|s| (s.stat, s.value, s.negative)).collect();

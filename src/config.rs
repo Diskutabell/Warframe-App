@@ -138,8 +138,6 @@ pub struct Settings {
     pub hotkey_riven: String,
     pub riven_overlay_enabled: bool,
     pub riven_overlay_seconds: u32,
-    pub riven_overlay_x_percent: f64,
-    pub riven_overlay_y_percent: f64,
     /// Last resort; read-only, off by default. When on, the inventory is read automatically after
     /// login and after each mission (see `State::schedule_memscan`).
     pub memory_scan_enabled: bool,
@@ -177,8 +175,6 @@ impl Default for Settings {
             hotkey_riven: "F10".into(),
             riven_overlay_enabled: true,
             riven_overlay_seconds: 20,
-            riven_overlay_x_percent: 57.0,
-            riven_overlay_y_percent: 50.0,
             memory_scan_enabled: false,
             ocr_enabled: true,
             screenshot_tool: ScreenshotTool::Auto,
@@ -282,11 +278,11 @@ mod tests {
     fn old_settings_load_without_losing_known_fields() {
         // A settings file from an early version: two keys that no longer exist.
         let raw = json!({"port": 9000, "screenshot_command": "", "overlay_force_x11": true,
-                         "memory_scan_enabled": true, "riven_overlay_x_percent": 60});
+                         "memory_scan_enabled": true, "riven_overlay_seconds": 30});
         let s = Settings::from_value(raw).unwrap();
         assert_eq!(s.port, 9000);
         assert!(s.memory_scan_enabled);
-        assert_eq!(s.riven_overlay_x_percent, 60.0);
+        assert_eq!(s.riven_overlay_seconds, 30);
         assert_eq!(s.screenshot_tool, ScreenshotTool::Auto);
     }
 

@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.7.0 - 2026-11-09
+
+### Added
+
+- **Inventory page:** everything in the inventory - resources, mods, arcanes, relics, parts,
+  fish, gems, decorations, glyphs, equipment - with the game's own icons, a count for each, and
+  the market price and ducats of what can be traded. Search, filter by kind, sort by name, count
+  or value. Names and icons come from the game's public export; on a real inventory all but 10
+  of 1,314 stacks got a name and a kind from it or from WFCD.
+- **Riven panel, rebuilt** to match the reward panels: beside the card and sized with it, with
+  the weapon's picture, an overall grade, a bar for where each roll landed, and what rivens of
+  the same weapon with the same positives are listed for on warframe.market (lowest, median,
+  lowest in game). Clicks go through to the game. The last riven read is on the Market page too.
+- Resource icons and held/needed bars in recipes and the farming planner, mission pictures on the
+  Fissures page, item pictures in the price check.
+
+### Changed
+
+- **Riven cards are read where the game draws them.** The card in the middle of the screen is
+  read on its own, so the old roll beside it on the confirm screen or the "lock trait" box can no
+  longer mix into the read. A damage type's icon glued to its name ("Impact") no longer hides the
+  stat. All five saved riven screens now read every stat.
+- Riven grades use the disposition the game uses since Hotfix 44.1.3 (1.2 for every weapon); the
+  disposition dots are gone from the item details, since they no longer differ.
+- The riven panel no longer has position settings: it sits beside the card at any interface scale.
+- **Smoother scrolling:** a mouse wheel click glides instead of jumping (WebKitGTK moved the page
+  by a whole click in one frame), and the page background is no longer repainted on every
+  scrolled frame.
+
 ## 0.6.1 - 2026-11-08
 
 ### Added

@@ -14,11 +14,12 @@ import standing from "./pages/standing.js";
 import foundry from "./pages/foundry.js";
 import market from "./pages/market.js";
 import farming from "./pages/farming.js";
+import inventory from "./pages/inventory.js";
 import settings from "./pages/settings.js";
 
-export const PAGES = [home, mastery, primes, relics, fissures, world, standing, foundry, market, farming, settings];
+export const PAGES = [home, mastery, primes, relics, fissures, world, standing, foundry, market, farming, inventory, settings];
 /** Preserve 1-9 for the original pages and 0 for Settings. */
-const pageKey = (page, i) => page === settings ? "0" : page === farming ? "" : String(i + 1);
+const pageKey = (page, i) => page === settings ? "0" : i < 9 ? String(i + 1) : "";
 
 /** What every page can read: the latest /api/state, and a way to re-render. */
 export const app = {
@@ -163,6 +164,34 @@ document.addEventListener("keydown", (e) => {
     if (p) location.hash = "#" + p.id;
   }
 });
+
+// ------------------------------------------------------------------ wheel scrolling
+// WebKitGTK on Wayland moves a whole wheel click (about 50-100 px) in one frame, which reads as
+// a stutter. Wheel clicks glide here instead: each adds to where the scroll is heading, and the
+// view eases there over a few frames. Touchpads send many small steps and keep the native path.
+const glide = new Map();
+function step(el) {
+  const g = glide.get(el);
+  const left = g.target - el.scrollTop;
+  if (Math.abs(left) < 0.5) { el.scrollTop = g.target; glide.delete(el); return; }
+  const before = el.scrollTop;
+  el.scrollTop += left * 0.28 + Math.sign(left) * 0.5;
+  // An edge (or another script) stopped it: the target is out of reach.
+  if (el.scrollTop === before) { glide.delete(el); return; }
+  requestAnimationFrame(() => step(el));
+}
+document.addEventListener("wheel", (e) => {
+  if (e.ctrlKey || e.shiftKey || Math.abs(e.deltaY) < 30 || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+  const el = e.target.closest("#view, .drawer, .palette-results, #nav, .acct-menu");
+  if (!el || el.scrollHeight <= el.clientHeight) return;
+  e.preventDefault();
+  const delta = e.deltaMode === 1 ? e.deltaY * 18 : e.deltaY;
+  const g = glide.get(el);
+  const from = g ? g.target : el.scrollTop;
+  const target = Math.max(0, Math.min(el.scrollHeight - el.clientHeight, from + delta));
+  if (g) g.target = target;
+  else { glide.set(el, { target }); requestAnimationFrame(() => step(el)); }
+}, { passive: false });
 
 $("#openPalette").onclick = () => palette.open();
 palette.setPages(PAGES);

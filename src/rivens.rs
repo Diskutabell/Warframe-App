@@ -169,6 +169,64 @@ pub fn stat(name: &str) -> Option<&'static Stat> {
 
 pub const VARIANCE: f64 = 0.10;
 
+/// warframe.market's slug for a stat (its `/v2/riven/attributes`, checked 2026-11-09: the same 50
+/// attributes as `STATS`).
+pub fn market_slug(stat: &str) -> Option<&'static str> {
+    Some(match stat {
+        "Damage" => "base_damage_/_melee_damage",
+        "Multishot" => "multishot",
+        "Critical Chance" => "critical_chance",
+        "Critical Damage" => "critical_damage",
+        "Fire Rate / Attack Speed" => "fire_rate_/_attack_speed",
+        "Status Chance" => "status_chance",
+        "Status Duration" => "status_duration",
+        "Magazine Capacity" => "magazine_capacity",
+        "Ammo Maximum" => "ammo_maximum",
+        "Reload Speed" => "reload_speed",
+        "Punch Through" => "punch_through",
+        "Projectile Speed" => "projectile_speed",
+        "Recoil" => "recoil",
+        "Zoom" => "zoom",
+        "Heat Damage" => "heat_damage",
+        "Cold Damage" => "cold_damage",
+        "Electricity Damage" => "electric_damage",
+        "Toxin Damage" => "toxin_damage",
+        "Impact Damage" => "impact_damage",
+        "Puncture Damage" => "puncture_damage",
+        "Slash Damage" => "slash_damage",
+        "Damage to Grineer" => "damage_vs_grineer",
+        "Damage to Corpus" => "damage_vs_corpus",
+        "Damage to Infested" => "damage_vs_infested",
+        "Range" => "range",
+        "Combo Duration" => "combo_duration",
+        "Finisher Damage" => "finisher_damage",
+        "Heavy Attack Efficiency" => "channeling_efficiency",
+        "Initial Combo" => "channeling_damage",
+        "Slide Critical Chance" => "critical_chance_on_slide_attack",
+        "Additional Combo Count Chance" => "chance_to_gain_extra_combo_count",
+        "Chance to Gain Combo Count" => "chance_to_gain_combo_count",
+        "Ammo Efficiency" => "ammo_efficiency",
+        "Blast Damage" => "blast",
+        "Corrosive Damage" => "corrosive",
+        "Damage to Orokin" => "damage_to_orokin",
+        "Damage to Scaldra" => "damage_to_scaldra",
+        "Damage to Techrot" => "damage_to_techrot",
+        "Gas Damage" => "gas",
+        "Heavy Attack Wind Up Speed" => "heavy_attack_wind_up_speed",
+        "Magnetic Damage" => "magnetic",
+        "Melee Damage On Heavy Attack" => "melee_damage_on_heavy_attack",
+        "Parry Angle" => "parry_angle",
+        "Radiation Damage" => "radiation",
+        "Reload While Holstered" => "magazine_reloaded_s_when_holstered",
+        "Slam Attack Damage" => "slam_attack_damage",
+        "Status Damage" => "status_damage",
+        "Viral Damage" => "viral",
+        "Weakpoint Damage" => "weak_point_damage",
+        "Weakpoint Critical Chance" => "weak_point_critical_chance",
+        _ => return None,
+    })
+}
+
 /// (bonus, malus) per (positives, negatives).
 pub fn multipliers(positives: u8, negatives: u8) -> Option<(f64, f64)> {
     match (positives, negatives) {
@@ -359,7 +417,20 @@ fn market(platform: Platform) -> (serde_json::Map<String, Value>, Option<String>
     }
 }
 
-/// Every weapon with a disposition, strongest first, with its traded riven prices.
+/// What `weapon`'s rivens sold for lately, from the cached prices (whatever their age; a stale
+/// copy is refreshed in the background, so a riven read never waits for it).
+pub fn traded(weapon: &str, platform: Platform) -> Option<Value> {
+    let cached: Option<Value> = config::read_json(&config::dirs().cache.join("rivens.json"));
+    if cached.as_ref().is_none_or(|c| now() - c["t"].as_f64().unwrap_or(0.0) >= MARKET_MAX_AGE) {
+        std::thread::spawn(move || market(platform));
+    }
+    let p = cached?["data"].get(weapon)?.clone();
+    let pick = |v: &Value| v.as_object().filter(|o| !o.is_empty()).map(|_| v.clone());
+    let (unrolled, rerolled) = (pick(&p["unrolled"]), pick(&p["rerolled"]));
+    (unrolled.is_some() || rerolled.is_some()).then(|| json!({"unrolled": unrolled, "rerolled": rerolled}))
+}
+
+/// Every weapon that takes a riven, with its traded riven prices.
 pub fn rows(catalog: &Catalog, platform: Platform) -> (Vec<Value>, Option<String>) {
     let (prices, err) = market(platform);
     let pick = |v: &Value| {
@@ -396,6 +467,12 @@ mod tests {
 
     fn weapon(class: &str, dispo: f64) -> Item {
         Item { riven_class: class.into(), disposition: Some(dispo), ..Item::default() }
+    }
+
+    #[test]
+    fn every_stat_has_a_market_slug() {
+        let slugs: std::collections::HashSet<_> = STATS.iter().map(|s| market_slug(s.name).expect(s.name)).collect();
+        assert_eq!(slugs.len(), STATS.len());
     }
 
     #[test]

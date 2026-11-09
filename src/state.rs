@@ -152,13 +152,23 @@ enum Sighting {
 pub struct RivenResult {
     pub t: f64,
     pub weapon: Option<String>,
-    pub disposition: Option<f64>,
-    pub dots: Option<i64>,
+    /// The weapon's picture.
+    pub image: Option<String>,
     pub positives: Option<u8>,
     pub negatives: Option<u8>,
     /// Stats the card has but OCR did not read (their count is inferred from the values).
     pub unread: u8,
     pub stats: Vec<Graded>,
+    /// The grade of the average roll over all stats.
+    pub overall: Option<&'static str>,
+    /// What this weapon's rivens sold for lately (api.warframestat.us: `unrolled` and `rerolled`,
+    /// each with `median`, `min`, `max`, `pop`).
+    pub traded: Option<Value>,
+    /// Rivens with the same positives listed on warframe.market; filled in after the grades are
+    /// shown, since it is one more request.
+    pub market: Option<crate::market::RivenListings>,
+    #[serde(rename = "marketError")]
+    pub market_error: Option<String>,
     pub ocr: String,
     pub error: Option<String>,
 }
@@ -219,7 +229,11 @@ pub enum UiEvent {
         fresh: bool,
     },
     HideRewards,
-    Riven(Arc<RivenResult>),
+    /// A riven read; `fresh` is false when only its market listings arrived.
+    Riven {
+        result: Arc<RivenResult>,
+        fresh: bool,
+    },
     TestOverlay,
     /// Hide the overlays before a screenshot, so a scan never reads our own text; acknowledged
     /// on the sender once they are gone.
@@ -1579,7 +1593,8 @@ impl State {
                 .map(|(slug, name, ducats)| {
                     self.market.request(&slug, true);
                     let p = self.market.cached(&slug).unwrap_or_default();
-                    json!({"slug": slug, "name": name, "ducats": ducats, "sell": p.sell, "buy": p.buy})
+                    let image = self.market.image(Some(&slug));
+                    json!({"slug": slug, "name": name, "ducats": ducats, "sell": p.sell, "buy": p.buy, "image": image})
                 })
                 .collect(),
         )
@@ -1981,19 +1996,20 @@ impl State {
             Arc::new(RivenResult { t: now(), weapon, ocr: tail(text, 600), error: Some(error), ..Default::default() });
         *lock(&self.riven) = Some(Arc::clone(&r));
         if self.settings().riven_overlay_enabled {
-            self.ui(UiEvent::Riven(Arc::clone(&r)));
+            self.ui(UiEvent::Riven { result: Arc::clone(&r), fresh: true });
         }
         r
     }
 
     /// Reads the riven card currently on screen and grades it.
-    pub fn scan_riven(&self) -> Arc<RivenResult> {
+    pub fn scan_riven(self: &Arc<Self>) -> Arc<RivenResult> {
         let _one_scan_at_a_time = lock(&self.scan_lock);
         let settings = self.settings();
         self.hide_overlays_for_capture();
         let cat = self.catalog();
+        let scales = self.ui_scales();
         let read = screenshot::capture(settings.screenshot_tool).and_then(|frame| {
-            let (r, text) = ocr::read_riven(&frame, &cat.riven_weapons())?;
+            let (r, text) = ocr::read_riven(&frame, &cat.riven_weapons(), &scales)?;
             Ok((frame, r, text))
         });
         let (frame, read, text) = match read {
@@ -2019,23 +2035,62 @@ impl State {
         let (pos, neg, unread) = rivens::infer_counts(it, &readings);
         let stats: Vec<Graded> =
             read.stats.iter().filter_map(|s| rivens::grade_roll(it, s.stat, s.value, pos, neg, s.negative)).collect();
+        let overall = (!stats.is_empty())
+            .then(|| rivens::grade_for(stats.iter().map(|g| g.deviation).sum::<f64>() / stats.len() as f64));
         let r = Arc::new(RivenResult {
             t: now(),
             weapon: Some(it.name.clone()),
-            disposition: it.disposition.map(|d| py_round(d, 3)),
-            dots: it.dispo_dots,
+            image: crate::gamedata::image_url(it.image.as_deref()),
             positives: Some(pos),
             negatives: Some(neg),
             unread,
             stats,
+            overall,
+            traded: rivens::traded(&it.name, settings.platform),
             ocr: tail(&text, 600),
-            error: None,
+            ..Default::default()
         });
         *lock(&self.riven) = Some(Arc::clone(&r));
         if settings.riven_overlay_enabled {
-            self.ui(UiEvent::Riven(Arc::clone(&r)));
+            self.ui(UiEvent::Riven { result: Arc::clone(&r), fresh: true });
         }
+        self.find_riven_listings(&r, it.uid.clone());
         r
+    }
+
+    /// Looks up rivens like `r` on warframe.market in the background and updates the result (and
+    /// the panel, if it is still up) when the answer comes.
+    fn find_riven_listings(self: &Arc<Self>, r: &Arc<RivenResult>, uid: String) {
+        let positives: Vec<&'static str> =
+            r.stats.iter().filter(|g| !g.negative).filter_map(|g| rivens::market_slug(g.stat)).collect();
+        let (Some(weapon), false) = (r.weapon.clone(), positives.is_empty()) else { return };
+        let (state, r) = (Arc::clone(self), Arc::clone(r));
+        let look = move || {
+            // The panel shows the weapon's picture only from the art cache.
+            if let Some(url) = &r.image {
+                let _ = crate::art::get(url, 128);
+            }
+            let mut updated = (*r).clone();
+            match state.market.riven_listings(&uid, &weapon, &positives) {
+                Ok(found) => updated.market = Some(found),
+                Err(e) => updated.market_error = Some(format!("{e:#}")),
+            }
+            let updated = Arc::new(updated);
+            {
+                let mut current = lock(&state.riven);
+                // A newer riven was read meanwhile: this answer belongs to the old one.
+                if current.as_ref().is_none_or(|c| c.t != r.t) {
+                    return;
+                }
+                *current = Some(Arc::clone(&updated));
+            }
+            if state.settings().riven_overlay_enabled {
+                state.ui(UiEvent::Riven { result: updated, fresh: false });
+            }
+        };
+        if let Err(e) = std::thread::Builder::new().name("riven-market".into()).spawn(look) {
+            eprintln!("could not look up riven listings: {e}");
+        }
     }
 
     pub fn show_window(&self) {

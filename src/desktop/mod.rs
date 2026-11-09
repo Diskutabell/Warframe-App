@@ -132,7 +132,7 @@ pub fn run(state: Arc<State>, url: &str, backend: Backend) -> Result<()> {
                 UiEvent::ShowWindow => window.present(),
                 UiEvent::Rewards { result, fresh } => overlays.show_rewards(&result, fresh),
                 UiEvent::HideRewards => overlays.hide_rewards(),
-                UiEvent::Riven(r) => overlays.show_riven(&r),
+                UiEvent::Riven { result, fresh } => overlays.show_riven(&result, fresh),
                 UiEvent::TestOverlay => overlays.show_test(),
                 UiEvent::HideForCapture(ack) => {
                     overlays.hide_all();

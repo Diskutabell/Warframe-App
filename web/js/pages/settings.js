@@ -129,8 +129,6 @@ export default {
         ${number("overlay_seconds", "Take the prices down at the latest after", "Seconds. They normally go with the reward screen.", { min: 3, max: 120 })}
         ${toggle("riven_overlay_enabled", "Show riven grades over the game", "After a riven scan with the hotkey.")}
         ${number("riven_overlay_seconds", "Hide the riven panel after", "Seconds.", { min: 3, max: 300 })}
-        ${number("riven_overlay_x_percent", "Riven panel left edge", "% of the screen width. The card sits centred; 57 puts the panel beside it.", { min: 0, max: 100, step: 0.5 })}
-        ${number("riven_overlay_y_percent", "Riven panel middle", "% of the screen height.", { min: 0, max: 100, step: 0.5 })}
         ${linux ? select("overlay_backend", "Keep overlays above the game with", "Takes effect after a restart.", [["auto", "Automatic"], ["layer-shell", "Layer shell (Hyprland, Sway, KDE)"], ["x11", "X11 window (GNOME, X11 sessions)"]]) : ""}
         ${linux ? "" : `<div class="callout" style="margin-top:8px">The overlays only show over the game in <b>borderless</b> or windowed mode, not in exclusive fullscreen.</div>`}
         ${!linux ? "" : select("screenshot_tool", "Screenshot tool", "", [["auto", "Automatic" + (tools.screenshot ? ` (${tools.screenshot})` : "")], ["grim", "grim (Hyprland, Sway)"], ["spectacle", "Spectacle (KDE)"], ["gnome-screenshot", "GNOME Screenshot"], ["maim", "maim (X11)"], ["scrot", "scrot (X11)"], ["import", "ImageMagick import (X11)"]])}

@@ -35,8 +35,9 @@ Linux it runs natively next to the game (no Wine needed for the app itself).
   above it, in Settings) shows its platinum and ducat value, how many you own, whether you still
   need it, and which pick is worth the most. Clicks go through to the game, and the panels leave
   with the screen.
-- **Riven grades:** press a key with a riven card on screen and every stat gets graded against
-  the weapon's disposition.
+- **Riven grades:** press a key with a riven card on screen (cycling it, or its own screen) and a
+  panel beside the card grades every stat, shows where each roll landed, and what rivens with the
+  same positives are listed for on warframe.market. The last riven read is also on the Market page.
 - **Standing:** rank progress for every syndicate, rank-up costs, what's left of today's daily
   limits, medallions you hold, and what each syndicate's offerings are worth in platinum.
 - **Mastery, prime sets, relics:** filterable lists with the parts you have and where to farm the
@@ -54,6 +55,9 @@ Linux it runs natively next to the game (no Wine needed for the app itself).
   Goals are saved per account. Counts can combine blueprints with crafted parts, and the materials
   total assumes components still need crafting; recipes and required equipment may be missing, so
   check the foundry before spending resources.
+- **Inventory:** everything the memory scan (or an imported file) holds - resources, mods,
+  arcanes, relics, parts, fish, decorations, equipment - with the game's own icons, searchable,
+  sorted by name, count or market value.
 - **Several accounts:** every account that logs in on the machine gets its own data, and the
   window follows the game when you switch.
 - **Search:** Ctrl+K finds any item, part, relic, syndicate or page.
