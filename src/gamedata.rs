@@ -215,6 +215,8 @@ pub struct Catalog {
     pub recipes_available: bool,
     /// Non-equipment catalog entries searchable even when they have no known drops.
     pub lookup: IndexMap<String, LookupItem>,
+    /// Every resource some build consumes, uid -> name (`recipe_resources`).
+    pub resources: IndexMap<String, String>,
     /// Display name (as `art_key` spells it) -> image file, for everything in the WFCD files.
     pub art: HashMap<String, String>,
     /// Star chart node tag ("SolNode27") -> the mastery XP its first completion gives. Empty
@@ -1001,6 +1003,7 @@ pub fn build(raw: &IndexMap<String, Value>) -> Catalog {
         }
     }
     crafts.sort_by(|a, b| (&a.kind, &a.name).cmp(&(&b.kind, &b.name)));
+    let resources = recipe_resources(&items, &alias, &part_recipes, &crafts);
 
     Catalog {
         items,
@@ -1013,6 +1016,7 @@ pub fn build(raw: &IndexMap<String, Value>) -> Catalog {
         part_recipes,
         recipes_available,
         lookup,
+        resources,
         art,
         node_xp: HashMap::new(),
         syndicates: crate::standing::Syndicates::default(),
@@ -1020,6 +1024,34 @@ pub fn build(raw: &IndexMap<String, Value>) -> Catalog {
         inventory: HashMap::new(),
         loaded_at: None,
     }
+}
+
+/// Every resource some build consumes, uid -> name, by name: what a farming task can count. The
+/// catalog files name thousands of other things (quest items, dojo pigments, placeholders);
+/// what a recipe asks for is what players farm. Equipment, parts and blueprints are left out.
+fn recipe_resources(
+    items: &IndexMap<String, Item>,
+    alias: &HashMap<String, String>,
+    recipes: &HashMap<String, PartRecipe>,
+    crafts: &[Craft],
+) -> IndexMap<String, String> {
+    let mut out: IndexMap<String, String> = IndexMap::new();
+    let mut add = |uid: &str, name: &str| {
+        let built = items.contains_key(uid) || alias.contains_key(uid);
+        if !built && !uid.contains("/Recipes/") && !uid.ends_with("Blueprint") {
+            out.entry(uid.to_string()).or_insert_with(|| name.to_string());
+        }
+    };
+    for it in items.values() {
+        for c in it.components.iter().filter(|c| c.kind == ComponentKind::Resource) {
+            add(&c.uid, &c.name);
+        }
+    }
+    for need in recipes.values().flat_map(|r| &r.ingredients).chain(crafts.iter().flat_map(|c| &c.needs)) {
+        add(&need.uid, &need.name);
+    }
+    out.sort_by(|_, a, _, b| a.cmp(b));
+    out
 }
 
 /// A name reduced to what both spellings share: the world state writes "Ack And Brunt" for the

@@ -287,6 +287,11 @@ pub struct Inventory {
     pub foundry: Vec<FoundryEntry>,
     pub currencies: Currencies,
     pub mods: i64,
+    /// Mods and arcanes held one by one with a rank (the payload's `Upgrades`): uid -> the rank
+    /// of each copy. Unranked stacks are in `counts` (`RawUpgrades`). `None` when the payload had
+    /// no `Upgrades`, and in an inventory saved before 0.8.0, which did not keep them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upgrades: Option<IndexMap<String, Vec<i64>>>,
     pub mastery_rank: Option<i64>,
     /// Star chart and intrinsics, when the payload has them (an imported file does; a memory
     /// capture does when its head survived).
@@ -320,6 +325,20 @@ fn oid_time(v: &Value) -> Option<f64> {
     }
     let oid = v.get("$oid").unwrap_or(v).as_str()?;
     i64::from_str_radix(oid.get(..8)?, 16).ok().map(|t| t as f64)
+}
+
+/// The rank in an `Upgrades` entry's fingerprint. The game stores the fingerprint as JSON inside
+/// a string (`"{\"lvl\":5}"`); other tools may write it as an object. No `lvl` means rank 0.
+fn upgrade_rank(fingerprint: &Value) -> i64 {
+    let parsed;
+    let obj = match fingerprint {
+        Value::String(s) => {
+            parsed = serde_json::from_str::<Value>(s).unwrap_or_default();
+            &parsed
+        }
+        other => other,
+    };
+    int(&obj["lvl"]).max(0)
 }
 
 /// Epoch seconds from DE's date field: Mongo extended JSON, or a bare number in ms or seconds.
@@ -377,6 +396,15 @@ pub fn parse_inventory(data: &Value) -> Result<Inventory> {
         .map(|e| FoundryEntry { recipe: e["ItemType"].as_str().map(str::to_owned), done: date(&e["CompletionDate"]) })
         .collect();
     let mods = array("Upgrades").count() as i64 + array("RawUpgrades").map(|e| int(&e["ItemCount"])).sum::<i64>();
+    let upgrades = data["Upgrades"].as_array().map(|list| {
+        let mut ranks: IndexMap<String, Vec<i64>> = IndexMap::new();
+        for e in list {
+            if let Some(t) = e["ItemType"].as_str().filter(|t| !t.is_empty()) {
+                ranks.entry(t.to_string()).or_default().push(upgrade_rank(&e["UpgradeFingerprint"]));
+            }
+        }
+        ranks
+    });
     Ok(Inventory {
         counts,
         equipment,
@@ -389,6 +417,7 @@ pub fn parse_inventory(data: &Value) -> Result<Inventory> {
             ducats: data["PrimeTokens"].as_i64(),
         },
         mods,
+        upgrades,
         mastery_rank: data["PlayerLevel"].as_i64(),
         progress: progress_from(data),
         standing: standing_from(data),
@@ -466,7 +495,33 @@ mod tests {
         assert_eq!(inv.foundry[0].done, Some(1_791_032_114.0));
         assert_eq!(inv.currencies.platinum, Some(0), "a real 0 must survive");
         assert_eq!(inv.synced_at, Some(0x5f1e2d3c as f64));
+        assert_eq!(inv.upgrades, None, "no Upgrades in the payload: ranked copies are unknown, not none");
         assert!(parse_inventory(&json!({"Foo": 1})).is_err());
+    }
+
+    #[test]
+    fn ranked_mods_and_arcanes_keep_their_rank() {
+        let inv = parse_inventory(&json!({
+            "MiscItems": [],
+            "RawUpgrades": [{"ItemType": "/Mods/Flow", "ItemCount": 2}],
+            "Upgrades": [
+                {"ItemType": "/Arcanes/Energize", "UpgradeFingerprint": "{\"lvl\":5}"},
+                {"ItemType": "/Arcanes/Energize", "UpgradeFingerprint": "{\"lvl\":2}"},
+                {"ItemType": "/Mods/Flow", "UpgradeFingerprint": {"lvl": 10}},
+                {"ItemType": "/Mods/Vitality", "UpgradeFingerprint": "{}"},
+                {"ItemType": "/Mods/Riven", "UpgradeFingerprint": "not json"},
+                {"ItemType": "/Mods/Bare"}
+            ]
+        }))
+        .unwrap();
+        let ranks = inv.upgrades.expect("the payload has Upgrades");
+        assert_eq!(ranks["/Arcanes/Energize"], [5, 2]);
+        assert_eq!(ranks["/Mods/Flow"], [10]);
+        assert_eq!(ranks["/Mods/Vitality"], [0]);
+        assert_eq!(ranks["/Mods/Riven"], [0]);
+        assert_eq!(ranks["/Mods/Bare"], [0]);
+        assert_eq!(inv.counts["/Mods/Flow"], 2, "unranked copies stay counted stacks");
+        assert_eq!(inv.mods, 8);
     }
 
     #[test]

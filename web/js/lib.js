@@ -119,6 +119,7 @@ const PATHS = {
   standing: "M12 3l7 3v5c0 4.6-3 8.2-7 10-4-1.8-7-5.4-7-10V6z M8.5 12.5l2.4 2.4 4.6-4.8",
   down: "M6 9l6 6 6-6",
   inventory: "M4 8l8-4 8 4v9l-8 4-8-4z M4 8l8 4 8-4 M12 12v9",
+  tasks: "M9 3.5h6v3H9z M9 5H6a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1h-3 M8.5 13.5l2.5 2.5 4.5-5",
 };
 export const icon = (name, cls = "") => `<svg class="ic ${cls}" viewBox="0 0 24 24" aria-hidden="true"><path d="${PATHS[name] || ""}"/></svg>`;
 export function hydrateIcons(root = document) {
@@ -151,6 +152,8 @@ export const art = (src, cls = "") => (src
   : `<div class="art ${cls}"></div>`);
 
 export const STATUS = { mastered: "Mastered", leveling: "Leveling", missing: "Not levelled" };
+/** A farming task's colour (src/tasks.rs): red, yellow, green. */
+export const TASK_STATE = { missing: "Missing", resources: "Needs resources", done: "Done" };
 export const statusPill = (s) => `<span class="pill ${esc(s)}">${STATUS[s] || esc(s)}</span>`;
 export const era = (e) => `<span class="era ${esc(e)}">${esc(e)}</span>`;
 

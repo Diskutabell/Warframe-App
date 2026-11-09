@@ -28,6 +28,7 @@ mod server;
 mod sources;
 mod standing;
 mod state;
+mod tasks;
 mod views;
 mod world;
 

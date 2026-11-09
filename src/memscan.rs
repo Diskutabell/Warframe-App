@@ -24,7 +24,7 @@ const MARKER: &[u8] = b"\"LastInventorySync\"";
 /// more to an attacker than the inventory is to anyone. `allowed` adds three families of keys
 /// whose names vary: the daily standing pools (`DailyAffiliationCetus`...) and intrinsic ranks
 /// and points (`LPS_PILOTING`, `LPP_SPACE`).
-const KEEP_KEYS: [&str; 47] = [
+const KEEP_KEYS: [&str; 48] = [
     "LastInventorySync",
     "MiscItems",
     "Suits",
@@ -63,6 +63,8 @@ const KEEP_KEYS: [&str; 47] = [
     "XP",
     "ItemCount",
     "CompletionDate",
+    // A ranked mod's or arcane's rank, as a JSON string inside its `Upgrades` entry: {"lvl": 5}.
+    "UpgradeFingerprint",
     // Syndicate standing: [{"Tag", "Standing", "Title"}], and the focus left today.
     "Affiliations",
     "Tag",

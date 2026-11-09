@@ -32,9 +32,44 @@ pub struct Manual {
     /// Pinned to the Overview: item, part or build uids, and relic names.
     #[serde(default)]
     pub pinned: Vec<String>,
-    /// Masterable items selected for the farming planner.
+    /// The farming board, in the order the tasks were added.
     #[serde(default)]
+    pub tasks: Vec<Task>,
+    /// The farming planner's equipment goals up to 0.7.0. Read once and moved into `tasks`
+    /// (`adopt_goals`); never written again.
+    #[serde(default, skip_serializing)]
     pub goals: Vec<String>,
+}
+
+/// One task on the farming board.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Task {
+    /// What it is about: equipment, a mod, an arcane or a resource.
+    pub uid: String,
+    /// How many to hold, for a mod, an arcane or a resource. `None` takes the default: one copy,
+    /// or for an arcane as many as its top rank takes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<i64>,
+    /// When it was added, epoch seconds.
+    #[serde(default)]
+    pub added: f64,
+}
+
+impl Manual {
+    pub fn has_task(&self, uid: &str) -> bool {
+        self.tasks.iter().any(|t| t.uid == uid)
+    }
+
+    /// Moves the planner's old goals onto the board. True when there were any.
+    pub fn adopt_goals(&mut self) -> bool {
+        let goals = std::mem::take(&mut self.goals);
+        for uid in &goals {
+            if !self.has_task(uid) {
+                self.tasks.push(Task { uid: uid.clone(), target: None, added: crate::now() });
+            }
+        }
+        !goals.is_empty()
+    }
 }
 
 /// A log line that may hold the account's id, for the user to confirm.
@@ -168,6 +203,11 @@ pub fn load() -> (Registry, Vec<String>) {
         acc.profile = config::read_json::<Profile>(&folder.join("profile.json")).map(Arc::new);
         acc.inventory = config::read_json::<Inventory>(&folder.join("inventory.json")).map(Arc::new);
         acc.manual = config::read_json(&folder.join("manual.json")).unwrap_or_default();
+        if acc.manual.adopt_goals() {
+            if let Err(e) = acc.write("manual.json", &acc.manual) {
+                notes.push(format!("Could not save {}'s farming tasks: {e:#}", acc.name));
+            }
+        }
     }
     (registry, notes)
 }
@@ -326,5 +366,21 @@ mod tests {
         assert_eq!((acc.mastery_rank(), acc.mastery_rank_max()), (Some(16), Some(18)));
         acc.profile = Some(Arc::new(Profile { mastery_rank: Some(17), ..Profile::default() }));
         assert_eq!((acc.mastery_rank(), acc.mastery_rank_max()), (Some(17), None));
+    }
+
+    #[test]
+    fn old_farming_goals_become_tasks() {
+        // A manual.json written by 0.7.0: goals, no tasks.
+        let mut m: Manual = serde_json::from_str(r#"{"counts": {}, "goals": ["/Volt", "/Rhino"]}"#).unwrap();
+        assert!(m.adopt_goals());
+        assert_eq!(m.tasks.iter().map(|t| t.uid.as_str()).collect::<Vec<_>>(), ["/Volt", "/Rhino"]);
+        assert!(m.tasks.iter().all(|t| t.target.is_none() && t.added > 0.0));
+        let saved = serde_json::to_value(&m).unwrap();
+        assert!(saved.get("goals").is_none(), "goals are not written back");
+        assert_eq!(saved["tasks"][0], serde_json::json!({"uid": "/Volt", "added": m.tasks[0].added}));
+        // Read back: nothing left to adopt, and the tasks stay as they were.
+        let mut again: Manual = serde_json::from_value(saved).unwrap();
+        assert!(!again.adopt_goals());
+        assert_eq!(again.tasks, m.tasks);
     }
 }

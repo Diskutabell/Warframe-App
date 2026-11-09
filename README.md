@@ -51,10 +51,12 @@ Linux it runs natively next to the game (no Wine needed for the app itself).
 - **Search:** Ctrl+K also finds mods, resources, gear and names in loaded drop tables. The mod
   catalog is optional and needs to be downloaded at least once; missing sources can be checked
   on the wiki.
-- **Farming planner:** pick equipment goals to see parts, known sources and crafting materials.
-  Goals are saved per account. Counts can combine blueprints with crafted parts, and the materials
-  total assumes components still need crafting; recipes and required equipment may be missing, so
-  check the foundry before spending resources.
+- **Farming board:** equipment, mods, arcanes and resources you are after, one card each, saved
+  per account. A card is red while parts (or copies) are missing, yellow when every part is there
+  but the resources or credits to build it are not, and green when it is done: owned, building or
+  ready to build. The sidebar shows how many are done. Click a card for its parts, where to farm
+  them and what the builds still take; parts already crafted or crafting in the foundry are left
+  out. An arcane counts its copies toward its top rank (21 for most), ranked copies included.
 - **Inventory:** everything the memory scan (or an imported file) holds - resources, mods,
   arcanes, relics, parts, fish, decorations, equipment - with the game's own icons, searchable,
   sorted by name, count or market value.

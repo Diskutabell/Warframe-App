@@ -32,7 +32,7 @@ use crate::ocr::{self, reward, screenshot};
 use crate::rivens::{self, Graded};
 use crate::sources::{self, Inventory, Profile};
 use crate::views::View;
-use crate::{UserError, compositor, history, now, standing, world};
+use crate::{UserError, compositor, history, now, standing, tasks, world};
 
 /// DE temporarily IP-blocks game login for clients that query profiles too often.
 pub const PROFILE_COOLDOWN: f64 = 300.0;
@@ -1217,21 +1217,55 @@ impl State {
         })
     }
 
-    pub fn set_goal(&self, uid: &str, selected: bool) -> Result<()> {
-        if selected && !self.catalog().items.contains_key(uid) {
-            return Err(UserError::new("Choose a masterable item for the farming planner.").into());
+    // ------------------------------------------------------------ the farming board
+
+    /// Puts a task on the board of the account shown, or takes it off.
+    pub fn set_task(&self, uid: &str, on_board: bool) -> Result<()> {
+        if on_board && tasks::thing(&self.view(), uid).is_none() {
+            return Err(
+                UserError::new("Only equipment, mods, arcanes and resources can go on the farming board.").into()
+            );
         }
         self.edit_manual(|m| {
-            m.goals.retain(|key| key != uid);
-            if selected {
-                m.goals.push(uid.to_string());
+            if !on_board {
+                m.tasks.retain(|t| t.uid != uid);
+            } else if !m.has_task(uid) {
+                m.tasks.push(accounts::Task { uid: uid.to_string(), target: None, added: now() });
             }
         })
     }
 
-    pub fn goals(&self) -> Value {
-        let view = self.view();
-        json!({"goals": view.manual.goals, "inventoryKnown": view.inv.is_some()})
+    /// How many of a mod, an arcane or a resource a task asks for; `None` for its default.
+    pub fn set_task_target(&self, uid: &str, target: Option<i64>) -> Result<()> {
+        if !self.view().manual.has_task(uid) {
+            return Err(UserError::new("That is not on the farming board.").into());
+        }
+        let target = target.map(|t| t.clamp(1, 1_000_000_000));
+        self.edit_manual(|m| {
+            for t in m.tasks.iter_mut().filter(|t| t.uid == uid) {
+                t.target = target;
+            }
+        })
+    }
+
+    /// Takes the finished tasks off the board; how many there were.
+    pub fn clear_done_tasks(&self) -> Result<usize> {
+        let done = tasks::done(&self.view());
+        if !done.is_empty() {
+            self.edit_manual(|m| m.tasks.retain(|t| !done.contains(&t.uid)))?;
+        }
+        Ok(done.len())
+    }
+
+    pub fn tasks(&self) -> Value {
+        tasks::board(&self.view())
+    }
+
+    /// One task with everything its details show.
+    pub fn task(&self, uid: &str) -> Result<Value> {
+        let open = self.open_eras();
+        tasks::detail(&self.view(), uid, &open)
+            .ok_or_else(|| UserError::new("The farming board does not know that.").into())
     }
 
     // ------------------------------------------------------------ accounts
@@ -1433,6 +1467,7 @@ impl State {
             "currencies": currencies, "foundry": v.pending_foundry(),
             "collection": v.collection(),
             "pinned": v.pinned(),
+            "tasks": tasks::summary(&v),
             "session": {"since": self.started, "screens": screens, "bestValue": best_value},
             "sources": {
                 "eeLog": {"path": log, "active": active, "searching": eelog::searching() && log.is_none()},
@@ -1520,19 +1555,32 @@ impl State {
             .ok_or_else(|| UserError::new(format!("No syndicate is called {tag}.")).into())
     }
 
+    /// Relic eras with a fissure open right now ("Omnia" opens them all); storms are Railjack's.
+    fn open_eras(&self) -> HashSet<String> {
+        let (fissures, _) = world::fissures(self.settings().platform);
+        fissures.iter().filter(|f| f["storm"] != true).filter_map(|f| f["tier"].as_str().map(str::to_owned)).collect()
+    }
+
     /// Everything about one item, part or relic, with which relic farms are open right now.
     pub fn detail(&self, key: &str) -> Result<Value> {
-        let (fissures, _) = world::fissures(self.settings().platform);
-        let open: HashSet<String> = fissures
-            .iter()
-            .filter(|f| f["storm"] != true)
-            .filter_map(|f| f["tier"].as_str().map(str::to_owned))
-            .collect();
+        let open = self.open_eras();
         let view = self.view();
         let mut v = view.detail(key, &open).ok_or_else(|| UserError::new(format!("Nothing is called {key}.")))?;
         let pinned = v["key"].as_str().is_some_and(|k| view.manual.pinned.iter().any(|p| p == k));
         v["pinned"] = json!(pinned);
-        v["goal"] = json!(v["kind"] == "item" && view.manual.goals.iter().any(|g| g == key));
+        // What could go on the farming board from here: the item, or the mod, arcane or resource
+        // a drop name stands for.
+        let task = if v["kind"] == "item" {
+            Some(key.to_string())
+        } else if v["kind"] == "drop" {
+            key.strip_prefix("lookup:")
+                .filter(|uid| tasks::thing(&view, uid).is_some())
+                .map(str::to_owned)
+                .or_else(|| v["name"].as_str().and_then(|name| tasks::uid_by_name(&view, name)))
+        } else {
+            None
+        };
+        v["task"] = task.map_or(Value::Null, |uid| json!({"uid": uid, "onBoard": view.manual.has_task(&uid)}));
         Ok(v)
     }
 

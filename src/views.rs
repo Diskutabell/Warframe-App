@@ -153,7 +153,7 @@ pub struct RelicRow {
 
 /// How well `name` matches a search: lower is better, None is no match. Every word of the query
 /// may match the start of any word of the name, so "ash sys" finds "Ash Prime Systems Blueprint".
-fn match_rank(name: &str, q: &str, tokens: &[&str]) -> Option<u8> {
+pub(crate) fn match_rank(name: &str, q: &str, tokens: &[&str]) -> Option<u8> {
     let n = name.to_lowercase();
     if n == q {
         return Some(0);
@@ -169,14 +169,19 @@ fn match_rank(name: &str, q: &str, tokens: &[&str]) -> Option<u8> {
 }
 
 impl View {
-    fn part_recipe(&self, uid: &str) -> Option<Value> {
+    /// The recipe that crafts a part from its blueprint: keyed by the blueprint, making the
+    /// component. A prime weapon part drops ready-made and has none.
+    pub(crate) fn recipe_for_part(&self, uid: &str) -> Option<&gamedata::PartRecipe> {
         let part = self.cat.parts.get(uid)?;
         let uids = [Some(uid), part.alt.as_deref()];
-        let recipe = uids
-            .iter()
+        uids.iter()
             .flatten()
             .filter_map(|id| self.cat.part_recipes.get(*id))
-            .find(|recipe| uids.contains(&Some(recipe.result.as_str())))?;
+            .find(|recipe| uids.contains(&Some(recipe.result.as_str())))
+    }
+
+    fn part_recipe(&self, uid: &str) -> Option<Value> {
+        let recipe = self.recipe_for_part(uid)?;
         Some(json!({
             "quantity": recipe.quantity, "credits": recipe.credits, "seconds": recipe.seconds,
             "ingredients": recipe.ingredients.iter().map(|need| json!({
@@ -190,7 +195,7 @@ impl View {
     /// A resource's picture: WFCD's art for exactly that name, else the game's own icon (which
     /// for some resources is their store bundle's: Polymer Bundle's is a crate of weapons), else
     /// WFCD's art for the start of the name.
-    fn icon_of(&self, uid: &str, name: &str) -> Option<String> {
+    pub(crate) fn icon_of(&self, uid: &str, name: &str) -> Option<String> {
         self.exact_art(name)
             .or_else(|| self.cat.inventory.get(uid).and_then(|e| e.icon.clone()))
             .or_else(|| self.cat.art_by_name(name))
@@ -203,19 +208,24 @@ impl View {
     /// Owned count for any uid. Prime parts combine the blueprint and the crafted component, and a
     /// hand-set count wins over the inventory only if it is newer than the inventory.
     pub fn count(&self, uid: &str) -> i64 {
-        let inv = self.inv.as_deref();
-        let inv_t = inv.map_or(0.0, |i| i.synced_at.filter(|t| *t != 0.0).unwrap_or(i.imported));
         let mut uids = vec![uid];
         if let Some(alt) = self.cat.parts.get(uid).and_then(|p| p.alt.as_deref()) {
             uids.push(alt);
         }
-        uids.iter()
-            .map(|u| match (self.manual.counts.get(*u), inv) {
-                (Some((n, t)), i) if i.is_none() || *t > inv_t => *n,
-                (_, Some(i)) => i.counts.get(*u).copied().unwrap_or(0),
-                _ => 0,
-            })
-            .sum()
+        uids.iter().map(|u| self.hand_count(u).unwrap_or_else(|| self.held_stack(u))).sum()
+    }
+
+    /// The count set by hand for exactly this uid, when it is newer than the inventory (or there
+    /// is no inventory): then it replaces what the inventory says.
+    pub fn hand_count(&self, uid: &str) -> Option<i64> {
+        let (n, t) = self.manual.counts.get(uid)?;
+        let inv_t = self.inv.as_deref().map_or(0.0, |i| i.synced_at.filter(|t| *t != 0.0).unwrap_or(i.imported));
+        (self.inv.is_none() || *t > inv_t).then_some(*n)
+    }
+
+    /// The inventory's stack of exactly this uid, without hand-set counts or the part's twin.
+    pub fn held_stack(&self, uid: &str) -> i64 {
+        self.inv.as_deref().map_or(0, |i| i.counts.get(uid).copied().unwrap_or(0))
     }
 
     pub fn xp(&self, uid: &str) -> i64 {
@@ -791,14 +801,6 @@ impl View {
 
     /// Catalog entries, drop names, relics and syndicates matching `q`, best matches first.
     pub fn find(&self, q: &str) -> Value {
-        self.find_matching(q, false)
-    }
-
-    pub fn find_equipment(&self, q: &str) -> Value {
-        self.find_matching(q, true)
-    }
-
-    fn find_matching(&self, q: &str, equipment_only: bool) -> Value {
         let q = q.trim().to_lowercase();
         if q.chars().count() < 2 {
             return json!([]);
@@ -815,12 +817,6 @@ impl View {
                     "sub": it.category, "image": gamedata::image_url(it.image.as_deref()), "status": st.status}),
                 ));
             }
-        }
-        if equipment_only {
-            hits.sort_by(|a, b| {
-                (a.0, a.1).cmp(&(b.0, b.1)).then_with(|| a.2["name"].as_str().cmp(&b.2["name"].as_str()))
-            });
-            return Value::Array(hits.into_iter().take(24).map(|(_, _, v)| v).collect());
         }
         for (uid, p) in &self.cat.parts {
             if p.relics.is_empty() {
@@ -1112,28 +1108,6 @@ mod tests {
         assert_eq!(rank_for(1_960_000), (28, 1_960_000, 2_102_500));
         assert_eq!(rank_for(2_250_000), (30, 2_250_000, 2_397_500));
         assert_eq!(rank_for(2_397_500), (31, 2_397_500, 2_545_000), "Legendary 1");
-    }
-
-    #[test]
-    fn equipment_search_is_not_crowded_out_by_other_results() {
-        let mods: Vec<Value> =
-            (0..30).map(|n| json!({"uniqueName": format!("/mod/{n}"), "name": format!("Rh{n:02}")})).collect();
-        let cat = gamedata::build(&IndexMap::from([
-            ("Warframes".to_string(), json!([{"uniqueName": "/Rhino", "name": "Rhino", "masterable": true}])),
-            ("Mods".to_string(), json!(mods)),
-        ]));
-        let view = View {
-            cat: Arc::new(cat),
-            profile: None,
-            inv: None,
-            manual: Arc::new(Manual::default()),
-            market: Market::new(Arc::new(std::sync::RwLock::new(crate::config::Settings::default()))),
-            foundry: HashSet::new(),
-        };
-        assert!(!view.find("rh").as_array().unwrap().iter().any(|hit| hit["key"] == "/Rhino"));
-        let equipment = view.find_equipment("rh");
-        assert_eq!(equipment.as_array().unwrap().len(), 1);
-        assert_eq!(equipment[0]["key"], "/Rhino");
     }
 
     #[test]

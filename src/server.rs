@@ -281,8 +281,9 @@ fn get_api(s: &Arc<State>, path: &str, q: &HashMap<String, String>) -> Result<Va
         "relics" => s.view().relics(q.get("owned").is_some_and(|v| v == "1")),
         "trade" => s.trade(),
         "find" => s.view().find(q.get("q").map_or("", String::as_str)),
-        "find-equipment" => s.view().find_equipment(q.get("q").map_or("", String::as_str)),
-        "goals" => s.goals(),
+        "find-task" => crate::tasks::find(&s.view(), q.get("q").map_or("", String::as_str)),
+        "tasks" => s.tasks(),
+        "task" => s.task(q.get("uid").map_or("", String::as_str))?,
         "item" => s.detail(q.get("key").map_or("", String::as_str))?,
         "history" => s.history(),
         "world" => s.world(),
@@ -326,7 +327,18 @@ fn post_api(s: &Arc<State>, path: &str, b: &Value) -> Result<Option<Value>> {
         "inventory/clear" => s.clear_inventory(),
         "manual/count" => s.set_manual_count(&uid()?, b["count"].as_f64().map(|c| c as i64))?,
         "manual/pin" => s.set_pinned(&uid()?, b["pinned"].as_bool().unwrap_or(false))?,
-        "manual/goal" => s.set_goal(&uid()?, b["selected"].as_bool().unwrap_or(false))?,
+        // {uid, onBoard: bool} puts a task on the board or takes it off; {uid, target: n | null}
+        // sets how many of a mod, an arcane or a resource it asks for.
+        "manual/task" => {
+            let uid = uid()?;
+            if let Some(on) = b["onBoard"].as_bool() {
+                s.set_task(&uid, on)?;
+            }
+            if let Some(target) = b.get("target") {
+                s.set_task_target(&uid, target.as_f64().map(|n| n.round() as i64))?;
+            }
+        }
+        "tasks/clear" => return Ok(Some(json!({"removed": s.clear_done_tasks()?}))),
         "manual/mastered" => s.set_manual_mastered(&uid()?, b["mastered"].as_bool().unwrap_or(false))?,
         "rewards/scan" => return Ok(Some(serde_json::to_value(&*s.scan_rewards())?)),
         "window/show" => s.show_window(),

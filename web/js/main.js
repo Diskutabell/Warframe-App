@@ -40,7 +40,20 @@ function renderNav() {
   const { page } = route();
   $("#nav").innerHTML = PAGES.map((p, i) =>
     (p.id === "settings" ? `<div class="sep"></div>` : "") +
-    `<a href="#${p.id}" class="${p === page ? "on" : ""}" title="${esc(p.title)}${pageKey(p, i) ? ` (${pageKey(p, i)})` : ""}">${icon(p.icon)}<span>${esc(p.title)}</span></a>`).join("");
+    `<a href="#${p.id}" class="${p === page ? "on" : ""}" data-page="${p.id}" title="${esc(p.title)}${pageKey(p, i) ? ` (${pageKey(p, i)})` : ""}">${icon(p.icon)}<span>${esc(p.title)}</span>${p.badge ? `<b class="nav-badge" hidden></b>` : ""}</a>`).join("");
+  renderBadges();
+}
+
+/** The small counts beside a page's name: a page with a `badge(state)` says how many. */
+function renderBadges() {
+  for (const p of PAGES.filter((p) => p.badge)) {
+    const el = $(`#nav a[data-page="${p.id}"] .nav-badge`);
+    if (!el) continue;
+    const n = app.state ? p.badge(app.state) : 0;
+    el.hidden = !n;
+    el.textContent = n > 99 ? "99+" : String(n);
+    el.title = p.badgeTitle ? p.badgeTitle(n) : "";
+  }
 }
 
 // ------------------------------------------------------------------ the account switcher
@@ -110,6 +123,7 @@ async function poll() {
     app.state = null;
   }
   renderRail();
+  renderBadges();
   const { page } = route();
   if (app.state && page.onState) page.onState(app.state);
 }
@@ -195,8 +209,9 @@ document.addEventListener("wheel", (e) => {
 
 $("#openPalette").onclick = () => palette.open();
 palette.setPages(PAGES);
-// A change made in the drawer (a count, "mark as mastered") shows on the page behind it.
-window.addEventListener("wfp:changed", () => app.refresh());
+// A change made in the drawer (a count, "mark as mastered") shows on the page behind it, and in
+// the sidebar's counts at once rather than at the next poll.
+window.addEventListener("wfp:changed", () => { app.refresh(); poll(); });
 // Another account is shown: everything on the page belongs to it.
 window.addEventListener("wfp:account", async () => { await poll(); go(true); });
 hydrateIcons(document.body);

@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.8.0 - 2026-11-09
+
+### Added
+
+- **The farming planner is now a task board.** Every task is a card: equipment, mods, arcanes
+  and resources. Red means parts are missing (or copies, for a mod, an arcane or a resource),
+  yellow means every part is there but not the resources or credits to build it, green means it
+  is done: owned, building, or ready to build. Click a card for what it needs and where to get
+  it. "Clear done" takes the finished ones off the board.
+- **The sidebar counts finished tasks:** a small number beside Farming.
+- **Mods, arcanes and resources can go on the board**, from its search or with "Add to farming"
+  in their details. An arcane counts toward its top rank (21 copies for most, 10 for Exodia, Pax,
+  Virtuos and Residual arcanes), and ranked copies count as the copies fused into them. A resource
+  gets an amount to reach.
+- The inventory read now keeps the rank of ranked mods and arcanes, so a ranked copy counts as
+  owned. An inventory read by an older version gets them at the next read.
+
+### Changed
+
+- **What a build still takes is worked out from the inventory:** parts already crafted, or
+  crafting in the foundry, no longer count their recipe, and credits are counted too. Equipment
+  a build consumes (the two Furis of an Afuris) is checked like a part.
+- Farming goals from earlier versions move onto the board on the first start.
+- Peculiar mods are listed under Mods on the Inventory page; they were under Arcanes.
+
 ## 0.7.0 - 2026-11-09
 
 ### Added

@@ -39,6 +39,13 @@ pub struct Entry {
     pub kind: &'static str,
     /// What a blueprint builds.
     pub result: Option<String>,
+    /// The top rank of a mod or arcane (`fusionLimit`).
+    pub rank: Option<i64>,
+    /// "Common" ... "Legendary", for mods and arcanes.
+    pub rarity: Option<String>,
+    /// Left out of the codex (`excludeFromCodex`): internal entries such as the "Unfused
+    /// Artifact" placeholders and the helper copies of Arcane Steadfast. Nothing to farm.
+    pub hidden: bool,
 }
 
 fn icon_url(path: Option<&str>) -> Option<String> {
@@ -46,9 +53,10 @@ fn icon_url(path: Option<&str>) -> Option<String> {
 }
 
 /// The kind an export entry is filed under on the page, from its file and its path.
+/// The arcanes are all in their own file. The `/CosmeticEnhancers/` entries in the mod file are
+/// the Peculiar mods (checked 2026-11-09), which rank like any mod.
 fn kind_of(file: &str, uid: &str, entry: &Value) -> &'static str {
     match file {
-        "ExportUpgrades.json" if uid.contains("/CosmeticEnhancers/") => "Arcanes",
         "ExportUpgrades.json" => "Mods",
         "ExportArcanes.json" => "Arcanes",
         "ExportWeapons.json" if uid.contains("/OperatorAmplifiers/") => "Amps",
@@ -114,13 +122,18 @@ pub fn index(exports: &[(&str, &Value)], recipes: Option<&Value>, dict: &Value) 
     for (file, data) in exports {
         for (uid, entry) in data.as_object().into_iter().flatten() {
             let Some(key) = entry["name"].as_str() else { continue };
+            let kind = kind_of(file, uid, entry);
+            let ranked = matches!(kind, "Mods" | "Arcanes");
             out.insert(
                 uid.clone(),
                 Entry {
                     name: name_of(key),
                     icon: icon_url(entry["icon"].as_str()),
-                    kind: kind_of(file, uid, entry),
+                    kind,
                     result: None,
+                    rank: entry["fusionLimit"].as_i64().filter(|_| ranked),
+                    rarity: entry["rarity"].as_str().filter(|_| ranked).map(clean),
+                    hidden: entry["excludeFromCodex"] == true,
                 },
             );
         }
@@ -133,6 +146,9 @@ pub fn index(exports: &[(&str, &Value)], recipes: Option<&Value>, dict: &Value) 
             icon: built.and_then(|b| b.icon),
             kind: "Blueprints",
             result: Some(result.to_string()),
+            rank: None,
+            rarity: None,
+            hidden: false,
         });
     }
     out
@@ -150,19 +166,41 @@ mod tests {
             "/Lotus/Types/Items/Fish/Eidolon/DayFishItem": {"name": "/Lang/Fish"},
             "/Lotus/Types/Items/ShipDecos/Lamp": {"name": "/Lang/Lamp", "productCategory": "ShipDecorations"},
         });
-        let upgrades = json!({"/Lotus/Upgrades/CosmeticEnhancers/Offensive/Arc": {"name": "/Lang/Arc"}});
+        let upgrades = json!({
+            "/Lotus/Upgrades/Mods/Warframe/AvatarArmourMod": {"name": "/Lang/Fiber", "fusionLimit": 10, "rarity": "COMMON"},
+            "/Lotus/Upgrades/CosmeticEnhancers/Peculiars/InflationMod": {"name": "/Lang/Growth", "fusionLimit": 3},
+            "/Lotus/Weapons/CrewShip/CrewShipInnateDamageRandomMod": {"name": "/Lang/Unfused", "excludeFromCodex": true},
+        });
+        let arcanes = json!({"/Lotus/Upgrades/CosmeticEnhancers/Offensive/Arc": {"name": "/Lang/Arc", "fusionLimit": 5, "rarity": "LEGENDARY"}});
         let recipes =
             json!({"/Lotus/Types/Recipes/LampBlueprint": {"resultType": "/Lotus/Types/Items/ShipDecos/Lamp"}});
-        let dict = json!({"/Lang/Ferrite": "Ferrite", "/Lang/Fish": "Mawfish", "/Lang/Lamp": "Lamp", "/Lang/Arc": "Arcane Energize"});
-        let idx =
-            index(&[("ExportResources.json", &resources), ("ExportUpgrades.json", &upgrades)], Some(&recipes), &dict);
+        let dict = json!({"/Lang/Ferrite": "Ferrite", "/Lang/Fish": "Mawfish", "/Lang/Lamp": "Lamp", "/Lang/Arc": "Arcane Energize",
+                          "/Lang/Fiber": "Steel Fiber", "/Lang/Growth": "Peculiar Growth", "/Lang/Unfused": "Unfused Artifact"});
+        let idx = index(
+            &[
+                ("ExportResources.json", &resources),
+                ("ExportUpgrades.json", &upgrades),
+                ("ExportArcanes.json", &arcanes),
+            ],
+            Some(&recipes),
+            &dict,
+        );
         let ferrite = &idx["/Lotus/Types/Items/MiscItems/Ferrite"];
         assert_eq!(ferrite.name.as_deref(), Some("Ferrite"));
         assert_eq!(ferrite.icon.as_deref(), Some("https://browse.wf/Lotus/Interface/Icons/Ferrite.png"));
         assert_eq!(ferrite.kind, "Resources");
+        assert_eq!((ferrite.rank, ferrite.hidden), (None, false));
         assert_eq!(idx["/Lotus/Types/Items/Fish/Eidolon/DayFishItem"].kind, "Fish");
         assert_eq!(idx["/Lotus/Types/Items/ShipDecos/Lamp"].kind, "Decorations");
-        assert_eq!(idx["/Lotus/Upgrades/CosmeticEnhancers/Offensive/Arc"].kind, "Arcanes");
+        let arcane = &idx["/Lotus/Upgrades/CosmeticEnhancers/Offensive/Arc"];
+        assert_eq!((arcane.kind, arcane.rank, arcane.rarity.as_deref()), ("Arcanes", Some(5), Some("Legendary")));
+        let fiber = &idx["/Lotus/Upgrades/Mods/Warframe/AvatarArmourMod"];
+        assert_eq!((fiber.kind, fiber.rank, fiber.rarity.as_deref()), ("Mods", Some(10), Some("Common")));
+        assert_eq!(
+            idx["/Lotus/Upgrades/CosmeticEnhancers/Peculiars/InflationMod"].kind, "Mods",
+            "a Peculiar mod is a mod"
+        );
+        assert!(idx["/Lotus/Weapons/CrewShip/CrewShipInnateDamageRandomMod"].hidden);
         let bp = &idx["/Lotus/Types/Recipes/LampBlueprint"];
         assert_eq!((bp.name.as_deref(), bp.kind), (Some("Lamp Blueprint"), "Blueprints"));
     }

@@ -1,6 +1,6 @@
 // The detail drawer: one item, part or relic, from anywhere in the app.
 
-import { $, artUrl, act, api, art, duc, era, esc, fmt, hydrateIcons, icon, plat, statusPill, toast } from "./lib.js";
+import { $, artUrl, act, api, art, duc, era, esc, fmt, hydrateIcons, icon, plat, statusPill, TASK_STATE, toast } from "./lib.js";
 import { ICON, gimg } from "./game.js";
 
 let stack = [];
@@ -21,7 +21,8 @@ export function close() {
   if (location.hash.includes("item=")) history.replaceState(null, "", location.hash.replace(/[?&]item=[^&]*/, ""));
 }
 
-export async function open(key, push = true) {
+/** `opts.focusTarget`: for a farming task, start in its goal field. */
+export async function open(key, push = true, opts = {}) {
   const version = ++requestVersion;
   if (push) stack.push(key);
   const d = $("#drawer");
@@ -31,6 +32,7 @@ export async function open(key, push = true) {
     <div class="stack"><div class="skeleton" style="width:60%"></div><div class="skeleton"></div><div class="skeleton" style="width:80%"></div></div>`;
   d.querySelector("[data-close]").onclick = close;
   if (key.startsWith("syndicate:")) return openSyndicate(key, version);
+  if (key.startsWith("task:")) return openTask(key, version, opts);
   let x;
   try {
     x = await api("item?key=" + encodeURIComponent(key));
@@ -41,7 +43,8 @@ export async function open(key, push = true) {
   }
   if (version !== requestVersion) return;
   const body = x.kind === "item" ? item(x) : x.kind === "part" ? part(x) : x.kind === "drop"
-    ? `<div class="dhead">${art(x.image, "xl")}<div class="grow"><h2>${esc(x.name)}</h2></div></div>${acquisition(x.name, x.drops, x.dropCoverage)}`
+    ? `<div class="dhead">${art(x.image, "xl")}<div class="grow"><h2>${esc(x.name)}</h2>
+        ${x.task ? `<div class="row">${taskButton(x.task)}</div>` : ""}</div></div>${acquisition(x.name, x.drops, x.dropCoverage)}`
     : relic(x);
   const market = x.kind === "item" ? x.setSlug : x.slug;
   d.innerHTML = `<div class="drawer-top">
@@ -126,6 +129,174 @@ async function openSyndicate(key, version, again = 0) {
   }
 }
 
+// ------------------------------------------------------------------ a farming task
+
+const taskButton = (t) => `<button data-board="${t.onBoard ? 0 : 1}" data-uid="${esc(t.uid)}">
+  ${icon(t.onBoard ? "x" : "plus")} ${t.onBoard ? "Remove from farming" : "Add to farming"}</button>`;
+
+const TASK_PILL = { missing: "bad", resources: "amber", done: "good" };
+
+/** Puts a task on the farming board or takes it off; true when that worked. */
+async function setOnBoard(uid, on) {
+  const ok = await act("manual/task", { uid, onBoard: on }, on ? "Added to the farming board" : "Taken off the farming board");
+  return !!ok;
+}
+
+/** A selector that finds a control again after the drawer is redrawn: the stepper buttons by
+ *  their label, the goal field. */
+function focusKey(el) {
+  if (el.matches("[data-target]")) return "[data-target]";
+  const label = el.getAttribute("aria-label");
+  return label ? `[aria-label="${CSS.escape(label)}"]` : null;
+}
+
+async function openTask(key, version, opts = {}, again = false) {
+  const d = $("#drawer");
+  const scroll = again ? d.scrollTop : 0;
+  const was = again && d.contains(document.activeElement) ? focusKey(document.activeElement) : null;
+  let t;
+  try {
+    t = await api("task?uid=" + encodeURIComponent(key.slice("task:".length)));
+  } catch (e) {
+    if (version !== requestVersion) return;
+    if (again) toast(e.message, true);
+    else d.querySelector(".stack").innerHTML = `<div class="callout">${esc(e.message)}</div>`;
+    return;
+  }
+  if (version !== requestVersion) return;
+  const market = t.item?.setSlug;
+  d.innerHTML = `<div class="drawer-top">
+      ${stack.length > 1 ? `<button class="ghost" data-back>${icon("back")} Back</button>` : ""}
+      <span class="grow"></span>
+      ${market ? `<a class="btn ghost" href="https://warframe.market/items/${esc(market)}" target="_blank" rel="noopener">${icon("link")} warframe.market</a>` : ""}
+      <button class="ghost icon" data-close title="Close (Esc)">${icon("x")}</button>
+    </div>${taskView(t)}`;
+  hydrateIcons(d);
+  wireTask(d, t, key, version);
+  const goal = d.querySelector("[data-target]");
+  if (again) {
+    d.scrollTop = scroll;
+    // The keyboard stays on the control just used.
+    ((was && d.querySelector(was)) || d.querySelector("[data-close]")).focus({ preventScroll: true });
+  } else if (opts.focusTarget && goal) { goal.focus(); goal.select(); }
+  else d.querySelector("[data-close]").focus();
+}
+
+function taskView(t) {
+  return `<div class="dhead">${art(t.image, "xl")}<div class="grow"><h2>${esc(t.name)}</h2>
+      <div class="row wrap"><span class="pill ${TASK_PILL[t.state] || ""}">${esc(TASK_STATE[t.state] || t.state)}</span><span class="pill">${esc(t.sub)}</span></div>
+      <div class="task-line">${esc(t.note)}</div></div></div>
+    <div class="row wrap">
+      ${t.kind === "item" ? `<button data-open="${esc(t.uid)}">Item details</button>` : ""}
+      ${taskButton({ uid: t.uid, onBoard: t.onBoard })}
+    </div>
+    ${t.kind === "item" ? taskItem(t) : taskCount(t)}`;
+}
+
+/** Where a missing part comes from: its relics, then any direct drops. */
+function partSources(p) {
+  const relics = p.relics || [];
+  const drops = p.drops || [];
+  if (!relics.length && !drops.length) {
+    return `<div class="muted">No source in the loaded drop tables. Open the part for the wiki link.</div>`;
+  }
+  return `${relics.length ? `<div class="chips">${relicChips(relics)}</div>` : ""}
+    ${drops.length ? `<details class="more"><summary>Direct drops (${drops.length})</summary><div class="list">${dropRows(drops)}</div></details>` : ""}`;
+}
+
+function partLine(p) {
+  if (p.have < p.need) return `<span class="warn-text">${fmt(p.have)} / ${fmt(p.need)} held · ${fmt(p.need - p.have)} missing</span>`;
+  if (p.crafting) return `<span class="lotus">${fmt(p.have)} / ${fmt(p.need)} · ${fmt(p.crafting)} crafting in the foundry</span>`;
+  if (p.builds) return `<span class="lotus">${fmt(p.have)} / ${fmt(p.need)} held · ${fmt(p.builds)} to craft</span>`;
+  return `<span class="lotus">${fmt(p.have)} / ${fmt(p.need)} held</span>`;
+}
+
+function taskItem(t) {
+  const x = t.item;
+  const parts = x.parts || [];
+  const missing = parts.filter((p) => p.have < p.need);
+  // Start with what can be cracked right now, then what still drops.
+  const priority = (p) => p.relics?.some((r) => r.owned && r.open) ? 0
+    : p.relics?.some((r) => !r.vaulted) ? 1 : p.drops?.length ? 2 : 3;
+  missing.sort((a, b) => priority(a) - priority(b));
+  const next = t.state === "done" ? "" : missing.length ? `Consider starting with ${missing[0].name}.`
+    : t.state === "resources" ? "Every part is there: farm the resources marked short below." : "";
+  const materials = t.materials || [];
+  const credits = t.credits?.need ? `<div class="list-row res-row"><img class="res-pic" alt="" src="icons/credits.png">
+      <div class="main"><div class="t">Credits</div>
+        <div class="s">${t.credits.have == null ? "Held: unknown" : `${fmt(t.credits.have)} held`} · ${fmt(t.credits.need)} required${t.credits.have != null && t.credits.have < t.credits.need ? ` · <span class="warn-text">${fmt(t.credits.need - t.credits.have)} short</span>` : ""}</div></div></div>` : "";
+  return `${next ? `<p class="muted" style="margin:12px 0 0">${esc(next)}</p>` : ""}
+    ${!t.inventoryKnown ? `<p class="callout" style="margin-top:12px">No inventory loaded: counts only include what you set by hand, and every part is taken to still need crafting.</p>` : ""}
+    ${parts.length ? `<div class="dsec"><h2>Parts</h2>
+      ${!x.recipesAvailable ? `<p class="callout">Component recipes are unavailable. Connect to download the recipe data or check the wiki.</p>` : ""}
+      ${parts.map((p) => `<div class="part">
+        <div class="row"><button class="ghost grow" data-open="${esc(p.uid)}" style="text-align:left"><b>${esc(p.name)}</b></button>${partLine(p)}</div>
+        ${p.have < p.need ? partSources(p) : ""}
+        ${p.recipe && p.builds ? recipeDetails(p.recipe) : ""}
+      </div>`).join("")}</div>` : `<p class="muted">No parts are known for this item: check where to get it in its details.</p>`}
+    ${x.requires?.length ? `<div class="dsec"><h2>Equipment required</h2><div class="list">${x.requires.map((r) =>
+      `<div class="list-row"><button class="ghost grow" data-open="${esc(r.uid)}" style="text-align:left">${esc(r.name)}</button>
+      <span>${r.have == null ? "Owned: unknown" : `${fmt(r.have)} / ${fmt(r.count)} owned`}</span></div>`).join("")}</div></div>` : ""}
+    ${materials.length || credits ? `<div class="dsec"><h2>Still to spend</h2>
+      <p class="muted" style="margin:-4px 0 8px;font-size:13px">The final build and the parts still to craft. Parts already crafted, or crafting in the foundry, are left out.</p>
+      <div class="list">${resourceRows(materials)}${credits}</div></div>` : ""}
+    <p class="muted" style="font-size:13px;margin-top:16px">Recipes and sources may be incomplete or cached. Quest, purchase and time-limited sources may be missing; check the item details or the wiki.</p>`;
+}
+
+function taskCount(t) {
+  const h = t.held || {};
+  const ranks = (h.ranks || []).slice().sort((a, b) => b - a);
+  const unranked = h.count - (t.kind === "arcane" ? ranks.reduce((s, r) => s + ((r + 1) * (r + 2)) / 2, 0) : ranks.length);
+  const third = t.kind === "arcane" ? ["Rank reached", t.rank == null ? "–" : `${t.rank} / ${t.topRank}`]
+    : t.kind === "mod" ? ["Top rank", t.topRank == null ? "–" : String(t.topRank)]
+      : ["Still to farm", fmt(Math.max(0, t.target - h.count))];
+  const byRank = new Map();
+  for (const r of ranks) byRank.set(r, (byRank.get(r) || 0) + 1);
+  const pieces = [...byRank].map(([r, n]) => `${fmt(n)} at rank ${r}`);
+  if (unranked > 0) pieces.push(`${fmt(unranked)} unranked`);
+  const heldAs = ranks.length ? `Held: ${pieces.join(", ")}.` : "";
+  return `<div class="kv" style="margin-top:14px">
+      <div><span>${t.kind === "resource" ? "Held" : "Copies held"}</span><b>${stepper(t.uid, h.count)}</b></div>
+      <div><span>Goal</span><b><input type="number" class="goal" min="1" step="1" data-target value="${esc(t.target)}" aria-label="How many to hold"></b></div>
+      <div><span>${third[0]}</span><b>${esc(third[1])}</b></div>
+    </div>
+    ${t.kind === "arcane" && t.topRank != null ? `<p class="muted" style="font-size:13px">${fmt(t.targetDefault)} copies fuse to rank ${t.topRank}, its top rank. ${esc(heldAs)}</p>` : heldAs ? `<p class="muted" style="font-size:13px">${esc(heldAs)}</p>` : ""}
+    ${h.byHand ? `<p class="muted" style="font-size:13px">The count is the one you set; the next inventory read replaces it.</p>` : ""}
+    ${t.kind !== "resource" && t.inventoryKnown && h.ranks == null && !h.byHand ? `<p class="callout info">Ranked copies are counted from the next inventory read; until then only unranked ones count.</p>` : ""}
+    ${acquisition(t.name, t.drops, t.dropCoverage)}`;
+}
+
+function wireTask(d, t, key, version) {
+  const reload = () => { changed(); if (version === requestVersion) openTask(key, version, {}, true); };
+  d.querySelector("[data-close]").onclick = close;
+  const back = d.querySelector("[data-back]");
+  if (back) back.onclick = () => { stack.pop(); open(stack[stack.length - 1], false); };
+  for (const el of d.querySelectorAll("[data-open]")) {
+    el.onclick = (e) => { e.stopPropagation(); open(el.dataset.open); };
+  }
+  for (const b of d.querySelectorAll("[data-count]")) {
+    b.onclick = async (e) => {
+      e.stopPropagation();
+      if (await act("manual/count", { uid: b.dataset.count, count: Math.max(0, +b.dataset.c) })) reload();
+    };
+  }
+  const goal = d.querySelector("[data-target]");
+  if (goal) goal.onchange = async () => {
+    const text = goal.value.trim();
+    // Cleared: back to the default (one copy, or an arcane's top rank).
+    const target = text === "" ? null : Math.max(1, Math.round(+text) || 1);
+    if (!t.onBoard) { toast("Add it to the farming board first.", true); return; }
+    if (await act("manual/task", { uid: t.uid, target })) reload();
+  };
+  const board = d.querySelector("[data-board]");
+  if (board) board.onclick = async () => {
+    const on = board.dataset.board === "1";
+    if (!(await setOnBoard(t.uid, on))) return;
+    if (on) reload();
+    else { changed(); close(); }
+  };
+}
+
 function stepper(uid, n) {
   return `<span class="stepper"><button data-count="${esc(uid)}" data-c="${n - 1}" aria-label="One fewer">−</button><b>${n}</b><button data-count="${esc(uid)}" data-c="${n + 1}" aria-label="One more">+</button></span>`;
 }
@@ -204,7 +375,7 @@ function item(x) {
     <div class="bar lotus" style="margin-top:10px"><i style="width:${pct}%"></i></div>
     <div class="row" style="margin-top:12px">
       <button data-mastered="${x.manual ? 0 : 1}">${icon("check")} ${x.manual ? "Unmark as mastered" : "Mark as mastered"}</button>
-      <button data-goal>${x.goal ? "Remove farming goal" : "Set farming goal"}</button>
+      ${x.task ? taskButton(x.task) : ""}
       <span class="muted" style="font-size:13px">${x.manual ? "Marked by hand." : "If the profile is out of date."}</span>
     </div>
     ${acquisition(x.name, x.drops, x.dropCoverage)}
@@ -274,11 +445,9 @@ function wire(d, x, version) {
   if (pin) pin.onclick = async () => {
     if (await act("manual/pin", { uid: x.key, pinned: !x.pinned }, x.pinned ? "Unpinned" : "Pinned to the Overview")) refresh();
   };
-  const goal = d.querySelector("[data-goal]");
-  if (goal) goal.onclick = async () => {
-    if (await act("manual/goal", { uid: x.uid, selected: !x.goal }, x.goal ? "Goal removed" : "Goal added to Farming")) {
-      refresh();
-    }
+  const board = d.querySelector("[data-board]");
+  if (board) board.onclick = async () => {
+    if (await setOnBoard(board.dataset.uid, board.dataset.board === "1")) refresh();
   };
   const m = d.querySelector("[data-mastered]");
   if (m) m.onclick = async () => {
