@@ -91,7 +91,7 @@ pub fn kind_by_path(uid: &str) -> &'static str {
 
 /// A name as the page shows it: the game's text markup ("<SHARD_BLUE_SIMPLE> Azure Archon
 /// Shard") goes, and a name written all in capitals ("ADVANCES DEBT-BOND") gets ordinary case.
-fn clean(name: &str) -> String {
+pub(crate) fn clean(name: &str) -> String {
     let mut out = String::new();
     let mut in_tag = false;
     for c in name.chars() {

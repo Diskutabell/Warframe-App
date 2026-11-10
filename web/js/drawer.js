@@ -207,6 +207,7 @@ function partSources(p) {
 function partLine(p) {
   if (p.have < p.need) return `<span class="warn-text">${fmt(p.have)} / ${fmt(p.need)} held · ${fmt(p.need - p.have)} missing</span>`;
   if (p.crafting) return `<span class="lotus">${fmt(p.have)} / ${fmt(p.need)} · ${fmt(p.crafting)} crafting in the foundry</span>`;
+  if (p.recipeUnknown) return `<span class="amber">${fmt(p.have)} / ${fmt(p.need)} held · to craft, recipe unknown</span>`;
   if (p.builds) return `<span class="lotus">${fmt(p.have)} / ${fmt(p.need)} held · ${fmt(p.builds)} to craft</span>`;
   return `<span class="lotus">${fmt(p.have)} / ${fmt(p.need)} held</span>`;
 }
@@ -219,9 +220,12 @@ function taskItem(t) {
   const priority = (p) => p.relics?.some((r) => r.owned && r.open) ? 0
     : p.relics?.some((r) => !r.vaulted) ? 1 : p.drops?.length ? 2 : 3;
   missing.sort((a, b) => priority(a) - priority(b));
-  const next = t.state === "done" ? "" : missing.length ? `Consider starting with ${missing[0].name}.`
-    : t.state === "resources" ? "Every part is there: farm the resources marked short below." : "";
   const materials = t.materials || [];
+  const short = materials.some((m) => m.have != null && m.have < m.count) || (t.credits?.have != null && t.credits.have < t.credits.need);
+  const unknown = parts.filter((p) => p.recipeUnknown && p.have >= p.need);
+  const next = t.state === "done" ? "" : missing.length ? `Consider starting with ${missing[0].name}.`
+    : unknown.length && !short ? `The game data has no recipe for ${unknown.map((p) => p.name).join(", ")} yet: the foundry in game shows what crafting it takes.`
+    : t.state === "resources" ? "Every part is there: farm the resources marked short below." : "";
   const credits = t.credits?.need ? `<div class="list-row res-row"><img class="res-pic" alt="" src="icons/credits.png">
       <div class="main"><div class="t">Credits</div>
         <div class="s">${t.credits.have == null ? "Held: unknown" : `${fmt(t.credits.have)} held`} · ${fmt(t.credits.need)} required${t.credits.have != null && t.credits.have < t.credits.need ? ` · <span class="warn-text">${fmt(t.credits.need - t.credits.have)} short</span>` : ""}</div></div></div>` : "";

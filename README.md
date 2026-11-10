@@ -45,7 +45,14 @@ Linux it runs natively next to the game (no Wine needed for the app itself).
   show known mission and enemy drop chances and link to the wiki for other sources. Mastery can be
   shown as a table or cards and filtered to Prime or non-Prime items.
 - **Fissures and world:** live fissures with the best relic you own for each, cycles, Baro,
-  sortie, archon hunt, bounties, the Circuit, Archimedea, alerts, invasions, Nightwave, Darvo.
+  sortie, archon hunt, bounties, alerts, invasions, Nightwave, Darvo.
+- **Arbitrations:** the one running now and the next 24 hours, each node with its community tier
+  (arbi.guide), and when the next S, A and B tier arbitration comes up.
+- **Duviri and Archimedea:** the Warframes and weapons Duviri offers you right now (read from the
+  game's log, with the ones you don't own marked), the Circuit's rewards this week, and this
+  week's Deep and Temporal Archimedea: missions, deviations, risk variables and personal
+  modifiers. Archimedea loadout picks are drawn per player inside the game and are not shown.
+- **Updates:** a popup at startup when a newer version is out, with its release notes.
 - **Foundry and market:** what's building, what you could build, spare parts in platinum and
   ducats, price checks.
 - **Search:** Ctrl+K also finds mods, resources, gear and names in loaded drop tables. The mod
@@ -189,10 +196,13 @@ This is the part most likely to be against the ToS. See the disclaimer above.
 - [WFCD warframe-items](https://github.com/WFCD/warframe-items) and its
   [drop data](https://drops.warframestat.us): items, parts, relics, drop tables
 - [warframe-public-export-plus](https://github.com/calamity-inc/warframe-public-export-plus):
-  star chart mastery XP, syndicates, relic drops
+  star chart mastery XP, syndicates, relic drops, recipes
+- DE's Public Export (`content.warframe.com/PublicExport`): current recipes, once a day
 - [api.warframestat.us](https://api.warframestat.us): fissures, world timers, riven prices
 - [warframe.market](https://warframe.market): prices and item art (at most 3 requests a second)
-- [browse.wf](https://browse.wf): the game's own interface art
+- [browse.wf](https://browse.wf): the game's own interface art, the arbitration schedule and the
+  [arbi.guide](https://arbi.guide) tiers
+- GitHub: the latest release of this app, once at startup
 - DE's public profile: mastery XP, star chart, intrinsics, standing
 - `EE.log`, reward screen OCR, your own counts, an imported inventory, or the memory scan
 

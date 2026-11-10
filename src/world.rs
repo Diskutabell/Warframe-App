@@ -1,5 +1,6 @@
 //! The live world from the community worldstate API (api.warframestat.us): void fissures,
-//! open-world cycles, Baro Ki'Teer, sortie, archon hunt, Steel Path, Nightwave and Darvo.
+//! open-world cycles, Baro Ki'Teer, sortie, archon hunt, Steel Path, Nightwave, Darvo, the
+//! Circuit and Archimedea; with what Duviri offers the account, from its log (`eelog.rs`).
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -8,7 +9,9 @@ use serde_json::{Value, json};
 
 use crate::clock;
 use crate::config::Platform;
-use crate::gamedata::Catalog;
+use crate::eelog::DuviriOffers;
+use crate::gamedata::{self, Catalog};
+use crate::views::View;
 use crate::{net, now};
 
 const API: &str = "https://api.warframestat.us/{platform}?language=en";
@@ -47,6 +50,39 @@ pub fn nightwave_tag(platform: Platform) -> Option<String> {
     let (raw, _) = worldstate(platform);
     let tag: String = raw.as_deref()?["nightwave"]["tag"].as_str()?.chars().filter(|c| !c.is_whitespace()).collect();
     (!tag.is_empty()).then_some(tag)
+}
+
+/// When the running Duviri spiral began. Duviri's loadout picks are rolled anew with each one.
+pub fn spiral_began(platform: Platform) -> Option<f64> {
+    let (raw, _) = worldstate(platform);
+    raw.as_deref()?["duviriCycle"]["activation"].as_str().and_then(clock::parse_iso)
+}
+
+/// The game's equipment slots in the order the page lists them.
+const SLOTS: [(u8, &str); 4] = [(3, "Warframes"), (1, "Primary"), (0, "Secondary"), (5, "Melee")];
+
+/// What Duviri offers the account (from its log), named and pictured, by slot. `stale` once a
+/// spiral has begun since they were rolled: then the game has picked new ones.
+pub fn duviri_picks(view: &View, offers: &DuviriOffers, spiral_began: Option<f64>) -> Value {
+    let pick = |p: &crate::eelog::DuviriPick| {
+        let item = view.cat.items.get(&p.uid);
+        let mastered = item.is_some_and(|it| view.item_status(it).status == "mastered");
+        json!({"uid": p.uid, "name": view.cat.name_of(&p.uid), "owned": p.owned, "mastered": mastered,
+               "image": item.and_then(|it| gamedata::image_url(it.image.as_deref()))})
+    };
+    let mut groups: Vec<Value> = SLOTS
+        .iter()
+        .map(|(category, slot)| {
+            let picks: Vec<Value> = offers.picks.iter().filter(|p| p.category == *category).map(pick).collect();
+            json!({"slot": slot, "picks": picks})
+        })
+        .collect();
+    let other: Vec<Value> =
+        offers.picks.iter().filter(|p| SLOTS.iter().all(|(c, _)| *c != p.category)).map(pick).collect();
+    groups.push(json!({"slot": "Other", "picks": other}));
+    groups.retain(|g| g["picks"].as_array().is_some_and(|p| !p.is_empty()));
+    let stale = offers.rolled.zip(spiral_began).is_some_and(|(rolled, began)| rolled < began);
+    json!({"groups": groups, "rolled": offers.rolled, "stale": stale})
 }
 
 /// The fissures open right now, normal ones first, then by tier and expiry.
@@ -133,6 +169,47 @@ fn spaced(name: &str) -> String {
     out
 }
 
+/// "Name: what it does" pairs from the worldstate as `{name, description}`. A placeholder the
+/// game itself has not filled in ("[PH] Infected Wounds Desc", 2026-11-10) is no description.
+fn described(v: &Value) -> Value {
+    let description = v["description"].as_str().filter(|d| !d.trim().is_empty() && !d.starts_with("[PH]"));
+    json!({"name": v["name"], "description": description})
+}
+
+/// A week of Deep or Temporal Archimedea: the three missions with their deviation and risk
+/// variables (`elite`: only in Elite Archimedea), and the personal modifiers on offer. These are
+/// the same for everyone. The loadout picks are not here: the game draws them for each player
+/// from the week's seed and that player's own gear, and only tells DE how many were worn
+/// (`ConquestEquipmentSuggestionsFulfilled`). Checked 2026-11-10: not in DE's world state or the
+/// inventory, no other tool shows them, and a session's EE.log in which the Archimedea screens
+/// were not opened has none.
+fn archimedea(a: &Value) -> Value {
+    // The type arrives as spaced-out internal text: "C T_ L A B" is the labs, "C T_ H E X" Hollvania.
+    let key: String = a["typeKey"].as_str().unwrap_or("").chars().filter(|c| !c.is_whitespace()).collect();
+    let name = match key.as_str() {
+        "CT_LAB" => "Deep Archimedea",
+        "CT_HEX" => "Temporal Archimedea",
+        _ => "Archimedea",
+    };
+    let list = |v: &Value| v.as_array().cloned().unwrap_or_default();
+    let missions: Vec<Value> = list(&a["missions"])
+        .iter()
+        .map(|m| {
+            let risks: Vec<Value> = list(&m["risks"])
+                .iter()
+                .map(|r| {
+                    let mut risk = described(r);
+                    risk["elite"] = json!(r["isHard"] == true);
+                    risk
+                })
+                .collect();
+            json!({"type": m["missionType"], "faction": m["faction"], "deviation": described(&m["deviation"]), "risks": risks})
+        })
+        .collect();
+    let modifiers: Vec<Value> = list(&a["personalModifiers"]).iter().map(described).collect();
+    json!({"name": name, "expiry": a["expiry"], "missions": missions, "modifiers": modifiers})
+}
+
 /// Everything the world panel shows.
 pub fn summary(platform: Platform) -> Value {
     let (raw, err) = worldstate(platform);
@@ -200,17 +277,7 @@ pub fn summary(platform: Platform) -> Value {
             .map(|c| json!({"steel": c["category"] == "hard",
                             "choices": c["choices"].as_array().into_iter().flatten().filter_map(Value::as_str).map(spaced).collect::<Vec<_>>()}))
             .collect::<Vec<_>>(),
-        // The type arrives as spaced-out internal text: "C T_ L A B" is the labs, "C T_ H E X" Hollvania.
-        "archimedea": raw["archimedeas"].as_array().into_iter().flatten()
-            .map(|a| {
-                let key: String = a["typeKey"].as_str().unwrap_or("").chars().filter(|c| !c.is_whitespace()).collect();
-                let name = match key.as_str() { "CT_LAB" => "Deep Archimedea", "CT_HEX" => "Temporal Archimedea", _ => "Archimedea" };
-                json!({"name": name, "expiry": a["expiry"],
-                       "missions": a["missions"].as_array().into_iter().flatten()
-                           .map(|m| json!({"type": m["missionType"], "faction": m["faction"], "deviation": m["deviation"]["name"]}))
-                           .collect::<Vec<_>>()})
-            })
-            .collect::<Vec<_>>(),
+        "archimedea": raw["archimedeas"].as_array().into_iter().flatten().map(archimedea).collect::<Vec<_>>(),
         "events": raw["events"].as_array().into_iter().flatten()
             .map(|e| json!({"name": e["description"], "node": e["node"], "expiry": e["expiry"],
                             "score": e["currentScore"], "goal": e["maximumScore"]}))
@@ -304,6 +371,81 @@ mod tests {
             json!({"items": ["Orokin Catalyst"], "countedItems": [{"type": "Fieldron", "count": 3}], "credits": 10000});
         assert_eq!(reward_text(&r), "Orokin Catalyst, 3x Fieldron, 10000 credits");
         assert_eq!(spaced("AckAndBrunt"), "Ack And Brunt");
+    }
+
+    #[test]
+    fn duviri_picks_are_named_and_grouped_by_slot() {
+        use crate::eelog::{DuviriOffers, DuviriPick};
+        use std::collections::HashSet;
+        use std::sync::{Arc, RwLock};
+        let cat = gamedata::build(&indexmap::IndexMap::from([
+            (
+                "Warframes".to_string(),
+                json!([{"uniqueName": "/Lotus/Powersuits/Paladin/Paladin", "name": "Oberon", "masterable": true, "imageName": "oberon.png"}]),
+            ),
+            ("Primary".to_string(), json!([{"uniqueName": "/W/GrnBurstRifle", "name": "Hind", "masterable": true}])),
+        ]));
+        let view = View {
+            cat: Arc::new(cat),
+            profile: None,
+            inv: None,
+            manual: Arc::new(crate::accounts::Manual::default()),
+            market: crate::market::Market::new(Arc::new(RwLock::new(crate::config::Settings::default()))),
+            foundry: HashSet::new(),
+        };
+        let pick = |uid: &str, category, owned| DuviriPick { uid: uid.into(), category, owned };
+        let offers = DuviriOffers {
+            picks: vec![
+                pick("/W/GrnBurstRifle", 1, true),
+                pick("/Lotus/Powersuits/Paladin/Paladin", 3, false),
+                pick("/Lotus/Weapons/Tenno/Bows/DuelistBow/DuelistBow", 1, true),
+            ],
+            rolled: Some(100.0),
+        };
+        let d = duviri_picks(&view, &offers, Some(50.0));
+        let slots: Vec<&str> = d["groups"].as_array().unwrap().iter().map(|g| g["slot"].as_str().unwrap()).collect();
+        assert_eq!(slots, ["Warframes", "Primary"], "Warframes first, empty slots left out");
+        let oberon = &d["groups"][0]["picks"][0];
+        assert_eq!((oberon["name"].as_str(), oberon["owned"].as_bool()), (Some("Oberon"), Some(false)));
+        assert!(oberon["image"].as_str().is_some_and(|u| u.ends_with("oberon.png")));
+        assert_eq!(d["groups"][1]["picks"][0]["name"], "Hind");
+        assert!(
+            d["groups"][1]["picks"][1]["name"].as_str().is_some_and(|n| !n.is_empty()),
+            "an unknown uid still gets a name"
+        );
+        assert_eq!(d["stale"], false);
+        assert_eq!(duviri_picks(&view, &offers, Some(200.0))["stale"], true, "a spiral began after the roll");
+        assert_eq!(duviri_picks(&view, &offers, None)["stale"], false);
+    }
+
+    #[test]
+    fn archimedea_lists_missions_risks_and_modifiers() {
+        // The shape api.warframestat.us served on 2026-11-10, shortened.
+        let a = json!({"typeKey": "C T_ L A B", "expiry": "2026-11-16T00:00:00.000Z",
+            "missions": [{"faction": "Man in the Wall", "missionType": "Extermination",
+                "deviation": {"key": "GrowingIncursion", "name": "Fissure Cascade", "description": "Fissures rip into the mission."},
+                "risks": [{"key": "ShieldedFoes", "name": "Bolstered Belligerents", "description": "Overguard.", "isHard": false},
+                          {"key": "Quicksand", "name": "Entanglement", "description": "Slowed.", "isHard": true}]}],
+            "personalModifiers": [{"key": "ShieldDelay", "name": "Lethargic Shields", "description": "Shield recharge delay increased 500%."}]});
+        let w = archimedea(&a);
+        assert_eq!(w["name"], "Deep Archimedea");
+        assert_eq!(
+            w["missions"][0]["deviation"],
+            json!({"name": "Fissure Cascade", "description": "Fissures rip into the mission."})
+        );
+        let risks: Vec<(&str, bool)> = w["missions"][0]["risks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r["name"].as_str().unwrap(), r["elite"].as_bool().unwrap()))
+            .collect();
+        assert_eq!(risks, [("Bolstered Belligerents", false), ("Entanglement", true)]);
+        assert_eq!(w["modifiers"][0]["name"], "Lethargic Shields");
+        let placeholder =
+            json!({"personalModifiers": [{"name": "Infected Wounds", "description": "[PH] Infected Wounds Desc"}]});
+        assert_eq!(archimedea(&placeholder)["modifiers"][0], json!({"name": "Infected Wounds", "description": null}));
+        assert_eq!(archimedea(&json!({"typeKey": "C T_ H E X"}))["name"], "Temporal Archimedea");
+        assert_eq!(archimedea(&json!({}))["missions"], json!([]));
     }
 
     #[test]

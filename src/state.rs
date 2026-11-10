@@ -32,7 +32,7 @@ use crate::ocr::{self, reward, screenshot};
 use crate::rivens::{self, Graded};
 use crate::sources::{self, Inventory, Profile};
 use crate::views::View;
-use crate::{UserError, compositor, history, now, standing, tasks, world};
+use crate::{UserError, arbitration, compositor, history, net, now, standing, tasks, update, world};
 
 /// DE temporarily IP-blocks game login for clients that query profiles too often.
 pub const PROFILE_COOLDOWN: f64 = 300.0;
@@ -356,6 +356,8 @@ pub struct State {
     ui: Mutex<Option<async_channel::Sender<UiEvent>>>,
     tools: Mutex<(f64, Value)>,
     notifier: Mutex<Notifier>,
+    /// A newer release, once the check at startup has found one (`update::check`).
+    update: Mutex<Option<Value>>,
     /// When this run of the app started: the reward session counts from here.
     started: f64,
 }
@@ -462,6 +464,7 @@ impl State {
             ui: Mutex::new(None),
             tools: Mutex::new((f64::NEG_INFINITY, Value::Null)),
             notifier: Mutex::new(Notifier::default()),
+            update: Mutex::new(None),
             started: now(),
         })
     }
@@ -506,6 +509,15 @@ impl State {
 
         let me = Arc::clone(self);
         std::thread::Builder::new().name("background".into()).spawn(move || me.background()).ok();
+        // One look at GitHub per start; `--offline` asks nobody.
+        if !net::offline() {
+            let me = Arc::clone(self);
+            let check = move || match update::check() {
+                Ok(found) => *lock(&me.update) = found,
+                Err(e) => eprintln!("could not check for a newer version: {e:#}"),
+            };
+            std::thread::Builder::new().name("update-check".into()).spawn(check).ok();
+        }
         // The game may already be running and synced.
         if memscan::find_game_pid().is_some() {
             self.schedule_memscan(Duration::from_secs(20), 1);
@@ -627,6 +639,21 @@ impl State {
                 if changed {
                     d.save();
                 }
+            }
+            LogEvent::Duviri(offers) => {
+                let mut d = lock(&self.data);
+                let Some(game) = d.game.clone() else { return };
+                let Some(acc) = d.get_mut(&game) else { return };
+                // A log read back at startup may hold an older roll than the one kept.
+                let older = match (&acc.duviri, offers.rolled) {
+                    (Some(kept), Some(rolled)) => kept.rolled.is_some_and(|t| t > rolled),
+                    _ => false,
+                };
+                if older || acc.duviri.as_ref() == Some(&offers) {
+                    return;
+                }
+                acc.duviri = Some(offers);
+                d.save();
             }
             LogEvent::RewardScreen => {
                 if self.settings().ocr_enabled {
@@ -1450,6 +1477,7 @@ impl State {
         json!({
             "ready": v.cat.loaded_at.is_some(), "dataError": self.catalog_error(),
             "version": env!("CARGO_PKG_VERSION"), "os": std::env::consts::OS, "desktop": self.has_ui(),
+            "update": lock(&self.update).clone(),
             "account": account,
             "accounts": d.accounts.iter().map(|a| json!({
                 "key": a.key, "name": a.name, "id": a.id, "source": a.source,
@@ -1530,6 +1558,13 @@ impl State {
         let mut w = world::summary(platform);
         let view = self.view();
         world::add_art(&mut w, &view.cat);
+        // The schedule is known for years ahead; it does not come with the world state.
+        if w.is_object() {
+            w["arbitration"] = arbitration::summary(&view.cat, now());
+            // What Duviri offers the account shown, as the game last logged it.
+            let offers = lock(&self.data).active().and_then(|a| a.duviri.clone());
+            w["duviri"] = offers.map_or(Value::Null, |o| world::duviri_picks(&view, &o, world::spiral_began(platform)));
+        }
         // Where the account shown stands in the running Nightwave season.
         if let Some(tag) = world::nightwave_tag(platform) {
             let s = standing::summary(&view, self.active_rank(), Some(&tag));

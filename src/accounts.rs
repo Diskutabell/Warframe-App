@@ -98,6 +98,10 @@ pub struct Account {
     /// When the game last logged in to this account while the app watched.
     #[serde(default)]
     pub seen: Option<f64>,
+    /// What Duviri offered this account when the log last listed it. Kept like the badge: a new
+    /// game session lists the offers only once the star chart or Duviri rolls them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duviri: Option<crate::eelog::DuviriOffers>,
     #[serde(skip)]
     pub profile: Option<Arc<Profile>>,
     #[serde(skip)]

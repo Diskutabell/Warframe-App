@@ -7,6 +7,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod accounts;
+mod arbitration;
 mod art;
 mod clock;
 mod config;
@@ -29,6 +30,7 @@ mod sources;
 mod standing;
 mod state;
 mod tasks;
+mod update;
 mod views;
 mod world;
 

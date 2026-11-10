@@ -2,7 +2,8 @@
 //!
 //! A task names equipment, a mod, an arcane or a resource, and the board colours it:
 //! * `missing` (red): parts are missing - or copies, for a mod, an arcane or a resource;
-//! * `resources` (yellow): every part is there, but not the resources or credits to build it;
+//! * `resources` (yellow): every part is there, but not the resources or credits to build it,
+//!   or a part still to craft has a recipe neither export knows;
 //! * `done` (green): owned, building, or everything to build it is there.
 //!
 //! Parts are counted the way the rest of the app counts them, blueprint and crafted part
@@ -173,6 +174,8 @@ struct PlanPart {
     crafting: i64,
     /// Blueprint-to-part builds still to do.
     builds: i64,
+    /// Still to craft, but its recipe is in neither export: what that costs is not known.
+    recipe_unknown: bool,
 }
 
 /// Other equipment the build consumes (the Lex Primes of an Aklex Prime).
@@ -203,6 +206,13 @@ fn final_recipe<'a>(view: &'a View, it: &Item) -> Option<&'a PartRecipe> {
     })
 }
 
+/// The crafted half of a part that drops as a blueprint: of a part and its twin, the one named
+/// "...Component" (`gamedata::alt_uid`). A prime weapon part drops ready-made and has none.
+fn crafted_half<'a>(view: &'a View, uid: &'a str) -> Option<&'a str> {
+    let twin = view.cat.parts.get(uid).and_then(|p| p.alt.as_deref());
+    [Some(uid), twin].into_iter().flatten().find(|u| u.ends_with("Component"))
+}
+
 fn plan(view: &View, it: &Item) -> Plan {
     // Blueprints in the foundry: gone from the inventory, their part is on the way.
     let mut pending: HashMap<&str, i64> = HashMap::new();
@@ -219,22 +229,31 @@ fn plan(view: &View, it: &Item) -> Plan {
     };
     let mut credits = 0;
     let mut parts = Vec::new();
+    let main_blueprint = format!("{} Blueprint", it.name);
     for c in it.components.iter().filter(|c| c.kind == ComponentKind::Part) {
         let alt = view.cat.parts.get(&c.uid).and_then(|p| p.alt.as_deref());
         let crafting: i64 =
             [Some(c.uid.as_str()), alt].into_iter().flatten().map(|u| pending.get(u).copied().unwrap_or(0)).sum();
-        let recipe = view.recipe_for_part(&c.uid);
+        // Only the inventory tells crafted parts from blueprints; a count set by hand does not,
+        // so then every part is taken to need crafting.
+        let crafted = |result: &str| {
+            let held = if view.hand_count(&c.uid).is_some() { 0 } else { view.held_stack(result) };
+            held + crafting
+        };
         let mut builds = 0;
-        if let Some(r) = recipe {
-            // Only the inventory tells crafted parts from blueprints; a count set by hand does
-            // not, so then every part is taken to need crafting.
-            let crafted = if view.hand_count(&c.uid).is_some() { 0 } else { view.held_stack(&r.result) } + crafting;
-            let left = (c.count - crafted).max(0);
+        let mut recipe_unknown = false;
+        if let Some(r) = view.recipe_for_part(&c.uid) {
+            let left = (c.count - crafted(&r.result)).max(0);
             builds = (left + r.quantity - 1) / r.quantity;
             for need in &r.ingredients {
                 add(&need.uid, &need.name, need.count * builds);
             }
             credits += r.credits.unwrap_or(0) * builds;
+        } else if let Some(component) = crafted_half(view, &c.uid).filter(|_| !c.name.ends_with(&main_blueprint)) {
+            // A part that drops as a blueprint is crafted before the build, and without its
+            // recipe nobody can say what that takes: the task must not read "ready". (The main
+            // blueprint is the build itself; the twin its uid suggests does not exist.)
+            recipe_unknown = crafted(component) < c.count;
         }
         parts.push(PlanPart {
             uid: c.uid.clone(),
@@ -243,6 +262,7 @@ fn plan(view: &View, it: &Item) -> Plan {
             have: view.count(&c.uid) + crafting,
             crafting,
             builds,
+            recipe_unknown,
         });
     }
     for c in it.components.iter().filter(|c| c.kind == ComponentKind::Resource) {
@@ -332,6 +352,17 @@ fn item_progress(view: &View, it: &Item, plan: &Plan) -> Progress {
         };
         return Progress { state: "resources", note, have: (need - short.len() as i64).max(0), need: need.max(1) };
     }
+    // Every known cost is covered, but a part still to craft has no known recipe.
+    let unknown: Vec<&str> =
+        plan.parts.iter().filter(|p| p.recipe_unknown).map(|p| short_name(&it.name, &p.name)).collect();
+    if !unknown.is_empty() {
+        let note = match unknown.as_slice() {
+            [one] => format!("{one} recipe unknown"),
+            many => format!("Recipes of {} parts unknown", many.len()),
+        };
+        let known = plan.materials.len() as i64 + i64::from(plan.credits > 0);
+        return Progress { state: "resources", note, have: known, need: known + unknown.len() as i64 };
+    }
     if plan.parts.iter().any(|p| p.crafting > 0) {
         return done("Ready once its parts are crafted");
     }
@@ -408,6 +439,7 @@ pub fn detail(view: &View, uid: &str, open_eras: &HashSet<String>) -> Option<Val
                 p["have"] = json!(pp.have);
                 p["crafting"] = json!(pp.crafting);
                 p["builds"] = json!(pp.builds);
+                p["recipeUnknown"] = json!(pp.recipe_unknown);
             }
         }
         v["item"] = item;
@@ -584,12 +616,16 @@ mod tests {
     }
 
     fn view(inv: Option<Inventory>, tasks: &[&str]) -> View {
+        view_of(catalog(), inv, tasks)
+    }
+
+    fn view_of(cat: gamedata::Catalog, inv: Option<Inventory>, tasks: &[&str]) -> View {
         let manual = Manual {
             tasks: tasks.iter().map(|uid| Task { uid: uid.to_string(), target: None, added: 1.0 }).collect(),
             ..Manual::default()
         };
         View {
-            cat: Arc::new(catalog()),
+            cat: Arc::new(cat),
             profile: None,
             inv: inv.map(Arc::new),
             manual: Arc::new(manual),
@@ -651,6 +687,27 @@ mod tests {
         let mut inv = inventory(&[]);
         inv.equipment.insert(ASH.into(), crate::sources::Equipment { count: 1, xp: 0 });
         assert_eq!(state(&view(Some(inv), &[ASH]), ASH), "done: Owned");
+    }
+
+    #[test]
+    fn a_part_whose_recipe_is_unknown_is_never_ready() {
+        // Citrine Prime's part recipes were missing from the export-plus copy and read as free
+        // (issue #11, 2026-11-09). Here the chassis recipe is missing.
+        let without_recipe = |counts: &[(&str, i64)]| {
+            let mut cat = catalog();
+            cat.part_recipes.remove(CHASSIS_BP);
+            view_of(cat, Some(inventory(counts)), &[ASH])
+        };
+        let v = without_recipe(&[(BP, 1), (CHASSIS_BP, 1), (CELL, 2)]);
+        assert_eq!(state(&v, ASH), "resources: Chassis recipe unknown");
+        let d = detail(&v, ASH, &HashSet::new()).unwrap();
+        let chassis = d["item"]["parts"].as_array().unwrap().iter().find(|p| p["uid"] == CHASSIS).unwrap();
+        assert_eq!((chassis["recipeUnknown"].as_bool(), chassis["builds"].as_i64()), (Some(true), Some(0)));
+        // A crafted chassis needs no recipe.
+        assert_eq!(state(&without_recipe(&[(BP, 1), (CHASSIS, 1), (CELL, 2)]), ASH), "done: Ready to build");
+        // A known shortage is named first.
+        let v = without_recipe(&[(BP, 1), (CHASSIS_BP, 1), (CELL, 1)]);
+        assert_eq!(state(&v, ASH), "resources: Short of Orokin Cell");
     }
 
     #[test]

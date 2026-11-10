@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.9.0 - 2026-11-10
+
+### Added
+
+- **Arbitration schedule** on the World page: the arbitration running now, the next 24 hours,
+  and when the next S, A and B tier one comes up, each with its node, planet, mission, faction
+  and tier (the community's tiers from arbi.guide). The schedule is published years ahead by
+  browse.wf. The Overview shows the running one too.
+- **Your Duviri picks:** the Warframes and weapons Duviri offers you right now, marked when you
+  do not own them, read from the game's own log whenever the star chart or Duviri rolls them.
+  New picks come with every spiral; the page says when the shown ones are from an earlier one.
+  The Circuit's rewards of the week are beside them.
+- **Deep and Temporal Archimedea in full:** each gets its own card with the week's missions,
+  deviations, risk variables (Elite ones marked) and personal modifiers. The loadout picks are
+  drawn for each player inside the game and are not shown anywhere else, so they are not here.
+- **New version popup:** when a newer release is out, the app says so when it starts, with the
+  release notes and a link to the release page.
+
+### Fixed
+
+- **Farming board: an item could read "Ready to build" while its parts still needed resources.**
+  The recipe data came from a copy of the game's export that predates Citrine Prime and Narin,
+  so their part recipes were missing and counted as free. Recipes now also come from DE's own
+  Public Export, which is current with every update, and a part still to craft whose recipe is
+  unknown keeps the card yellow.
+
 ## 0.8.0 - 2026-11-09
 
 ### Added

@@ -116,11 +116,66 @@ function renderRail() {
     ${ms.state === "scanning" ? `<div><span class="dot gold"></span>Reading inventory ${Math.round((ms.progress || 0) * 100)}%</div>` : ""}`;
 }
 
+// ------------------------------------------------------------------ a newer version
+// The engine asks GitHub once when it starts (update.rs); the popup shows once per window.
+
+let updateShown = false;
+
+/** A release's notes, which are the changelog's Markdown: headings, bullets (their wrapped lines
+ *  joined back), bold and code. Everything else stays plain text. */
+function notesHtml(md) {
+  const blocks = [];
+  for (const line of String(md || "").split(/\r?\n/)) {
+    const last = blocks[blocks.length - 1];
+    if (!line.trim()) blocks.push(null);
+    else if (/^#{1,6}\s/.test(line)) blocks.push({ kind: "h", text: line.replace(/^#+\s*/, "") });
+    else if (/^\s*[-*]\s/.test(line)) blocks.push({ kind: "li", text: line.replace(/^\s*[-*]\s+/, "") });
+    else if (last) last.text += " " + line.trim();
+    else blocks.push({ kind: "p", text: line.trim() });
+  }
+  const inline = (t) => esc(t).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/`([^`]+)`/g, "<code>$1</code>");
+  let html = "", list = false;
+  for (const b of blocks.filter(Boolean)) {
+    if (b.kind !== "li" && list) { html += "</ul>"; list = false; }
+    if (b.kind === "li" && !list) { html += "<ul>"; list = true; }
+    html += b.kind === "h" ? `<h3>${inline(b.text)}</h3>` : b.kind === "li" ? `<li>${inline(b.text)}</li>` : `<p>${inline(b.text)}</p>`;
+  }
+  return list ? html + "</ul>" : html;
+}
+
+function closeUpdate() {
+  $("#update").hidden = true;
+}
+
+function showUpdate(u) {
+  updateShown = true;
+  const box = $("#update .modal-box");
+  const date = u.published ? new Date(u.published).toLocaleDateString([], { day: "numeric", month: "long", year: "numeric" }) : "";
+  const notes = notesHtml(u.notes);
+  box.innerHTML = `<div class="modal-head"><div class="grow"><h2 id="updateTitle">A new version is out</h2>
+      <p class="muted">warframeproject ${esc(u.version)}${date ? `, released ${esc(date)}` : ""}. You have ${esc(u.current)}.</p></div>
+      <button class="ghost icon" type="button" data-later title="Close" aria-label="Close">${icon("x")}</button></div>
+    ${u.name ? `<div class="modal-title">${esc(u.name)}</div>` : ""}
+    ${notes ? `<div class="modal-notes">${notes}</div>` : ""}
+    <div class="modal-foot"><button type="button" data-later>Later</button>
+      ${u.url ? `<a class="btn primary" href="${esc(u.url)}" target="_blank" rel="noopener" data-get>${icon("link")} Open the release page</a>` : ""}</div>`;
+  for (const b of box.querySelectorAll("[data-later], [data-get]")) b.addEventListener("click", closeUpdate);
+  $("#update").hidden = false;
+  box.querySelector("[data-get]")?.focus();
+}
+
+// A click beside the box closes it too.
+$("#update").addEventListener("click", (e) => { if (e.target.id === "update") closeUpdate(); });
+
 async function poll() {
   try {
     app.state = await api("state");
   } catch {
     app.state = null;
+  }
+  if (app.state?.update && !updateShown) {
+    // The popup is a nicety: whatever goes wrong in it must not stop the page.
+    try { showUpdate(app.state.update); } catch (e) { console.error("update popup:", e); }
   }
   renderRail();
   renderBadges();
@@ -170,7 +225,8 @@ document.addEventListener("keydown", (e) => {
     palette.open();
   } else if (e.key === "Escape") {
     const menu = $("#acctMenu");
-    if (menu && !menu.hidden) menu.hidden = true;
+    if (!$("#update").hidden) closeUpdate();
+    else if (menu && !menu.hidden) menu.hidden = true;
     else if (palette.isOpen()) palette.close();
     else if (drawer.isOpen()) drawer.close();
   } else if (!typing && !e.ctrlKey && !e.altKey && /^[0-9]$/.test(e.key) && !palette.isOpen()) {

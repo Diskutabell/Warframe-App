@@ -1,7 +1,7 @@
 // World: the timers and rotations worth knowing before logging in, with the game's own art.
 
 import { $, api, art, countdown, duc, esc, fmt, plat } from "../lib.js";
-import { ICON, PORTRAIT, archonPortrait, cycleTile, emblem, factionColor, factionIcon, factionTag, gimg, syndicateIcon } from "../game.js";
+import { ICON, PORTRAIT, arbTier, archonPortrait, cycleTile, emblem, factionColor, factionIcon, factionTag, foeName, gimg, syndicateIcon } from "../game.js";
 
 const portrait = (path) => gimg(path, 64, "portrait");
 
@@ -59,22 +59,77 @@ function bountiesCard(w) {
     <div class="list">${rows.join("") || `<div class="muted">None listed.</div>`}</div></div>`;
 }
 
-function circuitCard(w) {
-  const group = (c) => `<div class="sublabel">${c.steel ? "Steel Path · Incarnon adapters" : "Normal · Warframes"}</div>
-    <div class="picks">${c.choices.map((x) => `<div class="pick">${art(x.image)}<span>${esc(x.name)}</span></div>`).join("")}</div>`;
-  return `<div class="card"><div class="card-head"><h2>The Circuit</h2><span class="grow"></span><span class="muted">${countdown(w.resets?.weekly)}</span></div>
-    ${(w.circuit || []).map(group).join("") || `<div class="muted">Not listed.</div>`}</div>`;
+/** Duviri: the Warframes and weapons it offers the account shown (its own log says which, and
+ *  whether they are owned), and the Circuit's rewards this week. */
+function duviriCard(w) {
+  const d = w.duviri;
+  const tile = (x) => `<div class="pick ${x.owned ? "" : "unowned"}">${art(x.image)}<span>${esc(x.name)}</span>
+      ${!x.owned ? `<em class="warn-text">not owned</em>` : x.mastered ? `<em class="good">mastered</em>` : ""}</div>`;
+  const rolled = d?.rolled ? new Date(d.rolled * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+  const mine = d?.groups?.length
+    ? `${d.groups.map((g) => `<div class="sublabel">${esc(g.slot)}</div><div class="picks compact">${g.picks.map(tile).join("")}</div>`).join("")}
+      <p class="${d.stale ? "callout" : "faint arch-note"}" style="margin-top:0">${d.stale
+        ? "A new spiral has begun since the game listed these, so it offers new ones now. Open the star chart in game to see them here."
+        : `What the game listed${rolled ? ` at ${esc(rolled)}` : ""}. New picks come with every spiral and after each extraction.`}</p>`
+    : `<p class="muted">Open the star chart or Duviri in game once: the game then writes the Warframes and weapons it offers you
+        into its log, and they show here. Seeing them in the star chart takes Opportunity rank 4.</p>`;
+  const circuit = (w.circuit || []).map((c) => `<div class="sublabel">${c.steel ? "Steel Path · Incarnon adapters" : "Normal · Warframe parts"}</div>
+    <div class="picks compact">${c.choices.map((x) => `<div class="pick">${art(x.image)}<span>${esc(x.name)}</span></div>`).join("")}</div>`).join("");
+  return `<div class="card"><div class="card-head"><h2>Duviri</h2></div>
+    <div class="duviri-head">Your picks in Teshin's Cave</div>
+    ${mine}
+    ${circuit ? `<div class="duviri-circuit"><div class="row duviri-head"><span class="grow">The Circuit's rewards this week</span>
+      <span class="muted">${countdown(w.resets?.weekly)}</span></div>${circuit}</div>` : ""}</div>`;
 }
 
-function archimedeaCard(w) {
-  const one = (a) => {
-    const foe = a.missions.find((m) => m.faction)?.faction;
-    return `${lead(emblem(factionIcon(foe)), esc(a.name), esc(foe || ""), `ends in<b>${countdown(a.expiry)}</b>`)}
-      <div class="list" style="margin-bottom:12px">${a.missions.map((m, i) => `<div class="list-row"><span class="step">${i + 1}</span>
-        <div class="main"><div class="t">${esc(m.type)}</div>${m.deviation ? `<div class="s">${esc(m.deviation)}</div>` : ""}</div></div>`).join("")}</div>`;
-  };
-  return `<div class="card"><div class="card-head"><h2>Archimedea</h2></div>
-    ${(w.archimedea || []).map(one).join("") || `<div class="muted">Not listed.</div>`}</div>`;
+/** When an hour of the schedule starts, in local time: "14:00", or "Tue 14:00" on another day. */
+function at(t) {
+  const d = new Date(t * 1000);
+  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return d.toDateString() === new Date().toDateString() ? time : `${d.toLocaleDateString([], { weekday: "short" })} ${time}`;
+}
+
+const where = (x) => `${esc(x.node)}${x.planet ? `, ${esc(x.planet)}` : ""}`;
+
+function arbitrationCard(a) {
+  const head = `<div class="card-head"><h2>Arbitration</h2></div>`;
+  if (!a?.current) return `<div class="card">${head}<div class="muted">The schedule is not loaded yet.</div></div>`;
+  const c = a.current;
+  const row = (x) => `<div class="list-row arb"><span class="arb-at num">${esc(at(x.start))}</span>
+      ${gimg(factionIcon(x.faction), 20, "", foeName(x.faction))}
+      <div class="main"><div class="t">${esc(x.mission)}</div><div class="s">${where(x)}${x.bonus ? ` · +${x.bonus}% resources` : ""}</div></div>
+      ${arbTier(x.tier)}</div>`;
+  const next = (a.next || []).map((x) => `<div class="list-row">${arbTier(x.tier)}
+      <div class="main"><div class="t">${esc(x.mission)} · ${where(x)}</div><div class="s">${esc(at(x.start))}</div></div>
+      <span class="muted">in ${countdown(x.start)}</span></div>`).join("");
+  const soon = (a.upcoming || []).slice(0, 5);
+  return `<div class="card">${head}
+    ${lead(emblem(factionIcon(c.faction)), `${esc(c.mission)} ${arbTier(c.tier)}`,
+      `${where(c)} · ${esc(foeName(c.faction))}${c.bonus ? ` · +${c.bonus}% resources` : ""}`, `ends in<b>${countdown(c.end)}</b>`)}
+    ${soon.length ? `<div class="sublabel">Next hours</div><div class="list">${soon.map(row).join("")}</div>` : ""}
+    ${next ? `<div class="sublabel" style="margin-top:12px">Next by tier</div><div class="list">${next}</div>` : ""}
+    ${a.upcoming?.length > soon.length ? `<details class="more"><summary>The next ${a.upcoming.length} hours</summary>
+      <div class="list">${a.upcoming.map(row).join("")}</div></details>` : ""}
+  </div>`;
+}
+
+/** A week of Deep or Temporal Archimedea: what every player gets (missions, deviations, risk
+ *  variables, personal modifiers). The loadout picks are drawn per player inside the game. */
+function archimedeaCard(a) {
+  const foes = [...new Set(a.missions.map((m) => m.faction).filter(Boolean))];
+  const risk = (r) => `<span class="pill ${r.elite ? "bad" : ""}" title="${esc(r.description || "")}">${r.elite ? "Elite · " : ""}${esc(r.name)}</span>`;
+  const mission = (m, i) => `<div class="arch-mission">
+      <div class="row"><span class="step">${i + 1}</span><b class="grow">${esc(m.type)}</b>${foes.length > 1 ? factionTag(m.faction, 16) : ""}</div>
+      ${m.deviation?.name ? `<div class="arch-dev"><b>${esc(m.deviation.name)}</b>${m.deviation.description ? `<span>${esc(m.deviation.description)}</span>` : ""}</div>` : ""}
+      ${m.risks?.length ? `<div class="chips">${m.risks.map(risk).join("")}</div>` : ""}</div>`;
+  const mods = (a.modifiers || []).map((p) => `<div class="list-row"><div class="main"><div class="t">${esc(p.name)}</div>
+      ${p.description ? `<div class="s wrap">${esc(p.description)}</div>` : ""}</div></div>`).join("");
+  return `<div class="card"><div class="card-head"><h2>${esc(a.name)}</h2></div>
+    ${lead(emblem(factionIcon(foes[0])), esc(foes.map(foeName).join(" and ") || a.name), "Three missions in a row; Elite adds a second risk to each",
+      `ends in<b>${countdown(a.expiry)}</b>`)}
+    ${a.missions.map(mission).join("") || `<div class="muted">No missions listed.</div>`}
+    ${mods ? `<div class="sublabel" style="margin-top:14px">Personal modifiers</div><div class="list">${mods}</div>` : ""}
+    <p class="faint arch-note">Loadout picks differ for each player: the game draws them from your own gear and shows them only in game.</p></div>`;
 }
 
 function alertsCard(alerts) {
@@ -139,7 +194,9 @@ function render(w) {
   return `
     <div class="cycles scenic" style="margin-bottom:16px">${(w.cycles || []).map((c) => cycleTile(c)).join("")}</div>
     <div class="grid cols-3">${baroCard(w.baro || {})}${sortieCard(w.sortie)}${archonCard(w.archon)}</div>
-    <div class="grid cols-3" style="margin-top:16px">${bountiesCard(w)}${circuitCard(w)}${archimedeaCard(w)}</div>
+    <div class="grid cols-even" style="margin-top:16px">${arbitrationCard(w.arbitration)}${bountiesCard(w)}</div>
+    <div class="grid cols-3" style="margin-top:16px">${duviriCard(w)}${(w.archimedea || []).map(archimedeaCard).join("")
+      || `<div class="card"><div class="card-head"><h2>Archimedea</h2></div><div class="muted">Not listed.</div></div>`}</div>
     <div class="grid cols-even" style="margin-top:16px">${alertsCard(w.alerts || [])}${invasionsCard(w.invasions || [])}</div>
     <div class="grid cols-2" style="margin-top:16px">
       ${nightwaveCard(w.nightwave || {})}

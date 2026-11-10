@@ -56,6 +56,17 @@ pub fn parse_iso(s: &str) -> Option<f64> {
     Some((days * 86400 + h * 3600 + mi * 60) as f64 + sec)
 }
 
+/// Epoch seconds from the form EE.log's header writes the time in ("Tue Nov 10 00:07:35 2026"),
+/// read as UTC.
+pub fn parse_ctime(s: &str) -> Option<f64> {
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let parts: Vec<&str> = s.split_whitespace().collect();
+    let [_weekday, month, day, time, year] = parts.as_slice() else { return None };
+    let month = MONTHS.iter().position(|m| m == month)? + 1;
+    let day: u32 = day.parse().ok()?;
+    parse_iso(&format!("{year}-{month:02}-{day:02}T{time}Z"))
+}
+
 /// Warframe's daily reset: the next 00:00 UTC.
 pub fn next_daily_reset(epoch: f64) -> f64 {
     ((epoch / 86400.0).floor() + 1.0) * 86400.0
@@ -86,6 +97,14 @@ mod tests {
         // The API's "never expires" sentinel must parse without overflowing.
         assert!(parse_iso("+275760-09-13T00:00:00.000Z").is_some_and(|t| t > 8e12));
         assert_eq!(parse_iso("garbage"), None);
+    }
+
+    #[test]
+    fn the_log_headers_time_reads() {
+        assert_eq!(parse_ctime("Tue Nov 10 00:07:35 2026").map(iso).as_deref(), Some("2026-11-10T00:07:35Z"));
+        assert_eq!(parse_ctime("Sat Feb  1 09:05:00 2025").map(iso).as_deref(), Some("2025-02-01T09:05:00Z"));
+        assert_eq!(parse_ctime("Tue Nov 10 2026"), None);
+        assert_eq!(parse_ctime("Tue Foo 10 00:07:35 2026"), None);
     }
 
     #[test]

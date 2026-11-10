@@ -54,8 +54,16 @@ const FACTIONS = [
 const faction = (name) => FACTIONS.find(([re]) => re.test(name || ""));
 export const factionIcon = (name) => faction(name)?.[1];
 export const factionColor = (name) => faction(name)?.[2] || "#5d6d7b";
+/** The world state's name for a faction as the game shows it: "Man in the Wall" is the Murmur. */
+export const foeName = (name) => (/man in the wall/i.test(name || "") ? "The Murmur" : name || "");
 /** Faction emblem and name side by side. */
-export const factionTag = (name, px = 18) => (name ? `<span class="ftag">${gimg(factionIcon(name), px)}${esc(name)}</span>` : "");
+export const factionTag = (name, px = 18) => (name ? `<span class="ftag">${gimg(factionIcon(name), px)}${esc(foeName(name))}</span>` : "");
+
+// An arbitration node's community tier (arbi.guide, through browse.wf), gold for S down to grey.
+const TIER = { S: "gold", A: "good", B: "lotus", C: "", D: "missing", F: "missing" };
+export const arbTier = (tier) => (tier
+  ? `<span class="pill tier ${TIER[tier] ?? ""}" title="Community tier from arbi.guide: S is the best for farming">${esc(tier)} tier</span>`
+  : "");
 
 const SYNDICATES = [
   [/ostron/i, "Syndicates/FactionSigilEidolonCetusElder.png"],

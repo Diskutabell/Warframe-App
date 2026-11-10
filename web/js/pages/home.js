@@ -2,7 +2,7 @@
 
 import { $, act, ago, api, art, countdown, duc, era, esc, fmt, icon, plat } from "../lib.js";
 import * as drawer from "../drawer.js";
-import { ICON, PORTRAIT, cycleTile, gimg, mrBadge } from "../game.js";
+import { ICON, PORTRAIT, arbTier, cycleTile, factionIcon, foeName, gimg, mrBadge } from "../game.js";
 import { sigil } from "./standing.js";
 
 const ICONS = ["platinum", "ducats", "endo", "credits"];
@@ -105,10 +105,14 @@ function rewards(h) {
 function worldCard(w) {
   if (!w || w.error && !w.cycles) return `<div class="empty"><b>World state unavailable</b>${esc(w?.error || "")}</div>`;
   const baro = w.baro || {};
+  const arb = w.arbitration?.current;
   return `<div class="cycles scenic small">${(w.cycles || []).map((c) => cycleTile(c, false)).join("")}</div>
     <div class="list" style="margin-top:8px">
       <div class="list-row">${gimg(PORTRAIT.baro, 30, "portrait mini")}<span class="grow">Baro Ki'Teer${baro.location ? ` <span class="muted">· ${esc(baro.location)}</span>` : ""}</span>
         <span class="${baro.active ? "lotus" : "muted"}">${baro.active ? `here for ${countdown(baro.expiry, "leaving")}` : `arrives in ${countdown(baro.activation, "now")}`}</span></div>
+      ${arb ? `<a class="list-row click plain" href="#world">${gimg(factionIcon(arb.faction), 22, "", foeName(arb.faction))}
+        <span class="grow">Arbitration <span class="muted">· ${esc(arb.mission)}, ${esc(arb.node)}</span></span>
+        ${arbTier(arb.tier)}<span class="muted">${countdown(arb.end)}</span></a>` : ""}
       <div class="list-row"><span class="grow">Daily reset</span><span class="muted">${countdown(w.resets?.daily)}</span></div>
       <div class="list-row"><span class="grow">Weekly reset</span><span class="muted">${countdown(w.resets?.weekly)}</span></div>
     </div>`;

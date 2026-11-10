@@ -9,8 +9,9 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 
-use crate::now;
+use crate::{clock, now};
 
 #[cfg(unix)]
 const WF_APPID: &str = "230410";
@@ -53,6 +54,13 @@ const REWARD_STARTED: [&str; 3] = [
     "ProjectionRewardChoice.lua: Got rewards",
 ];
 const REWARD_CLOSED: &str = "ProjectionRewardChoice.lua: Relic reward screen shut down";
+/// Duviri's loadout picks (Teshin's Cave), as the star chart and Duviri roll them: first
+/// `MapRedux.lua: RollDuviriOffers - Generating new Duviri offers`, then one line per pick,
+/// `MapRedux.lua: /Lotus/Powersuits/Paladin/Paladin generated as an unowned Cave selection for
+/// category: 3`, then `RollDuviriOffers - Duviri Seed: <n>`. While the offers stay the same the
+/// game logs "Using cached duviri offers" and lists no picks (EE.log, 2026-11-10).
+const DUVIRI_NEW: &str = "RollDuviriOffers - Generating new Duviri offers";
+const DUVIRI_DONE: &str = "RollDuviriOffers - Duviri Seed:";
 /// Lines that suggest the account state changed on the server.
 pub const SYNC_HINTS: [&str; 4] =
     ["EndOfMatch.lua: Mission Succeeded", "EndOfMatch.lua: Mission Failed", "ExitLevel", "Inventory updated"];
@@ -153,8 +161,70 @@ fn explicit_account(line: &str) -> Option<String> {
     ACCOUNT_RES.iter().find_map(|rx| rx.captures(line)).map(|m| m[1].to_string())
 }
 
+/// A Warframe or weapon Duviri offers, as the log names it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DuviriPick {
+    pub uid: String,
+    /// The game's equipment slot: 3 Warframe, 1 primary, 0 secondary, 5 melee.
+    pub category: u8,
+    /// The game's own word on whether the account has it.
+    pub owned: bool,
+}
+
+/// What Duviri offers the account. The game picks anew at the start of every spiral and after a
+/// successful extraction (wiki.warframe.com/w/Duviri, "Loadout").
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DuviriOffers {
+    pub picks: Vec<DuviriPick>,
+    /// When the game rolled them, when the log says.
+    pub rolled: Option<f64>,
+}
+
+/// `... /Lotus/Powersuits/Berserker/Berserker generated as an owned Cave selection for category: 3`
+fn duviri_pick(line: &str) -> Option<DuviriPick> {
+    let (head, rest) = line.split_once(" generated as an ")?;
+    let uid = head.rsplit(' ').next()?;
+    let (owned, rest) = match rest.strip_prefix("owned ") {
+        Some(rest) => (true, rest),
+        None => (false, rest.strip_prefix("unowned ")?),
+    };
+    let category = rest.strip_prefix("Cave selection for category: ")?.trim().parse().ok()?;
+    uid.starts_with("/Lotus/").then(|| DuviriPick { uid: uid.to_string(), category, owned })
+}
+
+/// Gathers the picks of one roll of Duviri offers, line by line.
+#[derive(Default)]
+struct DuviriRoll(Option<Vec<DuviriPick>>);
+
+impl DuviriRoll {
+    /// Takes one line; gives the picks back once the roll's last line has come.
+    fn feed(&mut self, line: &str) -> Option<Vec<DuviriPick>> {
+        if line.contains(DUVIRI_NEW) {
+            self.0 = Some(Vec::new());
+        } else if line.contains(DUVIRI_DONE) {
+            return self.0.take().filter(|picks| !picks.is_empty());
+        } else if let (Some(picks), Some(pick)) = (self.0.as_mut(), duviri_pick(line)) {
+            picks.push(pick);
+        }
+        None
+    }
+}
+
+/// When the game session began, from the log's header: `Sys [Diag]: Current time: Tue Nov 10
+/// 00:07:35 2026 [UTC: Tue Nov 10 00:07:35 2026]`. Every line starts with the seconds since.
+fn log_start(line: &str) -> Option<f64> {
+    let utc = line.split_once("Current time:")?.1.split_once("[UTC: ")?.1.split(']').next()?;
+    clock::parse_ctime(utc)
+}
+
+/// The seconds a line begins with: "42.908 Script [Info]: ..." is 42.908.
+fn line_seconds(line: &str) -> Option<f64> {
+    line.split_whitespace().next()?.parse().ok()
+}
+
 /// What an existing log already says, in order, as the live watcher would have reported it:
-/// logins, explicit ids, id candidates and the local player's mastery badges. Reward screens and
+/// logins, explicit ids, id candidates, the local player's mastery badges and the Duviri offers
+/// rolled (timed by the header's clock). Reward screens and
 /// syncs are left out (they are over). The order matters: one game session can log out and in
 /// with another account, and everything after a login belongs to that account.
 fn scan_log(path: &Path, end: u64) -> (Vec<LogEvent>, Vec<u8>) {
@@ -177,7 +247,16 @@ fn scan_log(path: &Path, end: u64) -> (Vec<LogEvent>, Vec<u8>) {
     let mut player: Option<String> = None;
     let mut badge = None;
     let mut seen = std::collections::HashSet::new();
+    let mut started: Option<f64> = None;
+    let mut duviri = DuviriRoll::default();
     for line in text.lines() {
+        if let Some(t) = log_start(line) {
+            started = Some(t);
+        }
+        if let Some(picks) = duviri.feed(line) {
+            let rolled = started.zip(line_seconds(line)).map(|(start, secs)| start + secs);
+            events.push(LogEvent::Duviri(DuviriOffers { picks, rolled }));
+        }
         if let Some(n) = player_name(line) {
             if player.as_deref() != Some(n.as_str()) {
                 player = Some(n.clone());
@@ -379,6 +458,8 @@ pub enum LogEvent {
     Candidate(String, bool, String),
     /// The local player's mastery badge: (low, high), high None when exact.
     Mastery(u32, Option<u32>),
+    /// What Duviri offers the player, rolled anew.
+    Duviri(DuviriOffers),
     RewardScreen,
     RewardScreenClosed,
     Sync,
@@ -456,12 +537,20 @@ pub struct LogWatcher {
     status: Arc<Mutex<LogStatus>>,
     player: Option<String>,
     reward_active: bool,
+    duviri: DuviriRoll,
 }
 
 impl LogWatcher {
     pub fn spawn(path_of: PathGetter, emit: Handler) -> Arc<Mutex<LogStatus>> {
         let status = Arc::new(Mutex::new(LogStatus::default()));
-        let mut watcher = LogWatcher { path_of, emit, status: Arc::clone(&status), player: None, reward_active: false };
+        let mut watcher = LogWatcher {
+            path_of,
+            emit,
+            status: Arc::clone(&status),
+            player: None,
+            reward_active: false,
+            duviri: DuviriRoll::default(),
+        };
         std::thread::Builder::new().name("eelog".into()).spawn(move || watcher.run()).expect("spawning eelog");
         status
     }
@@ -484,6 +573,7 @@ impl LogWatcher {
             };
             if current.as_ref() != Some(&path) {
                 self.reward_active = false;
+                self.duviri = DuviriRoll::default();
                 self.status().path = Some(path.clone());
                 let meta = fs::metadata(&path).ok();
                 pos = meta.as_ref().map_or(0, |m| m.len());
@@ -499,6 +589,7 @@ impl LogWatcher {
                     (pos, inode) = (0, file_id(&meta));
                     lines.clear();
                     self.reward_active = false;
+                    self.duviri = DuviriRoll::default();
                 }
                 if meta.len() > pos {
                     self.status().last_activity = now();
@@ -553,6 +644,9 @@ impl LogWatcher {
         for (id, sure) in candidate_ids(line, self.player.as_deref()) {
             (self.emit)(LogEvent::Candidate(id, sure, tail(line.trim(), 200)));
         }
+        if let Some(picks) = self.duviri.feed(line) {
+            (self.emit)(LogEvent::Duviri(DuviriOffers { picks, rolled: Some(now()) }));
+        }
         if line.contains(REWARD_OPENED) {
             // A new screen, even should the last one's shut-down line have been missed.
             self.status().note(line);
@@ -595,6 +689,7 @@ mod tests {
             status: Arc::new(Mutex::new(LogStatus::default())),
             player: None,
             reward_active: false,
+            duviri: DuviriRoll::default(),
         };
         for line in [
             // A reward screen, as on 2026-11-08: one watch from the open line on.
@@ -644,6 +739,7 @@ mod tests {
             status: Arc::new(Mutex::new(LogStatus::default())),
             player: None,
             reward_active: false,
+            duviri: DuviriRoll::default(),
         };
         watcher.handle("Sys [Info]: Logged in Tenno");
         watcher.handle("Sys [Info]: Player name changed to Tenno");
@@ -746,6 +842,73 @@ mod tests {
                 "badge 34 Some(36)".to_string()
             ]
         );
+    }
+
+    /// A roll of Duviri offers as EE.log wrote one on 2026-11-10 (the seed made up), cut to one
+    /// pick per slot.
+    const DUVIRI_LOG: &str = "0.072 Sys [Diag]: Current time: Tue Nov 10 00:07:35 2026 [UTC: Tue Nov 10 00:07:35 2026]\n\
+        14.454 Sys [Info]: Logged in Tenno\n\
+        42.903 Script [Info]: MapRedux.lua: RollDuviriOffers - Generating new Duviri offers\n\
+        42.908 Script [Info]: MapRedux.lua: /Lotus/Powersuits/Paladin/Paladin generated as an unowned Cave selection for category: 3\n\
+        42.908 Script [Info]: MapRedux.lua: /Lotus/Weapons/Grineer/LongGuns/BurstRifle/GrnBurstRifle generated as an owned Cave selection for category: 1\n\
+        42.908 Script [Info]: MapRedux.lua: /Lotus/Weapons/Infested/Pistols/InfProximityStars/InfProximityStars generated as an unowned Cave selection for category: 0\n\
+        42.909 Script [Info]: MapRedux.lua: /Lotus/Weapons/Tenno/Melee/Hammer/HammerWeapon generated as an owned Cave selection for category: 5\n\
+        42.909 Script [Info]: MapRedux.lua: Found 0 overrides.\n\
+        42.909 Script [Info]: MapRedux.lua: RollDuviriOffers - Duviri Seed: 1234567890\n\
+        42.910 Script [Info]: MapRedux.lua: Generated weapons:\n\
+        42.910 Script [Info]: MapRedux.lua: 1> 1> /Lotus/Weapons/Grineer/LongGuns/BurstRifle/GrnBurstRifle\n\
+        112.745 Script [Info]: MapRedux.lua: RollDuviriOffers - Using cached duviri offers\n\
+        112.745 Script [Info]: MapRedux.lua: RollDuviriOffers - Duviri Seed: 1234567890\n";
+
+    #[test]
+    fn duviri_offers_come_from_the_log() {
+        let picks = |v: &[DuviriPick]| {
+            v.iter().map(|p| (p.uid.rsplit('/').next().unwrap().to_string(), p.category, p.owned)).collect::<Vec<_>>()
+        };
+        let expected = [
+            ("Paladin".to_string(), 3, false),
+            ("GrnBurstRifle".to_string(), 1, true),
+            ("InfProximityStars".to_string(), 0, false),
+            ("HammerWeapon".to_string(), 5, true),
+        ];
+        // Read back: one roll, timed by the header's clock (00:07:35 UTC + 42.909 s).
+        let path = std::env::temp_dir().join(format!("wfp-eelog-duviri-{}.log", std::process::id()));
+        fs::write(&path, DUVIRI_LOG).unwrap();
+        let (events, _) = scan_log(&path, DUVIRI_LOG.len() as u64);
+        let _ = fs::remove_file(&path);
+        let rolls: Vec<&DuviriOffers> =
+            events.iter().filter_map(|e| if let LogEvent::Duviri(d) = e { Some(d) } else { None }).collect();
+        assert_eq!(rolls.len(), 1, "the cached offers are no new roll");
+        assert_eq!(picks(&rolls[0].picks), expected);
+        let rolled = rolls[0].rolled.unwrap();
+        assert!((rolled - (clock::parse_iso("2026-11-10T00:07:35Z").unwrap() + 42.909)).abs() < 0.001);
+        assert!(matches!(events[0], LogEvent::Name(..)), "the login comes first, so the roll is that account's");
+        // Followed live: the same roll, timed now.
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&got);
+        let mut watcher = LogWatcher {
+            path_of: Box::new(|| None),
+            emit: Box::new(move |event| {
+                if let LogEvent::Duviri(d) = event {
+                    sink.lock().unwrap().push(d);
+                }
+            }),
+            status: Arc::new(Mutex::new(LogStatus::default())),
+            player: None,
+            reward_active: false,
+            duviri: DuviriRoll::default(),
+        };
+        for line in DUVIRI_LOG.lines() {
+            watcher.handle(line);
+        }
+        let live = got.lock().unwrap();
+        assert_eq!(live.len(), 1);
+        assert_eq!(picks(&live[0].picks), expected);
+        assert!(live[0].rolled.is_some_and(|t| (t - now()).abs() < 60.0));
+        // Pick lines outside a roll, or of another shape, are not picks.
+        assert_eq!(DuviriRoll::default().feed(DUVIRI_LOG.lines().nth(3).unwrap()), None);
+        assert_eq!(duviri_pick("x /Lotus/A generated as an owned Cave selection for category: x"), None);
+        assert_eq!(duviri_pick("x Temp/A generated as an owned Cave selection for category: 3"), None);
     }
 
     #[test]

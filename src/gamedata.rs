@@ -1,6 +1,8 @@
-//! Static game data (items, prime parts, relics) from the community WFCD/warframe-items dataset.
+//! Static game data (items, prime parts, relics) from the community WFCD/warframe-items dataset,
+//! with recipes, syndicates and the star chart from the game's export and DE's own Public Export.
 //!
-//! Nothing here touches the game: the files are downloaded from GitHub and cached.
+//! Nothing here touches the game: the files are downloaded (GitHub, DE's export server, browse.wf
+//! for the arbitration schedule) and cached.
 
 use std::collections::HashMap;
 use std::fs;
@@ -22,6 +24,10 @@ pub const IMG_URL: &str = "https://cdn.warframestat.us/img/";
 const EXPORT_URL: &str = "https://raw.githubusercontent.com/calamity-inc/warframe-public-export-plus/senpai/";
 const REGIONS_URL: &str =
     "https://raw.githubusercontent.com/calamity-inc/warframe-public-export-plus/senpai/ExportRegions.json";
+/// DE's own Public Export, current with every game update. An LZMA-packed index names each file
+/// with a hash of its contents; the export above is a copy that is regenerated now and then.
+const DE_INDEX_URL: &str = "https://origin.warframe.com/PublicExport/index_en.txt.lzma";
+const DE_FILES_URL: &str = "https://content.warframe.com/PublicExport/Manifest/";
 /// Syndicates from the same export: ranks, their standing ranges and costs, daily pools,
 /// offerings and medallions (`standing.rs`). Names are keys into `dict.en.json` (3.9 MB).
 const SYNDICATE_FILES: [&str; 2] = ["ExportSyndicates.json", "dict.en.json"];
@@ -197,6 +203,21 @@ pub struct LookupItem {
     pub image: Option<String>,
 }
 
+/// A star chart node, as the arbitration schedule shows it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Node {
+    /// "Casta"
+    pub name: String,
+    /// The planet, moon or region: "Ceres", "Deimos", "Void".
+    pub planet: String,
+    /// "Defense", "Mirror Defense"
+    pub mission: String,
+    /// "Grineer", "Corrupted", "The Murmur"
+    pub faction: String,
+    /// A Dark Sector's extra resources, in percent.
+    pub resource_bonus: Option<i64>,
+}
+
 #[derive(Default)]
 pub struct Catalog {
     pub items: IndexMap<String, Item>,
@@ -222,6 +243,10 @@ pub struct Catalog {
     /// Star chart node tag ("SolNode27") -> the mastery XP its first completion gives. Empty
     /// until the region export has been downloaded once.
     pub node_xp: HashMap<String, i64>,
+    /// Star chart node tag -> its name, planet, mission and faction. Empty like `node_xp`.
+    pub nodes: HashMap<String, Node>,
+    /// Which node hosts the arbitration each hour (`arbitration.rs`).
+    pub arbitrations: crate::arbitration::Schedule,
     /// Every syndicate with its ranks and offerings. Empty until the export has been downloaded.
     pub syndicates: crate::standing::Syndicates,
     /// Reward and enemy blueprint sources indexed by the exact item name.
@@ -242,14 +267,15 @@ pub fn image_url(image: Option<&str>) -> Option<String> {
 pub fn load(force: bool) -> Result<Catalog> {
     let names: Vec<&str> = MASTERY_FILES.iter().chain(EXTRA_FILES.iter()).copied().collect();
     let regions_path = config::dirs().cache.join("regions.json");
-    let (raw, mods, recipes, regions, syndicates, drops, held): (
+    let (raw, mods, (recipes, de_recipes), regions, syndicates, drops, held, arbitrations): (
         Vec<Result<Value>>,
         Result<Value>,
+        (Result<Value>, Result<Vec<Value>>),
         Result<Value>,
-        Result<Value>,
         Vec<Result<Value>>,
         Vec<Result<Value>>,
         Vec<Result<Value>>,
+        crate::arbitration::Schedule,
     ) = std::thread::scope(|s| {
         let jobs: Vec<_> = names.iter().map(|n| s.spawn(move || download(n, force))).collect();
         let mods = s.spawn(|| download("Mods", force));
@@ -260,6 +286,8 @@ pub fn load(force: bool) -> Result<Catalog> {
                 force,
             )
         });
+        let de_recipes = s.spawn(|| de_recipes(force));
+        let arbitrations = s.spawn(|| crate::arbitration::download(force));
         let regions = s.spawn(|| download_to(REGIONS_URL, &regions_path, force));
         let syndicates: Vec<_> = SYNDICATE_FILES
             .iter()
@@ -285,11 +313,15 @@ pub fn load(force: bool) -> Result<Catalog> {
         (
             jobs.into_iter().map(|j| j.join().unwrap_or_else(|_| panicked())).collect(),
             mods.join().unwrap_or_else(|_| panicked()),
-            recipes.join().unwrap_or_else(|_| panicked()),
+            (
+                recipes.join().unwrap_or_else(|_| panicked()),
+                de_recipes.join().unwrap_or_else(|_| Err(anyhow!("download thread panicked"))),
+            ),
             regions.join().unwrap_or_else(|_| panicked()),
             syndicates.into_iter().map(|j| j.join().unwrap_or_else(|_| panicked())).collect(),
             drops.into_iter().map(|j| j.join().unwrap_or_else(|_| panicked())).collect::<Vec<_>>(),
             held.into_iter().map(|j| j.join().unwrap_or_else(|_| panicked())).collect::<Vec<_>>(),
+            arbitrations.join().unwrap_or_default(),
         )
     });
     let mut files = IndexMap::new();
@@ -303,12 +335,26 @@ pub fn load(force: bool) -> Result<Catalog> {
         Ok(_) => eprintln!("mod catalog has an unexpected format"),
         Err(e) => eprintln!("mod catalog unavailable: {e:#}"),
     }
-    match recipes {
-        Ok(data) if data.as_object().is_some_and(|o| !o.is_empty()) => {
-            files.insert("ExportRecipes".into(), data);
+    // Either source alone will do; together they cover old and new content (`merge_recipes`).
+    let mut all_recipes = match recipes {
+        Ok(Value::Object(map)) => map,
+        Ok(_) => {
+            eprintln!("component recipe export has an unexpected format");
+            serde_json::Map::new()
         }
-        Ok(_) => eprintln!("component recipe export has an unexpected format"),
-        Err(e) => eprintln!("component recipes unavailable: {e:#}"),
+        Err(e) => {
+            eprintln!("component recipes unavailable: {e:#}");
+            serde_json::Map::new()
+        }
+    };
+    match de_recipes {
+        Ok(list) => {
+            merge_recipes(&mut all_recipes, &list);
+        }
+        Err(e) => eprintln!("DE's own recipe export unavailable, recipes may lack the newest items: {e:#}"),
+    }
+    if !all_recipes.is_empty() {
+        files.insert("ExportRecipes".into(), Value::Object(all_recipes));
     }
     if files.get("Relics").is_some_and(crate::relics::lacks_rewards) {
         repair_relics(&mut files, force, &drops);
@@ -325,11 +371,18 @@ pub fn load(force: bool) -> Result<Catalog> {
         }
     }
     catalog.drops = crate::drops::Drops::from_tables(&drop_tables, DROP_TABLES.len() - 1);
-    // The app works without the star chart: only the mastery total is then short of it.
+    // The app works without the star chart: only the mastery total is then short of it, and the
+    // arbitration schedule of its node names.
     match regions {
-        Ok(raw) => catalog.node_xp = node_xp_table(&raw),
+        Ok(raw) => {
+            catalog.node_xp = node_xp_table(&raw);
+            if let Some(Ok(dict)) = syndicates.get(1) {
+                catalog.nodes = node_table(&raw, dict);
+            }
+        }
         Err(e) => eprintln!("star chart data unavailable, mastery will leave it out: {e:#}"),
     }
+    catalog.arbitrations = arbitrations;
     // Standing works without it too: the page then says the syndicate data is missing.
     match &syndicates[..] {
         [Ok(export), Ok(dict)] => catalog.syndicates = crate::standing::build(export, dict),
@@ -391,6 +444,49 @@ pub fn node_xp_table(regions: &Value) -> HashMap<String, i64> {
     nodes.filter_map(|(tag, node)| Some((tag.clone(), node["masteryExp"].as_i64().filter(|xp| *xp > 0)?))).collect()
 }
 
+/// A faction as the star chart export codes it ("FC_INFESTATION") in the game's own words.
+fn faction_name(code: &str) -> String {
+    let name = match code {
+        "FC_GRINEER" => "Grineer",
+        "FC_CORPUS" => "Corpus",
+        "FC_INFESTATION" => "Infested",
+        "FC_OROKIN" => "Corrupted",
+        "FC_MITW" => "The Murmur",
+        "FC_SENTIENT" => "Sentient",
+        "FC_NARMER" => "Narmer",
+        "FC_SCALDRA" => "Scaldra",
+        "FC_TECHROT" => "Techrot",
+        "FC_RED_VEIL" => "Red Veil",
+        "FC_DUVIRI" => "Duviri",
+        "FC_TENNO" => "Tenno",
+        // Anything newer: "FC_NEW_ONES" -> "New Ones".
+        other => return crate::inventory::clean(&other.trim_start_matches("FC_").replace('_', " ")),
+    };
+    name.to_string()
+}
+
+/// Star chart nodes by tag, named in English (`dict` is the export's dictionary).
+pub fn node_table(regions: &Value, dict: &Value) -> HashMap<String, Node> {
+    // The dictionary writes some names in capitals ("INTERCEPTION"); `clean` gives them ordinary case.
+    let text = |key: &Value| {
+        key.as_str().and_then(|k| dict.get(k)).and_then(Value::as_str).map(crate::inventory::clean).unwrap_or_default()
+    };
+    let nodes = regions.as_object().into_iter().flatten();
+    nodes
+        .map(|(tag, node)| {
+            let bonus = node["darkSectorData"]["resourceBonus"].as_f64().filter(|b| *b > 0.0);
+            let node = Node {
+                name: text(&node["name"]),
+                planet: text(&node["systemName"]),
+                mission: text(&node["missionName"]),
+                faction: node["faction"].as_str().map(faction_name).unwrap_or_default(),
+                resource_bonus: bonus.map(|b| (b * 100.0).round() as i64),
+            };
+            (tag.clone(), node)
+        })
+        .collect()
+}
+
 fn cache_path(name: &str) -> PathBuf {
     config::dirs().cache.join(format!("wfcd_{name}.json"))
 }
@@ -411,11 +507,72 @@ fn download_to_with(
     force: bool,
     get: impl FnOnce(&str, &[(&str, &str)], Duration) -> Result<net::Response>,
 ) -> Result<Value> {
+    fetch_cached(url, path, force, get, |bytes| serde_json::from_slice(bytes).context("invalid JSON"))
+}
+
+/// The text inside an LZMA file: DE's export index.
+fn unlzma(bytes: &[u8]) -> Result<String> {
+    let mut out = Vec::new();
+    lzma_rs::lzma_decompress(&mut std::io::Cursor::new(bytes), &mut out).map_err(|e| anyhow!("not LZMA: {e}"))?;
+    Ok(String::from_utf8(out)?)
+}
+
+/// The foundry recipes of DE's own export: `[{uniqueName, resultType, buildPrice, num,
+/// ingredients}, ...]`.
+fn de_recipes(force: bool) -> Result<Vec<Value>> {
+    let cache = &config::dirs().cache;
+    let index = download_file(DE_INDEX_URL, &cache.join("de_index_en.txt.lzma"), force, unlzma)?;
+    // "ExportRecipes_en.json!00_oac+LCAtIyqDxZF8Qe1ZZA"
+    let file = index
+        .lines()
+        .find(|line| line.starts_with("ExportRecipes_en.json!"))
+        .ok_or_else(|| anyhow!("DE's export index names no recipe file"))?;
+    let raw = download_to(&format!("{DE_FILES_URL}{}", file.trim()), &cache.join("de_ExportRecipes_en.json"), force)?;
+    match raw.get("ExportRecipes") {
+        Some(Value::Array(list)) => Ok(list.clone()),
+        _ => Err(anyhow!("DE's recipe export has an unexpected format")),
+    }
+}
+
+/// Lays DE's recipes over the export-plus copy, which is keyed by blueprint uid. DE's are
+/// current; the copy lacks everything newer than its last regeneration (Citrine Prime's part
+/// recipes, 2026-11-10) but has a few DE's leaves out (pets, Incarnon adapters). Where both have a
+/// recipe, DE's values win; the copy's extra fields stay. Returns how many only DE's had.
+fn merge_recipes(into: &mut serde_json::Map<String, Value>, de: &[Value]) -> usize {
+    let mut added = 0;
+    for recipe in de {
+        let Some(uid) = recipe["uniqueName"].as_str() else { continue };
+        let entry = into.entry(uid).or_insert_with(|| {
+            added += 1;
+            Value::Object(serde_json::Map::new())
+        });
+        for key in ["resultType", "buildPrice", "buildTime", "num", "ingredients"] {
+            if let Some(v) = recipe.get(key) {
+                entry[key] = v.clone();
+            }
+        }
+    }
+    added
+}
+
+/// `download_to` for a file of any kind: `read` turns its bytes into what the caller needs. A
+/// download `read` refuses counts as a failed one, so it never replaces a good copy.
+pub(crate) fn download_file<T>(url: &str, path: &Path, force: bool, read: impl Fn(&[u8]) -> Result<T>) -> Result<T> {
+    fetch_cached(url, path, force, net::get, read)
+}
+
+fn fetch_cached<T>(
+    url: &str,
+    path: &Path,
+    force: bool,
+    get: impl FnOnce(&str, &[(&str, &str)], Duration) -> Result<net::Response>,
+    read: impl Fn(&[u8]) -> Result<T>,
+) -> Result<T> {
     let etag_path = path.with_extension("etag");
     let age = fs::metadata(path).and_then(|m| m.modified()).ok().and_then(|t| SystemTime::now().duration_since(t).ok());
-    let cached: Result<Value> = fs::read(path)
+    let cached: Result<T> = fs::read(path)
         .with_context(|| format!("reading cached {}", path.display()))
-        .and_then(|bytes| serde_json::from_slice(&bytes).with_context(|| format!("parsing cached {}", path.display())));
+        .and_then(|bytes| read(&bytes).with_context(|| format!("parsing cached {}", path.display())));
     if !force && age.is_some_and(|a| a < MAX_AGE) {
         if let Ok(v) = cached {
             return Ok(v);
@@ -435,15 +592,15 @@ fn download_to_with(
             Ok(data)
         }
         Ok(resp) if (200..300).contains(&resp.status) => {
-            let data: Value = match serde_json::from_slice(&resp.body) {
+            let data: T = match read(&resp.body) {
                 Ok(data) => data,
                 Err(e) => {
                     return match cached {
                         Ok(data) => {
-                            eprintln!("invalid JSON from {url}, using cached {}: {e}", path.display());
+                            eprintln!("unusable data from {url}, using cached {}: {e:#}", path.display());
                             Ok(data)
                         }
-                        Err(cache_err) => Err(anyhow!("invalid JSON from {url}: {e}; {cache_err:#}")),
+                        Err(cache_err) => Err(anyhow!("unusable data from {url}: {e:#}; {cache_err:#}")),
                     };
                 }
             };
@@ -1019,6 +1176,8 @@ pub fn build(raw: &IndexMap<String, Value>) -> Catalog {
         resources,
         art,
         node_xp: HashMap::new(),
+        nodes: HashMap::new(),
+        arbitrations: crate::arbitration::Schedule::default(),
         syndicates: crate::standing::Syndicates::default(),
         drops: crate::drops::Drops::default(),
         inventory: HashMap::new(),
@@ -1223,6 +1382,70 @@ mod tests {
         assert!(format!("{err:#}").contains("invalid JSON"));
         let err = download_to_with("test", &path, false, |_, _, _| Ok(response(304, "", None))).unwrap_err();
         assert!(format!("{err:#}").contains("without a usable cached copy"));
+    }
+
+    #[test]
+    fn de_recipes_fill_in_and_win_over_the_copy() {
+        let mut copy = json!({
+            "/R/AshPrimeChassisBlueprint": {"resultType": "/R/AshPrimeChassisComponent", "buildPrice": 1, "tradable": true},
+            "/R/KubrowPetRecipe": {"resultType": "/Pets/Kubrow", "buildPrice": 5},
+        });
+        let de = [
+            json!({"uniqueName": "/R/AshPrimeChassisBlueprint", "resultType": "/R/AshPrimeChassisComponent", "buildPrice": 15000,
+                   "num": 1, "ingredients": [{"ItemType": "/M/Rubedo", "ItemCount": 400}]}),
+            json!({"uniqueName": "/R/CitrinePrimeSystemsBlueprint", "resultType": "/R/CitrinePrimeSystemsComponent",
+                   "buildPrice": 15000, "ingredients": [{"ItemType": "/M/ArgonCrystal", "ItemCount": 2}]}),
+            json!({"resultType": "/R/Nameless"}),
+        ];
+        let added = merge_recipes(copy.as_object_mut().unwrap(), &de);
+        assert_eq!(added, 1, "only Citrine Prime's recipe is new");
+        let ash = &copy["/R/AshPrimeChassisBlueprint"];
+        assert_eq!((ash["buildPrice"].as_i64(), ash["tradable"].as_bool()), (Some(15000), Some(true)));
+        assert_eq!(ash["ingredients"][0]["ItemCount"], 400);
+        assert_eq!(copy["/R/KubrowPetRecipe"]["buildPrice"], 5, "a recipe only the copy has stays");
+        assert_eq!(copy["/R/CitrinePrimeSystemsBlueprint"]["ingredients"][0]["ItemType"], "/M/ArgonCrystal");
+        assert!(copy["/R/CitrinePrimeSystemsBlueprint"].get("uniqueName").is_none());
+        // And the merged file builds part recipes like the copy alone did.
+        let cat = build(&IndexMap::from([("ExportRecipes".to_string(), copy)]));
+        let r = &cat.part_recipes["/R/CitrinePrimeSystemsBlueprint"];
+        assert_eq!(
+            (r.result.as_str(), r.credits, r.ingredients[0].count),
+            ("/R/CitrinePrimeSystemsComponent", Some(15000), 2)
+        );
+    }
+
+    #[test]
+    fn the_export_index_unpacks() {
+        let text = "ExportManifest.json!00_y10Y6QId+-io-dCB3GMEmg\nExportRecipes_en.json!00_oac+LCAtIyqDxZF8Qe1ZZA\n";
+        let mut packed = Vec::new();
+        lzma_rs::lzma_compress(&mut std::io::Cursor::new(text.as_bytes()), &mut packed).unwrap();
+        assert_eq!(unlzma(&packed).unwrap(), text);
+        assert!(unlzma(b"not lzma at all").is_err());
+    }
+
+    #[test]
+    fn nodes_get_english_names() {
+        let regions = json!({
+            "SolNode211": {"name": "/Loc/Ose", "systemName": "/Loc/Europa", "missionName": "/Mis/Territory", "faction": "FC_CORPUS"},
+            "ClanNode10": {"name": "/Loc/Memphis", "systemName": "/Loc/Phobos", "missionName": "/Mis/Evacuation",
+                           "faction": "FC_INFESTATION", "darkSectorData": {"resourceBonus": 0.25}},
+            "SolNode9": {"name": "/Loc/Nowhere", "faction": "FC_NEW_ONES"},
+        });
+        let dict = json!({"/Loc/Ose": "Ose", "/Loc/Europa": "Europa", "/Mis/Territory": "INTERCEPTION",
+                          "/Loc/Memphis": "Memphis", "/Loc/Phobos": "Phobos", "/Mis/Evacuation": "DEFECTION"});
+        let nodes = node_table(&regions, &dict);
+        assert_eq!(
+            nodes["SolNode211"],
+            Node {
+                name: "Ose".into(),
+                planet: "Europa".into(),
+                mission: "Interception".into(),
+                faction: "Corpus".into(),
+                resource_bonus: None
+            }
+        );
+        assert_eq!((nodes["ClanNode10"].faction.as_str(), nodes["ClanNode10"].resource_bonus), ("Infested", Some(25)));
+        assert_eq!((nodes["SolNode9"].name.as_str(), nodes["SolNode9"].faction.as_str()), ("", "New Ones"));
     }
 
     #[test]

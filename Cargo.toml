@@ -13,6 +13,8 @@ async-channel = "2"
 clap = { version = "4", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png", "pnm", "webp"] }
 indexmap = { version = "2", features = ["serde"] }
+# DE's Public Export lists its files in an LZMA-packed index.
+lzma-rs = "0.3"
 memchr = "2"
 regex = "1"
 rust-embed = "8"
