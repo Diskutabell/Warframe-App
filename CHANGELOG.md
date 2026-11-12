@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.1 - 2026-11-12
+
+### Changed
+
+- **Switching on the memory scan now asks first.** A warning explains that reading the game's
+  memory can get an account permanently suspended; the scan only turns on once you tick "I have
+  read and understand the risks".
+
 ## 0.9.0 - 2026-11-10
 
 ### Added
