@@ -92,6 +92,44 @@ function memscan(S) {
     <span style="margin-top:7px">${line[0]}</span><span>${line[1]}</span></div>`;
 }
 
+// Switching the memory scan on goes through this warning first: it can cost the account.
+// Resolves true only when the box is ticked and "Turn it on" pressed; anything else is a no.
+function confirmMemscanRisk(os) {
+  return new Promise((resolve) => {
+    const wrap = document.createElement("div");
+    wrap.className = "modal";
+    wrap.innerHTML = `<div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="riskTitle">
+      <div class="modal-head"><div class="grow"><h2 id="riskTitle">Read this before you turn it on</h2></div></div>
+      <div class="modal-notes">
+        <p><b>Memory scanning is a big risk.</b> Only turn it on if you know what you are doing: it may lead to a
+          <b>permanent suspension of your Warframe account</b>, and of any account you make after it.</p>
+        <p><b>This is a real warning.</b> It can happen to you.</p>
+        ${os === "windows" ? "<p>On Windows the read means opening the game with read rights, which the game can see.</p>" : ""}
+        <p>Digital Extremes' EULA forbids third-party programs that collect information about the game. You use this
+          entirely at your own risk; nobody can get a suspended account back for you.</p>
+        <label class="row" style="gap:8px;margin:12px 0 4px;cursor:pointer"><input type="checkbox" data-agree>
+          <span>I have read and understand the risks</span></label>
+      </div>
+      <div class="modal-foot"><button type="button" data-no>Cancel</button>
+        <button type="button" class="primary" data-yes disabled>Turn it on</button></div></div>`;
+    const done = (yes) => {
+      wrap.remove();
+      resolve(yes);
+    };
+    const yes = wrap.querySelector("[data-yes]");
+    wrap.querySelector("[data-agree]").addEventListener("change", (e) => { yes.disabled = !e.target.checked; });
+    yes.addEventListener("click", () => done(true));
+    wrap.querySelector("[data-no]").addEventListener("click", () => done(false));
+    // A click beside the box or Esc is a no, as with the update popup.
+    wrap.addEventListener("click", (e) => { if (e.target === wrap) done(false); });
+    wrap.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { e.stopPropagation(); done(false); }
+    });
+    document.body.append(wrap);
+    wrap.querySelector("[data-agree]").focus();
+  });
+}
+
 // ------------------------------------------------------------------ page
 
 export default {
@@ -158,6 +196,7 @@ export default {
         const k = el.dataset.k;
         let v = el.type === "checkbox" ? el.checked : el.type === "number" ? Number(el.value) : el.value.trim();
         if (el.type === "number" && (el.value === "" || !Number.isFinite(v))) { el.value = s[k]; return; }
+        if (k === "memory_scan_enabled" && v && !(await confirmMemscanRisk(S.os))) { el.checked = false; return; }
         const ok = await act("settings", { [k]: v });
         if (!ok) {
           if (el.type === "checkbox") el.checked = !!s[k]; else el.value = s[k];

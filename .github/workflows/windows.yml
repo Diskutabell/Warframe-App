@@ -1,6 +1,5 @@
 # Builds the Windows exe on a real Windows machine. Every push to main checks that it still builds
-# and reads a reward screen. Downloads are paused (a Windows user was banned, 2026-11-11): the exe
-# is neither uploaded as an artifact nor attached to releases until that is understood.
+# and reads a reward screen; publishing a release attaches the exe to it.
 name: Windows
 
 on:
@@ -72,3 +71,19 @@ jobs:
           Get-Content out.txt, err.txt
           $read = @($names | Where-Object { (Get-Content out.txt -Raw) -match [regex]::Escape($_) }).Count
           if ($p.ExitCode -ne 0 -or $read -lt 3) { throw "read $read of 4 names (exit code $($p.ExitCode))" }
+
+      - name: Package
+        shell: bash
+        run: cp target/release/warframeproject.exe warframeproject-windows-x64.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: warframeproject-windows-x64
+          path: warframeproject-windows-x64.exe
+
+      - name: Attach to the release
+        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" warframeproject-windows-x64.exe --clobber
