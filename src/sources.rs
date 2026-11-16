@@ -174,23 +174,51 @@ fn progress_from(data: &Value) -> Option<Progress> {
     Some(progress)
 }
 
+/// An answer from DE's profile service that is not a profile, with the HTTP status it gave. A 403
+/// is how the service rate-limits; `State` then leaves it alone for a while. Shown to the user
+/// as it is, like a `UserError`.
+#[derive(Debug)]
+pub struct ProfileRefused {
+    pub status: u16,
+    message: String,
+}
+
+impl ProfileRefused {
+    pub fn new(status: u16, message: String) -> ProfileRefused {
+        ProfileRefused { status, message }
+    }
+}
+
+impl std::fmt::Display for ProfileRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ProfileRefused {}
+
 /// Fetches the public profile. The caller enforces the cooldown: DE temporarily IP-blocks game
 /// login for clients that query profiles too often.
 pub fn fetch_profile(account_id: &str, platform: Platform) -> Result<Profile> {
     let url = format!("{}/cdn/getProfileViewingData.php?playerId={account_id}", profile_host(platform));
     let resp = net::get(&url, &[("Accept", "application/json")], Duration::from_secs(20))
         .map_err(|e| UserError::new(format!("Could not reach DE's profile service: {e}")))?;
+    let refused = ProfileRefused::new;
     match resp.status {
         200..=299 => {}
         403 => {
-            return Err(UserError::new(
+            return Err(refused(
+                403,
                 "DE's server refused the request (403). This happens when it is called too often or from \
-                 some VPN/VPS addresses. Wait a while, or use 'Import profile file'.",
+                 some VPN/VPS addresses. Wait a while, or use 'Import profile file'."
+                    .into(),
             )
             .into());
         }
-        400 | 409 => return Err(UserError::new("The account id was not accepted. Check it in Settings.").into()),
-        code => return Err(UserError::new(format!("Profile request failed with HTTP {code}.")).into()),
+        400 | 409 => {
+            return Err(refused(resp.status, "The account id was not accepted. Check it in Settings.".into()).into());
+        }
+        code => return Err(refused(code, format!("Profile request failed with HTTP {code}.")).into()),
     }
     let data: Value = serde_json::from_slice(&resp.body)
         .map_err(|_| UserError::new("The profile service returned something that is not JSON."))?;

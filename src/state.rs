@@ -36,6 +36,9 @@ use crate::{UserError, arbitration, compositor, history, net, now, standing, tas
 
 /// DE temporarily IP-blocks game login for clients that query profiles too often.
 pub const PROFILE_COOLDOWN: f64 = 300.0;
+/// After DE's profile service refuses a request (HTTP 403, which is how it rate-limits), it is
+/// left alone this long: asking again at every cooldown would keep the address blocked.
+const PROFILE_PAUSE: f64 = 3600.0;
 const DUCAT_UID: &str = "/Lotus/Types/Items/MiscItems/PrimeBucks";
 /// A reward scan started this recently already covers the screen: the F9 hotkey and the
 /// automatic trigger routinely fire for the same reward screen within a second of each other.
@@ -252,7 +255,9 @@ struct Data {
     /// The account the game is logged in to, from the log's latest "Logged in <name>".
     game: Option<String>,
     events: VecDeque<Event>,
-    last_profile_try: f64,
+    /// The profile service's rate limit: when it was last asked, and until when it is left alone
+    /// after a refusal. Saved with the accounts, so a restart cannot shorten the gap.
+    profile_requests: accounts::ProfileTimes,
     /// Accounts whose profile is due, waiting for DE's rate limit.
     profile_queue: VecDeque<String>,
     profile_worker: bool,
@@ -311,9 +316,20 @@ impl Data {
     }
 
     fn save(&self) {
-        if let Err(e) = accounts::save(&self.active, self.switched, &self.accounts) {
+        if let Err(e) = accounts::save(&self.active, self.switched, self.profile_requests, &self.accounts) {
             eprintln!("could not save the account list: {e:#}");
         }
+    }
+
+    /// Seconds until DE's profile service may be asked again: the cooldown since the last
+    /// request, or longer while the service is left alone after a refusal. Zero or less: now.
+    fn profile_wait(&self) -> f64 {
+        (self.profile_requests.requested + PROFILE_COOLDOWN).max(self.profile_requests.paused_until) - now()
+    }
+
+    /// Whether the service is being left alone after a refusal.
+    fn profile_paused(&self) -> bool {
+        now() < self.profile_requests.paused_until
     }
 
     fn push_event(&mut self, text: String, kind: &'static str) {
@@ -430,7 +446,12 @@ impl State {
             accounts: registry.accounts,
             active: registry.active,
             switched: registry.switched,
-            last_profile_try: f64::NEG_INFINITY,
+            // Never in the future: a clock set back must not hold requests up for longer than
+            // the cooldown or the pause themselves.
+            profile_requests: accounts::ProfileTimes {
+                requested: registry.profile_requests.requested.min(now()),
+                paused_until: registry.profile_requests.paused_until.min(now() + PROFILE_PAUSE),
+            },
             ..Data::default()
         };
         // A shown account that is gone (its folder deleted by hand): show the first one instead.
@@ -518,8 +539,9 @@ impl State {
             };
             std::thread::Builder::new().name("update-check".into()).spawn(check).ok();
         }
-        // The game may already be running and synced.
-        if memscan::find_game_pid().is_some() {
+        // The game may already be running and synced. (The process list is only looked at with
+        // the scan switched on.)
+        if self.settings().memory_scan_enabled && memscan::find_game_pid().is_some() {
             self.schedule_memscan(Duration::from_secs(20), 1);
         }
     }
@@ -557,14 +579,14 @@ impl State {
     }
 
     /// Whether an account's profile should be loaded again: never loaded, older than the refresh
-    /// interval, loaded for another id, or saved by a build that did not keep standing yet (DE's
-    /// profile always has it: every daily pool is sent even at rank 0).
+    /// interval, or loaded for another id (the account was linked to a new one since; the fetch
+    /// settles it). A copy that lacks something, such as the standing a build before 0.3.0 did
+    /// not keep, is refreshed at the ordinary interval like any other: a reason a fetch cannot
+    /// cure must never ask DE again at every cooldown.
     fn profile_stale(&self, acc: &Account) -> bool {
         let interval = self.settings().profile_refresh_minutes.max(10) as f64 * 60.0;
         acc.profile.as_ref().is_none_or(|p| {
-            now() - p.fetched > interval
-                || p.id.as_deref().is_some_and(|pid| Some(pid) != acc.id.as_deref())
-                || (p.standing.is_none() && p.source.as_deref() == Some("DE public profile"))
+            now() - p.fetched > interval || p.id.as_deref().is_some_and(|pid| Some(pid) != acc.id.as_deref())
         })
     }
 
@@ -609,7 +631,7 @@ impl State {
             LogEvent::Name(name, live) => self.on_login(&name, live),
             LogEvent::Replayed => {
                 self.follow_game(false);
-                if memscan::find_game_pid().is_some() {
+                if self.settings().memory_scan_enabled && memscan::find_game_pid().is_some() {
                     self.schedule_memscan(Duration::from_secs(3), 2);
                 }
             }
@@ -841,9 +863,15 @@ impl State {
     }
 
     fn memscan_now(self: &Arc<Self>, pid: Option<u32>, retries: u8) {
-        let result = match pid {
+        // A panic in the read (a bug) is caught here: the status would otherwise stay "scanning"
+        // for good, and every scan scheduled after it would wait for that one forever.
+        let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match pid {
             Some(pid) => memscan::scan_inventory(pid, |p| lock(&self.memscan).progress = py_round(p, 3)),
             None => Err(ScanError::NotRunning),
+        }));
+        let result = match read {
+            Ok(result) => result,
+            Err(_) => Err(ScanError::Io("the read hit a bug (see the app's log); nothing was changed".into())),
         };
         let retry = match result {
             Ok((captures, info)) => self.apply_capture(captures, info.seconds),
@@ -966,23 +994,18 @@ impl State {
 
     fn profile_worker(self: Arc<Self>) {
         loop {
-            let (key, wait) = {
+            let (key, wait, paused) = {
                 let mut d = lock(&self.data);
                 let Some(key) = d.profile_queue.front().cloned() else {
                     d.profile_worker = false;
                     return;
                 };
-                (key, PROFILE_COOLDOWN - (now() - d.last_profile_try))
+                (key, d.profile_wait(), d.profile_paused())
             };
             if wait > 0.0 {
                 let name = lock(&self.data).name_of(&key);
-                self.event(
-                    &format!(
-                        "Loading {name}'s profile in {} min (pausing for DE's rate limit)",
-                        (wait / 60.0) as i64 + 1
-                    ),
-                    "info",
-                );
+                let why = if paused { "DE refused the last request" } else { "pausing for DE's rate limit" };
+                self.event(&format!("Loading {name}'s profile in {} min ({why})", (wait / 60.0) as i64 + 1), "info");
                 std::thread::sleep(Duration::from_secs_f64(wait + 1.0));
                 continue;
             }
@@ -997,20 +1020,25 @@ impl State {
         }
     }
 
-    /// Takes the one profile request DE's rate limit allows per cooldown.
+    /// Takes the one profile request DE's rate limit allows per cooldown, and none while the
+    /// service is left alone after a refusal. The time is saved at once: a restart must not
+    /// forget it.
     fn take_profile_slot(&self) -> Result<()> {
         let mut d = lock(&self.data);
-        let wait = PROFILE_COOLDOWN - (now() - d.last_profile_try);
+        let wait = d.profile_wait();
         if wait > 0.0 {
-            return Err(UserError::new(format!(
+            let why = if d.profile_paused() {
+                "DE's profile service refused the last request, which is how it rate-limits. To keep your IP from \
+                 being blocked from logging in, no profile is asked for during the next hour."
+            } else {
                 "To stay clear of DE's rate limit, which can block your IP from logging in, profile requests are \
-                 limited to one every 5 minutes. Try again in {}:{:02}.",
-                (wait / 60.0) as i64,
-                (wait % 60.0) as i64
-            ))
-            .into());
+                 limited to one every 5 minutes."
+            };
+            let (minutes, seconds) = ((wait / 60.0) as i64, (wait % 60.0) as i64);
+            return Err(UserError::new(format!("{why} Try again in {minutes}:{seconds:02}.")).into());
         }
-        d.last_profile_try = now();
+        d.profile_requests.requested = now();
+        d.save();
         Ok(())
     }
 
@@ -1028,8 +1056,23 @@ impl State {
             Ok(p) => p,
             Err(e) => {
                 let msg = e.to_string();
-                if let Some(acc) = lock(&self.data).get_mut(key) {
-                    acc.profile_error = Some(msg.clone());
+                {
+                    let mut d = lock(&self.data);
+                    if let Some(acc) = d.get_mut(key) {
+                        acc.profile_error = Some(msg.clone());
+                    }
+                    // A 403 is the service rate-limiting this address: leave it alone for a
+                    // while, and forget what else was waiting to ask it.
+                    if e.downcast_ref::<sources::ProfileRefused>().is_some_and(|r| r.status == 403) {
+                        d.profile_requests.paused_until = now() + PROFILE_PAUSE;
+                        d.profile_queue.clear();
+                        d.push_event(
+                            "DE's profile service refused a request; no profile is asked for during the next hour"
+                                .into(),
+                            "warn",
+                        );
+                        d.save();
+                    }
                 }
                 if !quiet {
                     return Err(e);
@@ -2383,5 +2426,20 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(d.get(&a).map(|x| x.name.as_str()), Some("Tenno"));
         assert_eq!(d.active_or_new(), d.accounts[0].key, "with nothing shown yet, the first account");
+    }
+
+    #[test]
+    fn profile_requests_wait_for_the_cooldown_and_the_pause() {
+        let mut d = Data::default();
+        assert!(d.profile_wait() <= 0.0, "never asked: no wait");
+        d.profile_requests.requested = now();
+        let wait = d.profile_wait();
+        assert!(wait > PROFILE_COOLDOWN - 2.0 && wait <= PROFILE_COOLDOWN);
+        assert!(!d.profile_paused());
+        d.profile_requests.paused_until = now() + PROFILE_PAUSE;
+        assert!(d.profile_paused());
+        assert!(d.profile_wait() > PROFILE_COOLDOWN, "a refusal holds requests up for longer than the cooldown");
+        d.profile_requests.requested = 0.0;
+        assert!(d.profile_wait() > PROFILE_PAUSE - 2.0, "the pause counts on its own");
     }
 }

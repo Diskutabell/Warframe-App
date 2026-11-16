@@ -15,6 +15,7 @@ use tiny_http::{Header, Method, Request, Response, Server};
 use crate::UserError;
 use crate::art;
 use crate::memscan::ScanError;
+use crate::sources::ProfileRefused;
 use crate::state::State;
 
 #[derive(RustEmbed)]
@@ -187,11 +188,24 @@ fn content_type(name: &str) -> &'static str {
 
 /// 400 for problems the user can act on, 500 for bugs.
 fn status_for(e: &anyhow::Error) -> u16 {
-    if e.downcast_ref::<UserError>().is_some() || e.downcast_ref::<ScanError>().is_some() {
+    let users = e.downcast_ref::<UserError>().is_some()
+        || e.downcast_ref::<ScanError>().is_some()
+        || e.downcast_ref::<ProfileRefused>().is_some();
+    if users {
         400
     } else {
         eprintln!("request failed: {e:#}");
         500
+    }
+}
+
+/// Runs one API call so that a panic in it (a bug) becomes an error answer. Without this the
+/// panic would end the worker thread: there are six, none is restarted, and each one lost makes
+/// the UI slower until it gets no answer at all.
+fn guarded<T>(call: impl FnOnce() -> Result<T>) -> Result<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)) {
+        Ok(result) => result,
+        Err(_) => Err(anyhow!("The engine hit a bug answering this request; its log says where.")),
     }
 }
 
@@ -206,7 +220,7 @@ fn handle(state: &Arc<State>, mut req: Request) {
                 return serve_art(req, &query);
             }
             if let Some(api) = path.strip_prefix("/api/") {
-                match get_api(state, api, &query) {
+                match guarded(|| get_api(state, api, &query)) {
                     Ok(v) => respond_json(req, 200, &v),
                     Err(e) => {
                         let code = status_for(&e);
@@ -241,7 +255,7 @@ fn handle(state: &Arc<State>, mut req: Request) {
                 }
             };
             let api = path.strip_prefix("/api/").unwrap_or("");
-            match post_api(state, api, &body) {
+            match guarded(|| post_api(state, api, &body)) {
                 Ok(v) => respond_json(req, 200, &v.unwrap_or_else(|| json!({"ok": true}))),
                 Err(e) => {
                     let code = status_for(&e);
@@ -378,5 +392,17 @@ mod tests {
         assert!(Web::get("js/main.js").is_some());
         assert!(Web::get("js/pages/settings.js").is_some());
         assert!(Web::get("../Cargo.toml").is_none());
+    }
+
+    #[test]
+    fn a_panicking_call_answers_with_an_error_instead_of_ending_the_worker() {
+        assert!(guarded(|| -> Result<()> { panic!("a bug") }).is_err());
+        assert_eq!(guarded(|| Ok(1)).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_refused_profile_is_the_users_problem_not_a_bug() {
+        assert_eq!(status_for(&ProfileRefused::new(403, "refused".into()).into()), 400);
+        assert_eq!(status_for(&anyhow!("boom")), 500);
     }
 }

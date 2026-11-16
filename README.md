@@ -174,8 +174,9 @@ a relic mission in a squad where you are not the host. Otherwise you can choose 
 found or paste yours in Settings.
 
 The app never guesses ids against DE's servers and asks for a profile at most once every 5
-minutes. DE rate-limits that service, and too many requests can get your IP blocked from logging
-in for a while.
+minutes, also across restarts; after the service refuses a request it is left alone for an hour.
+DE rate-limits that service, and too many requests can get your IP blocked from logging in for a
+while.
 
 ## Memory scan
 

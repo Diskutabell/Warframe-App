@@ -27,19 +27,33 @@ struct Cache {
 static CACHE: Mutex<Cache> = Mutex::new(Cache { t: f64::NEG_INFINITY, platform: None, raw: None, error: None });
 
 /// The whole worldstate, fetched at most once a minute. A failed fetch keeps the last good copy.
+///
+/// The fetch runs with the cache unlocked: it can take up to 20 s, and everything that shows the
+/// world (the World and Fissures pages, item details, the notifier) would wait on the lock
+/// meanwhile. Whoever finds the copy stale claims this minute's fetch first, so the others go on
+/// with the last copy instead of fetching too.
 fn worldstate(platform: Platform) -> (Option<Arc<Value>>, Option<String>) {
-    let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    let fresh = now() - c.t < MAX_AGE && c.platform == Some(platform);
-    if !fresh {
-        match net::get_json(&API.replace("{platform}", platform.as_str()), &[], Duration::from_secs(20)) {
-            Ok(raw) => {
-                c.raw = Some(Arc::new(raw));
-                c.error = None;
-            }
-            Err(e) => c.error = Some(format!("World state unavailable: {e}")),
+    {
+        let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let fresh = now() - c.t < MAX_AGE && c.platform == Some(platform);
+        if fresh {
+            return (c.raw.clone(), c.error.clone());
+        }
+        if c.platform != Some(platform) {
+            // Another platform's world is no stand-in.
+            c.raw = None;
         }
         c.t = now();
         c.platform = Some(platform);
+    }
+    let fetched = net::get_json(&API.replace("{platform}", platform.as_str()), &[], Duration::from_secs(20));
+    let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    match fetched {
+        Ok(raw) => {
+            c.raw = Some(Arc::new(raw));
+            c.error = None;
+        }
+        Err(e) => c.error = Some(format!("World state unavailable: {e}")),
     }
     (c.raw.clone(), c.error.clone())
 }

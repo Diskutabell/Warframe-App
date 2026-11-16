@@ -412,11 +412,18 @@ fn search() {
     f.searching = false;
 }
 
-/// The newest EE.log on this machine. Cached for a minute and refreshed in the background, so
-/// callers (like the web UI) never wait on a disk search.
+/// How often the disk is searched again: every minute while no log is known, and every ten once
+/// one is (another prefix may become the newer one). The search walks every game prefix under
+/// ~/Games and the like, up to tens of thousands of directories, so it is not for every minute.
+const SEARCH_AGAIN_FOUND: f64 = 600.0;
+const SEARCH_AGAIN_MISSING: f64 = 60.0;
+
+/// The newest EE.log on this machine. Cached and refreshed in the background, so callers (like
+/// the web UI) never wait on a disk search.
 pub fn find_ee_log() -> Option<PathBuf> {
     let mut f = FOUND.lock().unwrap_or_else(|e| e.into_inner());
-    if now() - f.checked > 60.0 && !f.searching {
+    let again = if f.path.as_ref().is_some_and(|p| p.is_file()) { SEARCH_AGAIN_FOUND } else { SEARCH_AGAIN_MISSING };
+    if now() - f.checked > again && !f.searching {
         f.searching = true;
         std::thread::Builder::new().name("find-eelog".into()).spawn(search).ok();
     }

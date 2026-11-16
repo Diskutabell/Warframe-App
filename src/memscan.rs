@@ -174,20 +174,35 @@ mod os {
         }
     }
 
+    /// The game process: the one named after its exe (`comm`, which the kernel cuts to 15
+    /// characters, so "Warframe.x64.ex"). Only when no process is named so does the command line
+    /// decide, for a Wine that names its processes differently. The programs that start the game
+    /// (Steam's reaper and pressure-vessel, umu, bwrap) carry the exe's path in their command
+    /// lines too; taking the first of those would read a wrapper's memory instead of the game's.
     pub fn find_game_pid() -> Option<u32> {
+        let mut by_command_line = None;
         for entry in fs::read_dir("/proc").ok()?.flatten() {
             let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else { continue };
             let comm = fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
             if comm.trim().starts_with("Warframe.x64") {
                 return Some(pid);
             }
+            if by_command_line.is_some() {
+                continue;
+            }
             let cmd = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
             let has = |needle: &[u8]| memmem::find(&cmd, needle).is_some();
-            if has(b"Warframe.x64.exe") && !has(b"Launcher") && !has(b"reaper") {
-                return Some(pid);
+            if has(b"Warframe.x64.exe")
+                && !has(b"Launcher")
+                && !has(b"reaper")
+                && !has(b"pressure-vessel")
+                && !has(b"bwrap")
+                && !has(b"umu")
+            {
+                by_command_line = Some(pid);
             }
         }
-        None
+        by_command_line
     }
 
     /// Writable, anonymous-ish regions: where downloaded JSON lives.

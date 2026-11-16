@@ -158,6 +158,19 @@ impl Account {
     }
 }
 
+/// When DE's profile service was last asked, and until when it is left alone after it refused a
+/// request. Kept in `accounts.json` so that restarting the app cannot shorten the gap between
+/// requests: DE blocks an IP from logging in to the game when the service is asked too often.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct ProfileTimes {
+    /// Epoch seconds of the last request; 0 when there has been none.
+    #[serde(default)]
+    pub requested: f64,
+    /// Epoch seconds until which no request is made (after a refusal); 0 when not paused.
+    #[serde(default)]
+    pub paused_until: f64,
+}
+
 /// `accounts.json` as read.
 #[derive(Default, Deserialize)]
 pub struct Registry {
@@ -166,6 +179,9 @@ pub struct Registry {
     /// When `active` last changed, by a login or by the user's choice.
     #[serde(default)]
     pub switched: f64,
+    /// The profile service's rate limit, kept across restarts.
+    #[serde(default)]
+    pub profile_requests: ProfileTimes,
     pub accounts: Vec<Account>,
 }
 
@@ -182,11 +198,17 @@ pub fn dir(key: &str) -> PathBuf {
 struct RegistryRef<'a> {
     active: &'a Option<String>,
     switched: f64,
+    profile_requests: ProfileTimes,
     accounts: &'a [Account],
 }
 
-pub fn save(active: &Option<String>, switched: f64, accounts: &[Account]) -> anyhow::Result<()> {
-    config::write_json_pretty(&registry_file(), &RegistryRef { active, switched, accounts })
+pub fn save(
+    active: &Option<String>,
+    switched: f64,
+    profile_requests: ProfileTimes,
+    accounts: &[Account],
+) -> anyhow::Result<()> {
+    config::write_json_pretty(&registry_file(), &RegistryRef { active, switched, profile_requests, accounts })
 }
 
 /// The accounts with their data, and what happened while loading them (for the activity list).
@@ -196,7 +218,7 @@ pub fn load() -> (Registry, Vec<String>) {
         Some(r) => r,
         None => {
             let r = migrate(&mut notes);
-            if let Err(e) = save(&r.active, r.switched, &r.accounts) {
+            if let Err(e) = save(&r.active, r.switched, r.profile_requests, &r.accounts) {
                 notes.push(format!("Could not save the account list: {e:#}"));
             }
             r
@@ -321,7 +343,12 @@ fn migrate(notes: &mut Vec<String>) -> Registry {
     }
     let _ = fs::remove_file(data.join("account.json"));
     notes.push(format!("Your data now lives in an account of its own: {}.", acc.name));
-    Registry { active: Some(acc.key.clone()), switched: 0.0, accounts: vec![acc] }
+    Registry {
+        active: Some(acc.key.clone()),
+        switched: 0.0,
+        profile_requests: ProfileTimes::default(),
+        accounts: vec![acc],
+    }
 }
 
 #[cfg(test)]
@@ -386,5 +413,16 @@ mod tests {
         let mut again: Manual = serde_json::from_value(saved).unwrap();
         assert!(!again.adopt_goals());
         assert_eq!(again.tasks, m.tasks);
+    }
+
+    #[test]
+    fn the_registry_keeps_the_profile_request_times_and_reads_older_files() {
+        // Written by a build before the times were kept.
+        let old: Registry = serde_json::from_str(r#"{"active": "tenno", "switched": 1.0, "accounts": []}"#).unwrap();
+        assert_eq!((old.profile_requests.requested, old.profile_requests.paused_until), (0.0, 0.0));
+        let times = ProfileTimes { requested: 100.0, paused_until: 3700.0 };
+        let written = RegistryRef { active: &None, switched: 0.0, profile_requests: times, accounts: &[] };
+        let back: Registry = serde_json::from_str(&serde_json::to_string(&written).unwrap()).unwrap();
+        assert_eq!((back.profile_requests.requested, back.profile_requests.paused_until), (100.0, 3700.0));
     }
 }

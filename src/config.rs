@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 use crate::UserError;
 
 pub const APP: &str = "warframeproject";
-pub const USER_AGENT: &str = concat!("warframeproject/", env!("CARGO_PKG_VERSION"), " (+Linux Warframe companion)");
+/// How the app names itself to every server it asks: the version and where it comes from, as
+/// well-behaved tools do (the same on Linux and Windows).
+pub const USER_AGENT: &str =
+    concat!("warframeproject/", env!("CARGO_PKG_VERSION"), " (+https://github.com/Diskutabell/Warframe-App)");
 
 pub struct Dirs {
     pub config: PathBuf,
