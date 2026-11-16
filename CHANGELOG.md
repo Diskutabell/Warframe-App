@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.9.2 - 2026-11-16
+
+### Changed
+
+- **Gentler with DE's profile service.** The 5-minute gap between profile requests is now kept
+  across restarts (it is saved with the accounts), and when the service refuses a request with
+  a 403, which is how it rate-limits, no profile is asked for during the next hour. A saved
+  profile that lacks something is refreshed at the ordinary interval, never at every cooldown.
+- The app names itself to the servers it asks as `warframeproject/<version>` plus the project
+  page, on every system; it said Linux on Windows too.
+
+### Fixed
+
+- **Linux: the memory scan could pick the program that started the game instead of the game**
+  when it was launched without its launcher (umu, Lutris): the process named after the exe now
+  comes first, and the wrappers (pressure-vessel, bwrap, umu) are never taken.
+- A bug during a memory read would have left the scan "scanning" for good, with every later scan
+  waiting on it; a bug in an API call would have ended one of the six request workers. Both now
+  answer with an error and carry on.
+- The World and Fissures pages, item details and notifications no longer wait on a world state
+  fetch in progress (up to 20 s): they use the last copy meanwhile.
+- The search for EE.log walked every game prefix every minute; once the log is found it looks
+  again every ten minutes.
+
 ## 0.9.1 - 2026-11-12
 
 ### Changed
