@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.9.3 - 2026-11-20
+
+### Changed
+
+- **Network and external link hardening.** Outbound HTTP calls now require HTTPS, cap response sizes,
+  and stop following redirects on item art fetches. External links check for `http://` or `https://`
+  before opening, and Windows now uses `ShellExecuteW` directly instead of `rundll32`.
+- **Stricter local API validation.** Normal POST endpoints are capped at 1 MiB (200 MiB remains
+  allowed only for inventory and profile imports), IPv6 loopback `Host` headers without an explicit
+  port are accepted, `Origin` matching is exact, and item art downloads use a bounded queue instead
+  of spawning unbounded threads.
+- **Safer memory scans.** Inventory reads reuse and wipe their buffers on drop, stream-filter JSON
+  so disallowed fields are never allocated as strings, and stop immediately when the game process
+  exits or denies access. Linux pins `/proc/<pid>` via directory file descriptors and narrows
+  writable regions and process matching; Windows checks for 64-bit processes, guards against
+  overflow, and re-verifies memory protection before each read.
+
+### Fixed
+
+- **UI navigation and escaping.** Rapidly switching pages no longer lets an older async render or
+  timer overwrite the active page, loading states on the Fissures and Inventory pages render
+  cleanly, and overlay and Standing tooltips escape all HTML characters.
+- **Per-platform caches and shutdown flushes.** Market prices and traded riven caches are now stored
+  per platform (`PC`, `PS`, `Xbox`, `Switch`), dirty market prices and pending OCR frame archives
+  flush cleanly on exit, and concurrent riven or worldstate refreshes coalesce instead of piling up
+  or overwriting a newer platform selection.
+- **Market queue priority and cache bounds.** Urgent price lookups are no longer dropped behind
+  background queue entries, riven weapon slugs are cached in memory, and failed art URL lookups are
+  bounded in memory.
+- **Atomic writes, hotkeys, and subprocesses.** Atomic file saves use unique temporary filenames so
+  concurrent writers cannot clobber each other, Hyprland/Sway hotkey installs write atomically and
+  support modifier combinations, subprocess timeouts reap children without hanging on inherited
+  pipes, and desktop notifications run asynchronously with bounded tracking state.
+- **Data parsing and edge cases.** Self-referential recipes cannot recurse infinitely, DE's Public
+  Export manifest tracks hash changes and caps LZMA decompression at 4 MiB, large `EE.log` files
+  keep their header timestamp when seeking to the tail, OCR guards against tiny or out-of-bounds
+  crops, Windows screen capture checks all GDI handles and buffer arithmetic, and account ID,
+  arcane rank, and update version comparisons handle edge cases cleanly.
+
 ## 0.9.2 - 2026-11-16
 
 ### Changed
