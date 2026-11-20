@@ -22,7 +22,13 @@ use crate::state::State;
 #[folder = "web/"]
 pub(crate) struct Web;
 
-const MAX_BODY: u64 = 200 * 1024 * 1024;
+/// Default cap for JSON API POST bodies; only inventory/profile file imports allow large payloads.
+const MAX_BODY: u64 = 1024 * 1024;
+const MAX_IMPORT_BODY: u64 = 200 * 1024 * 1024;
+
+fn max_body_for(api: &str) -> u64 {
+    if matches!(api, "inventory/import" | "profile/import") { MAX_IMPORT_BODY } else { MAX_BODY }
+}
 
 pub fn bind(port: u16) -> Result<Arc<Server>> {
     Server::http(("127.0.0.1", port)).map(Arc::new).map_err(|e| anyhow!("{e}"))
@@ -49,19 +55,36 @@ fn header<'a>(req: &'a Request, name: &'static str) -> Option<&'a str> {
     req.headers().iter().find(|h| h.field.equiv(name)).map(|h| h.value.as_str())
 }
 
+fn valid_host(host: &str) -> bool {
+    if let Some(rest) = host.strip_prefix('[') {
+        let Some((addr, after)) = rest.split_once(']') else { return false };
+        let port_ok = after.is_empty()
+            || after.strip_prefix(':').is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+        return addr == "::1" && port_ok;
+    }
+    let name = match host.split_once(':') {
+        Some((h, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => h,
+        Some(_) => return false,
+        None => host,
+    };
+    matches!(name, "127.0.0.1" | "localhost")
+}
+
 /// Guards against DNS rebinding: only answer requests addressed to the loopback host.
 fn host_ok(req: &Request) -> bool {
-    let host = header(req, "Host").unwrap_or("");
-    let host = host.rsplit_once(':').map_or(host, |(h, _)| h);
-    matches!(host, "127.0.0.1" | "localhost" | "[::1]")
+    valid_host(header(req, "Host").unwrap_or(""))
+}
+
+fn valid_origin(origin: Option<&str>, host: Option<&str>) -> bool {
+    match origin {
+        None => true,
+        Some(origin) => host.is_some_and(|h| !h.is_empty() && origin == format!("http://{h}")),
+    }
 }
 
 /// Rejects cross-site requests from other web pages: only our own UI may POST.
 fn origin_ok(req: &Request) -> bool {
-    match header(req, "Origin") {
-        None => true,
-        Some(origin) => origin.ends_with(&format!("//{}", header(req, "Host").unwrap_or(""))),
-    }
+    valid_origin(header(req, "Origin"), header(req, "Host"))
 }
 
 /// Percent-decoding as `urllib.parse.parse_qs` does it: `+` is a space, a bad escape stays as is.
@@ -121,9 +144,10 @@ struct ArtJob {
 /// otherwise occupy every worker, and a hotkey scan would wait behind the downloads.
 static ART_JOBS: OnceLock<async_channel::Sender<ArtJob>> = OnceLock::new();
 const ART_THREADS: usize = 4;
+const ART_QUEUE_CAP: usize = 128;
 
 fn start_art_threads() {
-    let (tx, rx) = async_channel::unbounded::<ArtJob>();
+    let (tx, rx) = async_channel::bounded::<ArtJob>(ART_QUEUE_CAP);
     if ART_JOBS.set(tx).is_err() {
         return; // already running
     }
@@ -133,7 +157,7 @@ fn start_art_threads() {
             .name(format!("art-{i}"))
             .spawn(move || {
                 while let Ok(job) = rx.recv_blocking() {
-                    respond_art(job.req, art::get(&job.url, job.size));
+                    respond_art(job.req, guarded(|| art::get(&job.url, job.size)));
                 }
             })
             .expect("spawning an art thread");
@@ -148,9 +172,16 @@ fn serve_art(req: Request, query: &HashMap<String, String>) {
         return respond_art(req, Ok(found));
     }
     match ART_JOBS.get() {
-        // Dropping the request (the channel never closes in practice) just closes the connection.
-        Some(jobs) => drop(jobs.send_blocking(ArtJob { req, url, size })),
-        None => respond_art(req, art::get(&url, size)),
+        Some(jobs) => match jobs.try_send(ArtJob { req, url, size }) {
+            Ok(()) => {}
+            Err(async_channel::TrySendError::Full(job)) => {
+                respond(job.req, 503, b"art queue busy".to_vec(), "text/plain; charset=utf-8");
+            }
+            Err(async_channel::TrySendError::Closed(job)) => {
+                respond(job.req, 500, b"art worker unavailable".to_vec(), "text/plain; charset=utf-8");
+            }
+        },
+        None => respond_art(req, guarded(|| art::get(&url, size))),
     }
 }
 
@@ -242,8 +273,10 @@ fn handle(state: &Arc<State>, mut req: Request) {
             if !origin_ok(&req) {
                 return respond_json(req, 403, &json!({"error": "cross-origin request refused"}));
             }
+            let api = path.strip_prefix("/api/").unwrap_or("");
+            let limit = max_body_for(api);
             let mut raw = Vec::new();
-            if req.as_reader().take(MAX_BODY + 1).read_to_end(&mut raw).is_err() || raw.len() as u64 > MAX_BODY {
+            if req.as_reader().take(limit + 1).read_to_end(&mut raw).is_err() || raw.len() as u64 > limit {
                 return respond_json(req, 400, &json!({"error": "Upload too large"}));
             }
             let body: Value = if raw.iter().all(u8::is_ascii_whitespace) {
@@ -254,7 +287,6 @@ fn handle(state: &Arc<State>, mut req: Request) {
                     Err(e) => return respond_json(req, 400, &json!({"error": format!("Not JSON: {e}")})),
                 }
             };
-            let api = path.strip_prefix("/api/").unwrap_or("");
             match guarded(|| post_api(state, api, &body)) {
                 Ok(v) => respond_json(req, 200, &v.unwrap_or_else(|| json!({"ok": true}))),
                 Err(e) => {
@@ -404,5 +436,27 @@ mod tests {
     fn a_refused_profile_is_the_users_problem_not_a_bug() {
         assert_eq!(status_for(&ProfileRefused::new(403, "refused".into()).into()), 400);
         assert_eq!(status_for(&anyhow!("boom")), 500);
+    }
+
+    #[test]
+    fn host_origin_and_body_limits_are_enforced() {
+        assert!(valid_host("127.0.0.1:8642"));
+        assert!(valid_host("127.0.0.1"));
+        assert!(valid_host("localhost:8642"));
+        assert!(valid_host("[::1]:8642"));
+        assert!(valid_host("[::1]"));
+        assert!(!valid_host("[::1]:abc"));
+        assert!(!valid_host("example.com:8642"));
+        assert!(!valid_host(""));
+
+        assert!(valid_origin(None, Some("127.0.0.1:8642")));
+        assert!(valid_origin(Some("http://127.0.0.1:8642"), Some("127.0.0.1:8642")));
+        assert!(!valid_origin(Some("https://127.0.0.1:8642"), Some("127.0.0.1:8642")));
+        assert!(!valid_origin(Some("file://127.0.0.1:8642"), Some("127.0.0.1:8642")));
+        assert!(!valid_origin(Some("http://evil.example//127.0.0.1:8642"), Some("127.0.0.1:8642")));
+
+        assert_eq!(max_body_for("settings"), MAX_BODY);
+        assert_eq!(max_body_for("inventory/import"), MAX_IMPORT_BODY);
+        assert_eq!(max_body_for("profile/import"), MAX_IMPORT_BODY);
     }
 }

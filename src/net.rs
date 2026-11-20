@@ -43,11 +43,16 @@ impl std::fmt::Display for Offline {
 
 impl std::error::Error for Offline {}
 
+/// Default response cap: generous enough for WFCD's ~9 MB relic list and game exports, tighter
+/// than reading unbounded responses.
+pub const DEFAULT_LIMIT: u64 = 32 * 1024 * 1024;
+
 fn agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
         ureq::Agent::config_builder()
             .user_agent(USER_AGENT)
+            .https_only(true)
             .http_status_as_error(false)
             .timeout_global(Some(Duration::from_secs(30)))
             .build()
@@ -63,18 +68,32 @@ pub struct Response {
 
 /// GET with extra headers. Any status comes back as a `Response`; only transport failures error.
 pub fn get(url: &str, headers: &[(&str, &str)], timeout: Duration) -> Result<Response> {
+    get_with(url, headers, timeout, DEFAULT_LIMIT, true)
+}
+
+/// GET with explicit body-size limit and redirect policy.
+pub fn get_with(
+    url: &str,
+    headers: &[(&str, &str)],
+    timeout: Duration,
+    max_bytes: u64,
+    follow_redirects: bool,
+) -> Result<Response> {
     if offline() {
         return Err(Offline.into());
     }
-    let mut req = agent().get(url).config().timeout_global(Some(timeout)).build();
+    let mut cfg = agent().get(url).config().timeout_global(Some(timeout));
+    if !follow_redirects {
+        cfg = cfg.max_redirects(0);
+    }
+    let mut req = cfg.build();
     for (k, v) in headers {
         req = req.header(*k, *v);
     }
     let mut resp = req.call()?;
     let status = resp.status().as_u16();
     let etag = resp.headers().get("etag").and_then(|v| v.to_str().ok()).map(str::to_owned);
-    // WFCD's relic list alone is ~9 MB, and ureq's default cap is 10 MB.
-    let body = resp.body_mut().with_config().limit(128 * 1024 * 1024).read_to_vec()?;
+    let body = resp.body_mut().with_config().limit(max_bytes).read_to_vec()?;
     Ok(Response { status, etag, body })
 }
 
@@ -87,4 +106,32 @@ pub fn get_json(url: &str, headers: &[(&str, &str)], timeout: Duration) -> Resul
         return Err(HttpStatus(resp.status).into());
     }
     Ok(serde_json::from_slice(&resp.body)?)
+}
+
+/// Whether `uri` is a plain `http://` or `https://` web URL safe to hand to the OS browser
+/// launcher: rejects `file://`, UNC paths, custom URI handlers, whitespace and control bytes.
+pub fn is_http_url(uri: &str) -> bool {
+    let Some(rest) = uri.strip_prefix("https://").or_else(|| uri.strip_prefix("http://")) else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    !host.is_empty() && !uri.chars().any(|c| c.is_control() || c.is_whitespace())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn external_url_validation_allows_only_http_and_https() {
+        assert!(is_http_url("https://warframe.market/items/ash_prime_set"));
+        assert!(is_http_url("http://127.0.0.1:8642/"));
+        assert!(!is_http_url("file:///etc/passwd"));
+        assert!(!is_http_url("file://C:/Windows/System32/calc.exe"));
+        assert!(!is_http_url("\\\\server\\share\\payload.exe"));
+        assert!(!is_http_url("javascript:alert(1)"));
+        assert!(!is_http_url("https://"));
+        assert!(!is_http_url("https://warframe.market/foo bar"));
+        assert!(!is_http_url("https://warframe.market/\nfoo"));
+    }
 }

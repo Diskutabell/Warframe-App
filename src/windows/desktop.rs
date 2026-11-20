@@ -65,11 +65,27 @@ pub fn error_box(text: &str) {
     }
 }
 
-/// Opens a link in the default browser.
+/// Opens an HTTP(S) link in the default browser; rejects every other scheme and path.
 pub fn open_url(url: &str) {
-    // url.dll's handler is what Windows itself uses for links; unlike `cmd /c start` it does not
-    // treat '&' in the URL as a command separator.
-    let _ = std::process::Command::new("rundll32").arg("url.dll,FileProtocolHandler").arg(url).spawn();
+    if !crate::net::is_http_url(url) {
+        return;
+    }
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let op: Vec<u16> = "open\0".encode_utf16().collect();
+    let target: Vec<u16> = url.encode_utf16().chain(Some(0)).collect();
+    // SAFETY: both strings are NUL-terminated UTF-16 and outlive the call; `url` has been
+    // restricted to http(s) so ShellExecuteW hands it to the browser, never a local or UNC path.
+    unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            op.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        );
+    }
 }
 
 /// What the event loop receives: the engine's events, and the overlay pages asking to be hidden.
@@ -411,6 +427,7 @@ pub fn run(state: Arc<State>, url: &str, _backend: Backend) -> Result<()> {
         let _ = (&webview, &context);
         match event {
             TaoEvent::WindowEvent { event: WindowEvent::CloseRequested, window_id, .. } if window_id == window.id() => {
+                overlays.state.shutdown();
                 *flow = ControlFlow::Exit;
             }
             TaoEvent::UserEvent(Event::Ui(ev)) => match ev {
@@ -427,7 +444,10 @@ pub fn run(state: Arc<State>, url: &str, _backend: Backend) -> Result<()> {
                     overlays.hide_all();
                     let _ = ack.send(());
                 }
-                UiEvent::Quit => *flow = ControlFlow::Exit,
+                UiEvent::Quit => {
+                    overlays.state.shutdown();
+                    *flow = ControlFlow::Exit;
+                }
             },
             TaoEvent::UserEvent(Event::Hide(Which::Strip)) => overlays.strip.hide(),
             TaoEvent::UserEvent(Event::Hide(Which::Riven)) => overlays.riven.hide(),

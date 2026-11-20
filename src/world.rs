@@ -2,7 +2,7 @@
 //! open-world cycles, Baro Ki'Teer, sortie, archon hunt, Steel Path, Nightwave, Darvo, the
 //! Circuit and Archimedea; with what Duviri offers the account, from its log (`eelog.rs`).
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -16,46 +16,110 @@ use crate::{net, now};
 
 const API: &str = "https://api.warframestat.us/{platform}?language=en";
 const MAX_AGE: f64 = 60.0;
+const ERROR_RETRY_AFTER: f64 = 15.0;
 
 struct Cache {
     t: f64,
     platform: Option<Platform>,
     raw: Option<Arc<Value>>,
     error: Option<String>,
+    in_flight: Option<Platform>,
 }
 
-static CACHE: Mutex<Cache> = Mutex::new(Cache { t: f64::NEG_INFINITY, platform: None, raw: None, error: None });
+struct WorldCache {
+    state: Mutex<Cache>,
+    done: Condvar,
+}
+
+impl WorldCache {
+    const fn new() -> WorldCache {
+        WorldCache {
+            state: Mutex::new(Cache { t: f64::NEG_INFINITY, platform: None, raw: None, error: None, in_flight: None }),
+            done: Condvar::new(),
+        }
+    }
+
+    fn get(
+        &self,
+        platform: Platform,
+        fetch: impl FnOnce(Platform) -> anyhow::Result<Value>,
+    ) -> (Option<Arc<Value>>, Option<String>) {
+        {
+            let mut c = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            while c.in_flight == Some(platform) {
+                c = self.done.wait(c).unwrap_or_else(|e| e.into_inner());
+            }
+            let fresh = now() - c.t < MAX_AGE && c.platform == Some(platform);
+            if fresh {
+                return (c.raw.clone(), c.error.clone());
+            }
+            if c.platform != Some(platform) {
+                // Another platform's world is no stand-in.
+                c.raw = None;
+                c.error = None;
+            }
+            c.platform = Some(platform);
+            c.in_flight = Some(platform);
+        }
+        // Guarantees waiting threads are woken even if `fetch` unwinds on a panic.
+        struct FlightGuard<'a> {
+            cache: &'a WorldCache,
+            platform: Platform,
+            armed: bool,
+        }
+        impl Drop for FlightGuard<'_> {
+            fn drop(&mut self) {
+                if self.armed {
+                    let mut c = self.cache.state.lock().unwrap_or_else(|e| e.into_inner());
+                    if c.in_flight == Some(self.platform) {
+                        c.in_flight = None;
+                    }
+                    self.cache.done.notify_all();
+                }
+            }
+        }
+        let mut guard = FlightGuard { cache: self, platform, armed: true };
+        let fetched = fetch(platform);
+        let mut c = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        guard.armed = false;
+        if c.in_flight == Some(platform) {
+            c.in_flight = None;
+        }
+        let result = if c.platform == Some(platform) {
+            match fetched {
+                Ok(raw) => {
+                    c.raw = Some(Arc::new(raw));
+                    c.error = None;
+                    c.t = now();
+                }
+                Err(e) => {
+                    c.error = Some(format!("World state unavailable: {e}"));
+                    // Short backoff on failure so a transient outage recovers soon without spinning.
+                    c.t = now() - (MAX_AGE - ERROR_RETRY_AFTER).max(0.0);
+                }
+            }
+            (c.raw.clone(), c.error.clone())
+        } else {
+            // The platform changed while this fetch was in flight: return what we fetched for our
+            // caller without overwriting the newly selected platform's cache.
+            match fetched {
+                Ok(raw) => (Some(Arc::new(raw)), None),
+                Err(e) => (None, Some(format!("World state unavailable: {e}"))),
+            }
+        };
+        self.done.notify_all();
+        result
+    }
+}
+
+static CACHE: WorldCache = WorldCache::new();
 
 /// The whole worldstate, fetched at most once a minute. A failed fetch keeps the last good copy.
 ///
-/// The fetch runs with the cache unlocked: it can take up to 20 s, and everything that shows the
-/// world (the World and Fissures pages, item details, the notifier) would wait on the lock
-/// meanwhile. Whoever finds the copy stale claims this minute's fetch first, so the others go on
-/// with the last copy instead of fetching too.
+/// The fetch runs with the cache unlocked, while concurrent callers for the same platform wait on
+/// the condition variable instead of observing an empty in-flight cache.
 fn worldstate(platform: Platform) -> (Option<Arc<Value>>, Option<String>) {
-    {
-        let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        let fresh = now() - c.t < MAX_AGE && c.platform == Some(platform);
-        if fresh {
-            return (c.raw.clone(), c.error.clone());
-        }
-        if c.platform != Some(platform) {
-            // Another platform's world is no stand-in.
-            c.raw = None;
-        }
-        c.t = now();
-        c.platform = Some(platform);
-    }
-    let fetched = net::get_json(&API.replace("{platform}", platform.as_str()), &[], Duration::from_secs(20));
-    let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    match fetched {
-        Ok(raw) => {
-            c.raw = Some(Arc::new(raw));
-            c.error = None;
-        }
-        Err(e) => c.error = Some(format!("World state unavailable: {e}")),
-    }
-    (c.raw.clone(), c.error.clone())
+    CACHE.get(platform, |p| net::get_json(&API.replace("{platform}", p.as_str()), &[], Duration::from_secs(20)))
 }
 
 /// The syndicate tag of the running Nightwave season, as the profile names it: the API spaces it
@@ -478,5 +542,54 @@ mod tests {
         assert_eq!(baro(&here)["active"], true);
         let later = json!({"voidTrader": {"activation": future, "expiry": future}});
         assert_eq!(baro(&later)["active"], false);
+    }
+
+    #[test]
+    fn concurrent_cold_fetches_wait_and_platform_switch_does_not_clobber() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = Arc::new(WorldCache::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let results: Vec<_> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| {
+                    let cache = Arc::clone(&cache);
+                    let calls = Arc::clone(&calls);
+                    s.spawn(move || {
+                        cache.get(Platform::Pc, |_| {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            std::thread::sleep(Duration::from_millis(40));
+                            Ok(json!({"platform": "pc"}))
+                        })
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "only one fetch runs for concurrent cold callers");
+        for (raw, err) in results {
+            assert!(err.is_none());
+            assert_eq!(raw.unwrap()["platform"], "pc");
+        }
+
+        // Switching platforms mid-fetch: the slower old platform fetch must not clobber the new one.
+        let cache = Arc::new(WorldCache::new());
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let c1 = Arc::clone(&cache);
+        let t1 = std::thread::spawn(move || {
+            c1.get(Platform::Pc, |_| {
+                let _ = started_tx.send(());
+                let _ = release_rx.recv();
+                Ok(json!({"platform": "pc"}))
+            })
+        });
+        started_rx.recv().unwrap();
+        let (ps4, _) = cache.get(Platform::Ps4, |_| Ok(json!({"platform": "ps4"})));
+        assert_eq!(ps4.unwrap()["platform"], "ps4");
+        let _ = release_tx.send(());
+        let (pc_ret, _) = t1.join().unwrap();
+        assert_eq!(pc_ret.unwrap()["platform"], "pc");
+        let (cached_ps4, _) = cache.get(Platform::Ps4, |_| panic!("ps4 should still be cached"));
+        assert_eq!(cached_ps4.unwrap()["platform"], "ps4");
     }
 }

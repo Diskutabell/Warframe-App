@@ -381,19 +381,69 @@ pub fn infer_counts(item: &Item, stats: &[(&str, f64, bool)]) -> (u8, u8, u8) {
 
 const RIVEN_API: &str = "https://api.warframestat.us/{platform}/rivens";
 const MARKET_MAX_AGE: f64 = 6.0 * 3600.0;
+const REFRESH_FAIL_COOLDOWN: f64 = 60.0;
 
 const DOTS: [&str; 6] = ["", "●○○○○", "●●○○○", "●●●○○", "●●●●○", "●●●●●"];
 
+#[derive(Clone)]
+struct CachedRivens {
+    fetched: f64,
+    data: std::sync::Arc<serde_json::Map<String, Value>>,
+}
+
+#[derive(Default)]
+struct RivenCacheState {
+    by_platform: std::collections::HashMap<Platform, CachedRivens>,
+    refreshing: std::collections::HashSet<Platform>,
+    last_failed: std::collections::HashMap<Platform, f64>,
+}
+
 static MARKET_LOCK: Mutex<()> = Mutex::new(());
+static RIVEN_CACHE: std::sync::LazyLock<Mutex<RivenCacheState>> =
+    std::sync::LazyLock::new(|| Mutex::new(RivenCacheState::default()));
+
+fn riven_cache_file(platform: Platform) -> std::path::PathBuf {
+    config::dirs().cache.join(format!("rivens_{}.json", platform.as_str()))
+}
+
+fn load_cached(platform: Platform) -> Option<CachedRivens> {
+    if let Some(entry) = RIVEN_CACHE.lock().unwrap_or_else(|e| e.into_inner()).by_platform.get(&platform).cloned() {
+        return Some(entry);
+    }
+    let file = riven_cache_file(platform);
+    let raw: Value = config::read_json(&file).or_else(|| {
+        // Legacy single-file cache was PC-only before per-platform files existed.
+        (platform == Platform::Pc).then(|| config::read_json(&config::dirs().cache.join("rivens.json"))).flatten()
+    })?;
+    if raw.get("platform").and_then(Value::as_str).is_some_and(|p| p != platform.as_str()) {
+        return None;
+    }
+    let entry = CachedRivens {
+        fetched: raw["t"].as_f64().unwrap_or(0.0),
+        data: std::sync::Arc::new(raw["data"].as_object().cloned().unwrap_or_default()),
+    };
+    RIVEN_CACHE.lock().unwrap_or_else(|e| e.into_inner()).by_platform.insert(platform, entry.clone());
+    Some(entry)
+}
+
+fn claim_background_refresh(state: &mut RivenCacheState, platform: Platform, time: f64) -> bool {
+    if state.refreshing.contains(&platform) {
+        return false;
+    }
+    if state.last_failed.get(&platform).is_some_and(|&t| time - t < REFRESH_FAIL_COOLDOWN) {
+        return false;
+    }
+    state.refreshing.insert(platform);
+    true
+}
 
 /// {weapon name: {unrolled: {...}, rerolled: {...}}} of traded riven prices, cached 6 h.
 fn market(platform: Platform) -> (serde_json::Map<String, Value>, Option<String>) {
     let _guard = MARKET_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let file = config::dirs().cache.join("rivens.json");
-    let cached: Option<Value> = config::read_json(&file);
+    let cached = load_cached(platform);
     if let Some(c) = &cached {
-        if now() - c["t"].as_f64().unwrap_or(0.0) < MARKET_MAX_AGE {
-            return (c["data"].as_object().cloned().unwrap_or_default(), None);
+        if now() - c.fetched < MARKET_MAX_AGE {
+            return ((*c.data).clone(), None);
         }
     }
     let url = RIVEN_API.replace("{platform}", platform.as_str());
@@ -407,24 +457,50 @@ fn market(platform: Platform) -> (serde_json::Map<String, Value>, Option<String>
                     }
                 }
             }
-            let _ = config::write_json(&file, &json!({"t": now(), "data": data}));
+            let fetched = now();
+            let _ = config::write_json(
+                &riven_cache_file(platform),
+                &json!({"t": fetched, "platform": platform.as_str(), "data": data}),
+            );
+            let mut state = RIVEN_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            state.by_platform.insert(platform, CachedRivens { fetched, data: std::sync::Arc::new(data.clone()) });
+            state.last_failed.remove(&platform);
             (data, None)
         }
-        Err(e) => (
-            cached.and_then(|c| c["data"].as_object().cloned()).unwrap_or_default(),
-            Some(format!("Riven prices unavailable: {e}")),
-        ),
+        Err(e) => {
+            RIVEN_CACHE.lock().unwrap_or_else(|e| e.into_inner()).last_failed.insert(platform, now());
+            (cached.map(|c| (*c.data).clone()).unwrap_or_default(), Some(format!("Riven prices unavailable: {e}")))
+        }
     }
 }
 
 /// What `weapon`'s rivens sold for lately, from the cached prices (whatever their age; a stale
 /// copy is refreshed in the background, so a riven read never waits for it).
 pub fn traded(weapon: &str, platform: Platform) -> Option<Value> {
-    let cached: Option<Value> = config::read_json(&config::dirs().cache.join("rivens.json"));
-    if cached.as_ref().is_none_or(|c| now() - c["t"].as_f64().unwrap_or(0.0) >= MARKET_MAX_AGE) {
-        std::thread::spawn(move || market(platform));
+    let cached = load_cached(platform);
+    let stale = cached.as_ref().is_none_or(|c| now() - c.fetched >= MARKET_MAX_AGE);
+    if stale && !net::offline() {
+        let should_spawn = {
+            let mut state = RIVEN_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            claim_background_refresh(&mut state, platform, now())
+        };
+        if should_spawn {
+            let spawn = std::thread::Builder::new().name("rivens-market".into()).spawn(move || {
+                struct RefreshGuard(Platform);
+                impl Drop for RefreshGuard {
+                    fn drop(&mut self) {
+                        RIVEN_CACHE.lock().unwrap_or_else(|e| e.into_inner()).refreshing.remove(&self.0);
+                    }
+                }
+                let _guard = RefreshGuard(platform);
+                let _ = market(platform);
+            });
+            if spawn.is_err() {
+                RIVEN_CACHE.lock().unwrap_or_else(|e| e.into_inner()).refreshing.remove(&platform);
+            }
+        }
     }
-    let p = cached?["data"].get(weapon)?.clone();
+    let p = cached?.data.get(weapon)?.clone();
     let pick = |v: &Value| v.as_object().filter(|o| !o.is_empty()).map(|_| v.clone());
     let (unrolled, rerolled) = (pick(&p["unrolled"]), pick(&p["rerolled"]));
     (unrolled.is_some() || rerolled.is_some()).then(|| json!({"unrolled": unrolled, "rerolled": rerolled}))
@@ -537,5 +613,18 @@ mod tests {
         assert!(grade_roll(&w, "Damage", 500.0, 2, 0, false).unwrap().out_of_range);
         assert!(grade_roll(&w, "Damage", -20.0, 2, 1, true).unwrap().sign_conflict);
         assert!(grade_roll(&w, "Multishot", 50.0, 2, 0, false).is_none(), "melee cannot roll multishot");
+    }
+
+    #[test]
+    fn riven_cache_is_separated_by_platform_and_deduplicates_refreshes() {
+        assert_ne!(riven_cache_file(Platform::Pc), riven_cache_file(Platform::Ps4));
+        let mut st = RivenCacheState::default();
+        assert!(claim_background_refresh(&mut st, Platform::Pc, 100.0));
+        assert!(!claim_background_refresh(&mut st, Platform::Pc, 100.0), "already in flight");
+        assert!(claim_background_refresh(&mut st, Platform::Ps4, 100.0), "other platform allowed");
+        st.refreshing.remove(&Platform::Pc);
+        st.last_failed.insert(Platform::Pc, 100.0);
+        assert!(!claim_background_refresh(&mut st, Platform::Pc, 120.0), "still in failure cooldown");
+        assert!(claim_background_refresh(&mut st, Platform::Pc, 161.0), "cooldown elapsed");
     }
 }

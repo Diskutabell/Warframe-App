@@ -12,6 +12,8 @@ pub mod tesseract;
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use serde_json::Value;
@@ -45,6 +47,9 @@ pub fn detect_tools(setting: ScreenshotTool) -> Tools {
 pub fn read_rewards(frame: &Rgb, names: &Names) -> Result<(Vec<RewardMatch>, String)> {
     if which("tesseract").is_none() {
         bail!("tesseract is not installed, so the reward screen cannot be read.");
+    }
+    if frame.width < 16 || frame.height < 16 {
+        bail!("screenshot is too small ({}x{}) to read rewards.", frame.width, frame.height);
     }
     let variants = image::reward_variants(frame);
     // Independent tesseract passes: run them side by side, not one after another.
@@ -90,6 +95,9 @@ pub fn read_riven(frame: &Rgb, weapons: &[String], scales: &[f64]) -> Result<(ri
     if which("tesseract").is_none() {
         bail!("tesseract is not installed, so the riven card cannot be read.");
     }
+    if frame.width < 16 || frame.height < 16 {
+        bail!("screenshot is too small ({}x{}) to read a riven.", frame.width, frame.height);
+    }
     let mut scales: Vec<f64> = scales.to_vec();
     if scales.is_empty() {
         scales.push(1.0);
@@ -122,6 +130,38 @@ pub fn read_riven(frame: &Rgb, weapons: &[String], scales: &[f64]) -> Result<(ri
 
 const KEEP_SCANS: usize = 12;
 
+static ARCHIVES_ACTIVE: Mutex<usize> = Mutex::new(0);
+static ARCHIVES_DONE: Condvar = Condvar::new();
+
+struct ArchiveGuard;
+
+impl Drop for ArchiveGuard {
+    fn drop(&mut self) {
+        let mut active = ARCHIVES_ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
+        *active = active.saturating_sub(1);
+        if *active == 0 {
+            ARCHIVES_DONE.notify_all();
+        }
+    }
+}
+
+/// Waits briefly for any in-flight background frame archives to finish writing before exit.
+pub fn flush_archives(timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    let mut active = ARCHIVES_ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
+    while *active > 0 {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else { break };
+        if remaining.is_zero() {
+            break;
+        }
+        let (guard, wait) = ARCHIVES_DONE.wait_timeout(active, remaining).unwrap_or_else(|e| e.into_inner());
+        active = guard;
+        if wait.timed_out() {
+            break;
+        }
+    }
+}
+
 pub fn frames_dir() -> PathBuf {
     config::dirs().cache.join("frames")
 }
@@ -135,22 +175,31 @@ pub fn frames_dir() -> PathBuf {
 /// changes what tesseract reads, so this is the only faithful record. Runs in the background:
 /// PNG compression costs about a second and nothing waits on it.
 pub fn archive(kind: &'static str, frame: Rgb, text: String, result: Value) {
-    std::thread::Builder::new()
-        .name("archive".into())
-        .spawn(move || {
-            let dir = frames_dir();
-            if fs::create_dir_all(&dir).is_err() {
-                return;
+    {
+        let mut active = ARCHIVES_ACTIVE.lock().unwrap_or_else(|e| e.into_inner());
+        *active += 1;
+    }
+    let spawned = std::thread::Builder::new().name("archive".into()).spawn(move || {
+        let _guard = ArchiveGuard;
+        let dir = frames_dir();
+        if fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let stem = dir.join(format!("{kind}-{}", crate::clock::stamp(crate::now())));
+        if let Some(img) = ::image::RgbImage::from_raw(frame.width as u32, frame.height as u32, frame.data) {
+            let mut png = std::io::Cursor::new(Vec::new());
+            if img.write_to(&mut png, ::image::ImageFormat::Png).is_ok() {
+                let _ = config::write_atomic(&stem.with_extension("png"), &png.into_inner());
             }
-            let stem = dir.join(format!("{kind}-{}", crate::clock::stamp(crate::now())));
-            if let Some(img) = ::image::RgbImage::from_raw(frame.width as u32, frame.height as u32, frame.data) {
-                let _ = img.save(stem.with_extension("png"));
-            }
-            let _ = fs::write(stem.with_extension("txt"), text);
-            let _ = fs::write(stem.with_extension("json"), serde_json::to_vec_pretty(&result).unwrap_or_default());
-            prune(&dir, kind);
-        })
-        .ok();
+        }
+        let _ = config::write_atomic(&stem.with_extension("txt"), text.as_bytes());
+        let _ =
+            config::write_atomic(&stem.with_extension("json"), &serde_json::to_vec_pretty(&result).unwrap_or_default());
+        prune(&dir, kind);
+    });
+    if spawned.is_err() {
+        drop(ArchiveGuard);
+    }
 }
 
 fn prune(dir: &std::path::Path, kind: &str) {

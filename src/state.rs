@@ -261,7 +261,8 @@ struct Data {
     /// Accounts whose profile is due, waiting for DE's rate limit.
     profile_queue: VecDeque<String>,
     profile_worker: bool,
-    inventory_mtime: Option<std::time::SystemTime>,
+    /// Last watched inventory file path and modification time.
+    inventory_watched: Option<(String, std::time::SystemTime)>,
 }
 
 impl Data {
@@ -354,6 +355,8 @@ enum Owner {
 
 pub struct State {
     pub settings: Arc<RwLock<Settings>>,
+    /// Serializes read-patch-save-swap in `update_settings` so concurrent toggles cannot clobber each other.
+    settings_update: Mutex<()>,
     catalog: RwLock<Arc<Catalog>>,
     catalog_error: Mutex<Option<String>>,
     names: Mutex<Option<(Arc<Catalog>, Arc<Names>)>>,
@@ -464,6 +467,7 @@ impl State {
         Arc::new(State {
             market: Market::new(Arc::clone(&settings)),
             settings,
+            settings_update: Mutex::new(()),
             catalog: RwLock::new(Arc::new(Catalog::default())),
             catalog_error: Mutex::new(None),
             names: Mutex::new(None),
@@ -514,6 +518,11 @@ impl State {
         if let Some(tx) = lock(&self.ui).as_ref() {
             let _ = tx.send_blocking(ev);
         }
+    }
+
+    pub fn shutdown(&self) {
+        self.market.shutdown();
+        ocr::flush_archives(Duration::from_secs(5));
     }
 
     // ------------------------------------------------------------ lifecycle
@@ -989,15 +998,30 @@ impl State {
             d.profile_worker = true;
         }
         let me = Arc::clone(self);
-        std::thread::Builder::new().name("profile".into()).spawn(move || me.profile_worker()).ok();
+        if let Err(e) = std::thread::Builder::new().name("profile".into()).spawn(move || me.profile_worker()) {
+            lock(&self.data).profile_worker = false;
+            eprintln!("could not start profile worker: {e}");
+        }
     }
 
     fn profile_worker(self: Arc<Self>) {
+        // Clears `profile_worker` if the worker unwinds on a panic; disarmed on normal exit under
+        // `self.data` so it never races with a newly spawned worker.
+        struct WorkerGuard(Option<Arc<State>>);
+        impl Drop for WorkerGuard {
+            fn drop(&mut self) {
+                if let Some(state) = self.0.take() {
+                    lock(&state.data).profile_worker = false;
+                }
+            }
+        }
+        let mut guard = WorkerGuard(Some(Arc::clone(&self)));
         loop {
             let (key, wait, paused) = {
                 let mut d = lock(&self.data);
                 let Some(key) = d.profile_queue.front().cloned() else {
                     d.profile_worker = false;
+                    guard.0 = None;
                     return;
                 };
                 (key, d.profile_wait(), d.profile_paused())
@@ -1228,10 +1252,10 @@ impl State {
         let Ok(modified) = fs::metadata(&path).and_then(|m| m.modified()) else { return };
         {
             let mut d = lock(&self.data);
-            if d.inventory_mtime.is_some_and(|m| modified <= m) {
+            if d.inventory_watched.as_ref().is_some_and(|(p, m)| p == &path && modified <= *m) {
                 return;
             }
-            d.inventory_mtime = Some(modified);
+            d.inventory_watched = Some((path.clone(), modified));
         }
         let label = Path::new(&path).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or(path.clone());
         match crate::config::read_json::<Value>(Path::new(&path)) {
@@ -1343,7 +1367,7 @@ impl State {
     /// Links an id typed or picked in Settings to an account (the one shown by default).
     pub fn set_account_id(self: &Arc<Self>, raw: &str, key: Option<&str>) -> Result<()> {
         let id = raw.trim().trim_matches('"').to_lowercase();
-        if id.len() != 24 || !id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        if !sources::valid_account_id(&id) {
             return Err(UserError::new(
                 "That isn't an account id: it should be exactly 24 characters of 0-9 and a-f, like 505875fb1a4d80894a000000.",
             )
@@ -1405,22 +1429,30 @@ impl State {
     }
 
     pub fn update_settings(self: &Arc<Self>, patch: &Value) -> Result<()> {
-        let updated = self.settings().patched(patch)?;
-        // A --port from the command line is for this run only: keep the file's own port unless the
-        // patch sets one, or any saved setting would make the override permanent.
-        let mut to_save = updated.clone();
-        if patch.get("port").is_none() {
-            to_save.port = Settings::load().port;
-        }
-        to_save.save()?;
-        let scan_now = updated.memory_scan_enabled && !self.settings().memory_scan_enabled;
-        if scan_now {
-            // Switching it on reads right away, even after a refusal (the system may allow it now).
-            let mut st = lock(&self.memscan);
-            st.denied_pid = None;
-            st.last_attempt = f64::NEG_INFINITY;
-        }
-        *self.settings.write().unwrap_or_else(|e| e.into_inner()) = updated;
+        let scan_now = {
+            let _guard = lock(&self.settings_update);
+            let previous = self.settings();
+            let updated = previous.patched(patch)?;
+            // A --port from the command line is for this run only: keep the file's own port unless the
+            // patch sets one, or any saved setting would make the override permanent.
+            let mut to_save = updated.clone();
+            if patch.get("port").is_none() {
+                to_save.port = Settings::load().port;
+            }
+            to_save.save()?;
+            let scan_now = updated.memory_scan_enabled && !previous.memory_scan_enabled;
+            if updated.inventory_json_path != previous.inventory_json_path {
+                lock(&self.data).inventory_watched = None;
+            }
+            if scan_now {
+                // Switching it on reads right away, even after a refusal (the system may allow it now).
+                let mut st = lock(&self.memscan);
+                st.denied_pid = None;
+                st.last_attempt = f64::NEG_INFINITY;
+            }
+            *self.settings.write().unwrap_or_else(|e| e.into_inner()) = updated;
+            scan_now
+        };
         if scan_now && memscan::find_game_pid().is_some() {
             self.schedule_memscan(Duration::from_secs(3), 1);
         }
@@ -1505,34 +1537,55 @@ impl State {
             }
             None => (Vec::new(), false),
         };
-        let d = lock(&self.data);
-        let acc = d.active();
-        let (screens, best_value) = history::totals(self.started, d.active.as_deref());
-        let playing = |key: &str| d.game.as_deref() == Some(key);
-        let account = match acc {
-            Some(a) => json!({"key": a.key, "id": a.id, "name": a.name, "source": a.source, "playing": playing(&a.key),
-                              "logName": d.game().map(|g| g.name.clone()), "evidence": a.evidence,
-                              "profileError": a.profile_error}),
-            None => {
-                json!({"key": null, "id": null, "name": null, "logName": d.game().map(|g| g.name.clone()), "evidence": []})
-            }
+        let (active_key, account, accounts_json, mastery_rank, mastery_rank_max, profile_error, events) = {
+            let d = lock(&self.data);
+            let acc = d.active();
+            let playing = |key: &str| d.game.as_deref() == Some(key);
+            let account = match acc {
+                Some(a) => {
+                    json!({"key": a.key, "id": a.id, "name": a.name, "source": a.source, "playing": playing(&a.key),
+                                  "logName": d.game().map(|g| g.name.clone()), "evidence": a.evidence,
+                                  "profileError": a.profile_error})
+                }
+                None => {
+                    json!({"key": null, "id": null, "name": null, "logName": d.game().map(|g| g.name.clone()), "evidence": []})
+                }
+            };
+            let accounts_json = d
+                .accounts
+                .iter()
+                .map(|a| {
+                    json!({
+                        "key": a.key, "name": a.name, "id": a.id, "source": a.source,
+                        "active": d.active.as_deref() == Some(a.key.as_str()), "playing": playing(&a.key),
+                        "masteryRank": a.mastery_rank(), "masteryRankMax": a.mastery_rank_max(),
+                        "profile": a.profile.as_ref().map(|p| p.fetched), "profileError": a.profile_error,
+                        "inventory": a.inventory.as_ref().map(|i| i.as_of()), "seen": a.seen,
+                        "evidence": a.evidence,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let events = d.events.iter().rev().take(15).cloned().collect::<Vec<_>>();
+            (
+                d.active.clone(),
+                account,
+                accounts_json,
+                acc.and_then(Account::mastery_rank),
+                acc.and_then(Account::mastery_rank_max),
+                acc.and_then(|a| a.profile_error.clone()),
+                events,
+            )
         };
+        let (screens, best_value) = history::totals(self.started, active_key.as_deref());
         json!({
             "ready": v.cat.loaded_at.is_some(), "dataError": self.catalog_error(),
             "version": env!("CARGO_PKG_VERSION"), "os": std::env::consts::OS, "desktop": self.has_ui(),
             "update": lock(&self.update).clone(),
             "account": account,
-            "accounts": d.accounts.iter().map(|a| json!({
-                "key": a.key, "name": a.name, "id": a.id, "source": a.source,
-                "active": d.active.as_deref() == Some(a.key.as_str()), "playing": playing(&a.key),
-                "masteryRank": a.mastery_rank(), "masteryRankMax": a.mastery_rank_max(),
-                "profile": a.profile.as_ref().map(|p| p.fetched), "profileError": a.profile_error,
-                "inventory": a.inventory.as_ref().map(|i| i.as_of()), "seen": a.seen,
-                "evidence": a.evidence,
-            })).collect::<Vec<_>>(),
-            "masteryRank": acc.and_then(Account::mastery_rank),
+            "accounts": accounts_json,
+            "masteryRank": mastery_rank,
             // The top of the badge's band (the badge for MR 16-18 is one icon), when that is all we know.
-            "masteryRankMax": acc.and_then(Account::mastery_rank_max),
+            "masteryRankMax": mastery_rank_max,
             "mastered": mastered, "total": total,
             "mastery": v.mastery_progress(),
             "currencies": currencies, "foundry": v.pending_foundry(),
@@ -1544,7 +1597,7 @@ impl State {
                 "eeLog": {"path": log, "active": active, "searching": eelog::searching() && log.is_none()},
                 "profile": {"fetched": v.profile.as_ref().map(|p| p.fetched),
                             "source": v.profile.as_ref().and_then(|p| p.source.clone()),
-                            "error": acc.and_then(|a| a.profile_error.clone()), "items": v.profile.as_ref().map_or(0, |p| p.xp.len())},
+                            "error": profile_error, "items": v.profile.as_ref().map_or(0, |p| p.xp.len())},
                 "inventory": {"source": inv.and_then(|i| i.source.clone()), "imported": inv.map(|i| i.imported),
                               "synced": inv.and_then(|i| i.synced_at), "stacks": inv.map_or(0, |i| i.counts.len())},
                 "manual": {"counts": v.manual.counts.len(), "mastered": v.manual.mastered.len()},
@@ -1552,7 +1605,7 @@ impl State {
                 "tools": self.tools(),
                 "market": {"error": lock(&self.market.error).clone(), "queued": self.market.pending()},
             },
-            "events": d.events.iter().rev().take(15).collect::<Vec<_>>(),
+            "events": events,
             "logLines": recent,
         })
     }

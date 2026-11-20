@@ -10,7 +10,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::config::{self, Settings};
+use crate::config::{self, Platform, Settings};
 use crate::{net, now};
 
 const API: &str = "https://api.warframe.market/v2";
@@ -71,13 +71,61 @@ struct Items {
 struct Queue {
     urgent: VecDeque<String>,
     normal: VecDeque<String>,
-    queued: HashSet<String>,
+    queued_urgent: HashSet<String>,
+    queued_normal: HashSet<String>,
+    stopping: bool,
+}
+
+impl Queue {
+    fn push(&mut self, slug: &str, urgent: bool) -> bool {
+        if !valid_slug(slug) {
+            return false;
+        }
+        if urgent {
+            if self.queued_urgent.contains(slug) {
+                return false;
+            }
+            if self.queued_normal.remove(slug) {
+                self.normal.retain(|s| s != slug);
+            }
+            self.queued_urgent.insert(slug.to_string());
+            self.urgent.push_back(slug.to_string());
+            true
+        } else {
+            if self.queued_urgent.contains(slug) || self.queued_normal.contains(slug) {
+                return false;
+            }
+            self.queued_normal.insert(slug.to_string());
+            self.normal.push_back(slug.to_string());
+            true
+        }
+    }
+
+    fn pop(&mut self) -> Option<String> {
+        if let Some(s) = self.urgent.pop_front() {
+            self.queued_urgent.remove(&s);
+            Some(s)
+        } else if let Some(s) = self.normal.pop_front() {
+            self.queued_normal.remove(&s);
+            Some(s)
+        } else {
+            None
+        }
+    }
+}
+
+struct PriceCache {
+    platform: Platform,
+    entries: HashMap<String, Price>,
 }
 
 pub struct Market {
     settings: Arc<RwLock<Settings>>,
     items: RwLock<Items>,
-    prices: Mutex<HashMap<String, Price>>,
+    prices: Mutex<PriceCache>,
+    save_lock: Mutex<()>,
+    riven_weapons: RwLock<Option<(f64, Vec<Value>)>>,
+    riven_weapons_fetch: Mutex<()>,
     queue: Mutex<Queue>,
     wake: Condvar,
     next_slot: Mutex<Instant>,
@@ -85,8 +133,18 @@ pub struct Market {
     pub error: Mutex<Option<String>>,
 }
 
-fn prices_file() -> PathBuf {
-    config::dirs().cache.join("prices.json")
+/// warframe.market slugs (items, riven weapons, attributes) are lowercase ASCII, digits and `_`.
+fn valid_slug(slug: &str) -> bool {
+    !slug.is_empty()
+        && slug.len() <= 128
+        && slug.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+fn prices_file(platform: Platform) -> PathBuf {
+    match platform {
+        Platform::Pc => config::dirs().cache.join("prices.json"),
+        other => config::dirs().cache.join(format!("prices_{}.json", other.as_str())),
+    }
 }
 
 fn items_file() -> PathBuf {
@@ -134,10 +192,15 @@ fn reserve_slot(next: &Mutex<Instant>, deadline: Option<Instant>) -> anyhow::Res
 
 impl Market {
     pub fn new(settings: Arc<RwLock<Settings>>) -> Arc<Market> {
+        let platform = settings.read().unwrap_or_else(|e| e.into_inner()).platform;
+        let entries = config::read_json(&prices_file(platform)).unwrap_or_default();
         let market = Arc::new(Market {
             settings,
             items: RwLock::new(Items::default()),
-            prices: Mutex::new(config::read_json(&prices_file()).unwrap_or_default()),
+            prices: Mutex::new(PriceCache { platform, entries }),
+            save_lock: Mutex::new(()),
+            riven_weapons: RwLock::new(None),
+            riven_weapons_fetch: Mutex::new(()),
             queue: Mutex::new(Queue::default()),
             wake: Condvar::new(),
             next_slot: Mutex::new(Instant::now()),
@@ -152,15 +215,41 @@ impl Market {
         market
     }
 
-    fn headers(&self) -> [(&'static str, String); 3] {
-        let platform = self.settings.read().unwrap_or_else(|e| e.into_inner()).platform.as_str().to_string();
-        [("Language", "en".into()), ("Platform", platform), ("Crossplay", "true".into())]
+    fn platform(&self) -> Platform {
+        self.settings.read().unwrap_or_else(|e| e.into_inner()).platform
+    }
+
+    /// Switches the in-memory price map when the user changes platforms in Settings.
+    fn ensure_platform(&self) -> Platform {
+        let current = self.platform();
+        let old = {
+            let p = self.prices.lock().unwrap_or_else(|e| e.into_inner());
+            if p.platform == current {
+                return current;
+            }
+            p.platform
+        };
+        self.save_if_dirty();
+        let loaded: HashMap<String, Price> = config::read_json(&prices_file(current)).unwrap_or_default();
+        let mut p = self.prices.lock().unwrap_or_else(|e| e.into_inner());
+        if p.platform == old && current == self.platform() {
+            p.platform = current;
+            p.entries = loaded;
+        }
+        current
+    }
+
+    fn headers_for(platform: Platform) -> [(&'static str, &'static str); 3] {
+        [("Language", "en"), ("Platform", platform.as_str()), ("Crossplay", "true")]
     }
 
     fn get(&self, path: &str, deadline: Option<Instant>) -> anyhow::Result<Value> {
+        self.get_for(self.platform(), path, deadline)
+    }
+
+    fn get_for(&self, platform: Platform, path: &str, deadline: Option<Instant>) -> anyhow::Result<Value> {
         self.wait_for_slot(deadline)?;
-        let headers = self.headers();
-        let refs: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let headers = Self::headers_for(platform);
         let timeout = match deadline {
             Some(end) => end
                 .checked_duration_since(Instant::now())
@@ -169,7 +258,7 @@ impl Market {
                 .min(Duration::from_secs(20)),
             None => Duration::from_secs(20),
         };
-        net::get_json(&format!("{API}{path}"), &refs, timeout)
+        net::get_json(&format!("{API}{path}"), &headers, timeout)
     }
 
     /// Blocks until this caller may send the next request.
@@ -277,7 +366,8 @@ impl Market {
     /// The cached price (lowest online sell order), queueing a refresh when it is stale.
     pub fn price(&self, slug: Option<&str>, request: bool) -> Option<Price> {
         let slug = slug?;
-        let p = self.prices.lock().unwrap_or_else(|e| e.into_inner()).get(slug).cloned();
+        self.ensure_platform();
+        let p = self.prices.lock().unwrap_or_else(|e| e.into_inner()).entries.get(slug).cloned();
         if request && p.as_ref().is_none_or(|p| now() - p.t > self.ttl()) {
             self.request(slug, false);
         }
@@ -285,21 +375,15 @@ impl Market {
     }
 
     pub fn cached(&self, slug: &str) -> Option<Price> {
-        self.prices.lock().unwrap_or_else(|e| e.into_inner()).get(slug).cloned()
+        self.ensure_platform();
+        self.prices.lock().unwrap_or_else(|e| e.into_inner()).entries.get(slug).cloned()
     }
 
     pub fn request(&self, slug: &str, urgent: bool) {
         let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
-        if q.queued.contains(slug) && !urgent {
-            return;
+        if q.push(slug, urgent) {
+            self.wake.notify_one();
         }
-        q.queued.insert(slug.to_string());
-        if urgent {
-            q.urgent.push_back(slug.to_string())
-        } else {
-            q.normal.push_back(slug.to_string())
-        }
-        self.wake.notify_one();
     }
 
     pub fn pending(&self) -> usize {
@@ -328,7 +412,11 @@ impl Market {
     }
 
     fn fetch(&self, slug: &str, deadline: Option<Instant>) -> Option<Price> {
-        let entry = match self.get(&format!("/orders/item/{slug}/top"), deadline) {
+        if !valid_slug(slug) {
+            return None;
+        }
+        let platform = self.ensure_platform();
+        let entry = match self.get_for(platform, &format!("/orders/item/{slug}/top"), deadline) {
             Ok(v) => match price_from_orders(&v, now()) {
                 Ok(price) => price,
                 Err(e) => {
@@ -346,36 +434,55 @@ impl Market {
             },
         };
         self.set_error(None);
-        self.prices.lock().unwrap_or_else(|e| e.into_inner()).insert(slug.to_string(), entry.clone());
-        self.dirty.store(true, Ordering::Relaxed);
+        let mut cache = self.prices.lock().unwrap_or_else(|e| e.into_inner());
+        if cache.platform == platform {
+            cache.entries.insert(slug.to_string(), entry.clone());
+            self.dirty.store(true, Ordering::Relaxed);
+        }
         Some(entry)
     }
 
-    fn save_if_dirty(&self) {
+    pub fn save_if_dirty(&self) {
+        let _guard = self.save_lock.lock().unwrap_or_else(|e| e.into_inner());
         if self.dirty.swap(false, Ordering::Relaxed) {
-            let snapshot = self.prices.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            if let Err(e) = config::write_json(&prices_file(), &snapshot) {
+            let (platform, snapshot) = {
+                let cache = self.prices.lock().unwrap_or_else(|e| e.into_inner());
+                (cache.platform, cache.entries.clone())
+            };
+            if let Err(e) = config::write_json(&prices_file(platform), &snapshot) {
                 self.dirty.store(true, Ordering::Relaxed);
                 eprintln!("could not save market prices: {e:#}");
             }
         }
     }
 
+    /// Stops the background worker and flushes any unsaved prices to disk before exit.
+    pub fn shutdown(&self) {
+        {
+            let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+            q.stopping = true;
+        }
+        self.wake.notify_all();
+        self.save_if_dirty();
+    }
+
     fn run(&self) {
         let mut last_save = Instant::now();
         loop {
-            let slug = {
+            let (slug, stopping) = {
                 let q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
                 let (mut q, _) = self
                     .wake
-                    .wait_timeout_while(q, Duration::from_secs(5), |q| q.urgent.is_empty() && q.normal.is_empty())
+                    .wait_timeout_while(q, Duration::from_secs(5), |q| {
+                        !q.stopping && q.urgent.is_empty() && q.normal.is_empty()
+                    })
                     .unwrap_or_else(|e| e.into_inner());
-                let slug = q.urgent.pop_front().or_else(|| q.normal.pop_front());
-                if let Some(s) = &slug {
-                    q.queued.remove(s);
-                }
-                slug
+                if q.stopping { (None, true) } else { (q.pop(), false) }
             };
+            if stopping {
+                self.save_if_dirty();
+                return;
+            }
             if let Some(slug) = slug {
                 let fresh = self.cached(&slug).is_some_and(|p| now() - p.t <= self.ttl());
                 if !fresh {
@@ -391,29 +498,47 @@ impl Market {
 
     /// The site's slug for a weapon's rivens, by the weapon's uniqueName, else its name.
     fn riven_weapon_slug(&self, uid: &str, name: &str) -> Option<String> {
+        let find_in = |weapons: &[Value]| {
+            let by = |f: &dyn Fn(&Value) -> bool| weapons.iter().find(|w| f(w)).and_then(|w| w["slug"].as_str());
+            by(&|w| w["gameRef"].as_str() == Some(uid))
+                .or_else(|| by(&|w| w["i18n"]["en"]["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(name))))
+                .map(str::to_owned)
+        };
+        if let Some((t, weapons)) = self.riven_weapons.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            if !weapons.is_empty() && now() - *t < RIVEN_WEAPONS_MAX_AGE {
+                return find_in(weapons);
+            }
+        }
+        let _refresh = self.riven_weapons_fetch.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((t, weapons)) = self.riven_weapons.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            if !weapons.is_empty() && now() - *t < RIVEN_WEAPONS_MAX_AGE {
+                return find_in(weapons);
+            }
+        }
         let file = config::dirs().cache.join("wfm_riven_weapons.json");
-        let mut cached: Option<Value> = config::read_json(&file);
-        let fresh = cached.as_ref().is_some_and(|c| {
-            c["data"].as_array().is_some_and(|a| !a.is_empty())
-                && now() - c["t"].as_f64().unwrap_or(0.0) < RIVEN_WEAPONS_MAX_AGE
+        let mut cached = self.riven_weapons.read().unwrap_or_else(|e| e.into_inner()).clone().or_else(|| {
+            let raw: Value = config::read_json(&file)?;
+            let weapons = raw["data"].as_array()?.clone();
+            Some((raw["t"].as_f64().unwrap_or(0.0), weapons))
         });
+        let fresh = cached.as_ref().is_some_and(|(t, w)| !w.is_empty() && now() - *t < RIVEN_WEAPONS_MAX_AGE);
         if !fresh {
             match self.get("/riven/weapons", None) {
                 Ok(v) if v["data"].as_array().is_some_and(|a| !a.is_empty()) => {
-                    let list = json!({"t": now(), "data": v["data"]});
-                    let _ = config::write_json(&file, &list);
-                    cached = Some(list);
+                    let fetched = now();
+                    let weapons = v["data"].as_array().unwrap().clone();
+                    let _ = config::write_json(&file, &json!({"t": fetched, "data": weapons}));
+                    cached = Some((fetched, weapons));
                 }
                 Ok(_) => eprintln!("warframe.market sent no riven weapons"),
                 Err(e) => eprintln!("warframe.market riven weapons unavailable: {e:#}"),
             }
         }
-        let list = cached?;
-        let weapons = list["data"].as_array()?;
-        let by = |f: &dyn Fn(&Value) -> bool| weapons.iter().find(|w| f(w)).and_then(|w| w["slug"].as_str());
-        by(&|w| w["gameRef"].as_str() == Some(uid))
-            .or_else(|| by(&|w| w["i18n"]["en"]["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case(name))))
-            .map(str::to_owned)
+        if let Some(entry) = &cached {
+            *self.riven_weapons.write().unwrap_or_else(|e| e.into_inner()) = Some(entry.clone());
+        }
+        let (_, weapons) = cached?;
+        find_in(&weapons)
     }
 
     /// Rivens for the same weapon with at least these positives (warframe.market's attribute
@@ -422,14 +547,16 @@ impl Market {
         let weapon = self
             .riven_weapon_slug(uid, name)
             .ok_or_else(|| anyhow::anyhow!("warframe.market lists no rivens for {name}"))?;
+        if !valid_slug(&weapon) || !positives.iter().all(|s| valid_slug(s)) {
+            anyhow::bail!("warframe.market riven query contained an invalid slug");
+        }
         let stats = positives.join(",");
         let query = format!("type=riven&weapon_url_name={weapon}&positive_stats={stats}&sort_by=price_asc");
         self.wait_for_slot(None)?;
-        let headers = self.headers();
-        let refs: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let headers = Self::headers_for(self.platform());
         let found = net::get_json(
             &format!("{API_V1}/auctions/search?{query}&buyout_policy=direct"),
-            &refs,
+            &headers,
             Duration::from_secs(20),
         )?;
         let auctions = found["payload"]["auctions"].as_array().cloned().unwrap_or_default();
@@ -559,5 +686,28 @@ mod tests {
         );
         // A shared clan-research part has no slot of its own: the caller falls back to the item's art.
         assert_eq!(g("Primary", "/Lotus/Types/Items/Research/EnergyComponent"), None);
+    }
+
+    #[test]
+    fn urgent_requests_promote_without_duplicating_and_validate_slugs() {
+        let mut q = Queue::default();
+        assert!(q.push("ash_prime_set", false));
+        assert!(!q.push("ash_prime_set", false));
+        assert!(q.push("ash_prime_set", true), "promotes normal to urgent");
+        assert!(!q.push("ash_prime_set", true), "no duplicate urgent entry");
+        assert!(!q.push("ash_prime_set", false), "already urgent");
+        assert!(!q.push("../evil", true));
+        assert!(!q.push("foo&bar=1", false));
+        assert_eq!(q.urgent.len(), 1);
+        assert_eq!(q.normal.len(), 0);
+        assert_eq!(q.pop().as_deref(), Some("ash_prime_set"));
+        assert_eq!(q.pop(), None);
+        assert!(q.queued_urgent.is_empty() && q.queued_normal.is_empty());
+    }
+
+    #[test]
+    fn price_cache_files_are_separate_per_platform() {
+        assert_ne!(prices_file(Platform::Pc), prices_file(Platform::Ps4));
+        assert_ne!(prices_file(Platform::Ps4), prices_file(Platform::Xb1));
     }
 }

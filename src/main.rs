@@ -211,8 +211,10 @@ fn run(settings: config::Settings, browser: bool, headless: bool, offline: bool)
 
     match backend {
         Some(backend) => {
-            desktop::run(state, &url, backend)?;
-            // Closing the window ends the app, background threads included.
+            let res = desktop::run(Arc::clone(&state), &url, backend);
+            // Flush dirty caches and wait briefly for in-flight disk writes before ending background threads.
+            state.shutdown();
+            res?;
             std::process::exit(0);
         }
         None => {

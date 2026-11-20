@@ -2960,6 +2960,7 @@ dependencies = [
  "gtk-layer-shell",
  "image",
  "indexmap",
+ "libc",
  "lzma-rs",
  "memchr",
  "regex",

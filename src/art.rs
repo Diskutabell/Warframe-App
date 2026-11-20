@@ -29,6 +29,10 @@ const MAX_SIZE: u32 = 512;
 const RETRY_AFTER: Duration = Duration::from_secs(600);
 /// A cached image older than this is fetched again: art does change now and then.
 const KEEP_FOR: Duration = Duration::from_secs(30 * 24 * 3600);
+/// Largest raw image download accepted from an art host (real assets are <= 512 px).
+const MAX_ART_BYTES: u64 = 8 * 1024 * 1024;
+/// Upper bound on entries kept in the negative cache.
+const MAX_FAILED: usize = 512;
 
 pub struct Art {
     pub bytes: Vec<u8>,
@@ -36,7 +40,17 @@ pub struct Art {
 }
 
 fn allowed(url: &str) -> bool {
-    SOURCES.iter().any(|s| url.starts_with(s)) && !url.contains("..")
+    let Some(rest) = SOURCES.iter().find_map(|s| url.strip_prefix(s)) else {
+        return false;
+    };
+    if rest.is_empty() || rest.chars().any(|c| c.is_control() || c.is_whitespace() || matches!(c, '?' | '#' | '\\')) {
+        return false;
+    }
+    if rest.split('/').any(|seg| seg == "." || seg == "..") || rest.contains("..") {
+        return false;
+    }
+    let lower = rest.to_ascii_lowercase();
+    !lower.contains("%2e") && !lower.contains("%2f") && !lower.contains("%5c")
 }
 
 /// The scaled image if it is already on disk. Never touches the network, so the HTTP workers can
@@ -72,7 +86,7 @@ pub fn get(url: &str, size: u32) -> Result<Art> {
                 return Ok(art);
             }
             Err(e) => {
-                FAILED.lock().unwrap().get_or_insert_with(HashMap::new).insert(url.to_string(), Instant::now());
+                note_failed(url);
                 if old.is_none() {
                     return Err(e);
                 }
@@ -83,7 +97,8 @@ pub fn get(url: &str, size: u32) -> Result<Art> {
 }
 
 fn download(url: &str) -> Result<Vec<u8>> {
-    let resp = net::get(url, &[], Duration::from_secs(20))?;
+    // Redirects are disabled so an allowlisted host cannot steer the fetch to another origin.
+    let resp = net::get_with(url, &[], Duration::from_secs(20), MAX_ART_BYTES, false)?;
     if resp.status != 200 {
         return Err(net::HttpStatus(resp.status).into());
     }
@@ -94,8 +109,21 @@ fn download(url: &str) -> Result<Vec<u8>> {
 /// art it does not have) or no connection. Asking again for every card on a page would be slow.
 static FAILED: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
 
+fn note_failed(url: &str) {
+    let mut failed = FAILED.lock().unwrap_or_else(|e| e.into_inner());
+    let map = failed.get_or_insert_with(HashMap::new);
+    map.retain(|_, at| at.elapsed() < RETRY_AFTER);
+    while map.len() >= MAX_FAILED {
+        let Some(oldest) = map.iter().min_by_key(|(_, at)| **at).map(|(k, _)| k.clone()) else {
+            break;
+        };
+        map.remove(&oldest);
+    }
+    map.insert(url.to_string(), Instant::now());
+}
+
 fn recently_failed(url: &str) -> bool {
-    let mut failed = FAILED.lock().unwrap();
+    let mut failed = FAILED.lock().unwrap_or_else(|e| e.into_inner());
     let Some(map) = failed.as_mut() else { return false };
     map.retain(|_, at| at.elapsed() < RETRY_AFTER);
     map.contains_key(url)
@@ -228,8 +256,26 @@ mod tests {
 
     #[test]
     fn only_the_art_sources_are_fetched() {
+        assert!(allowed("https://cdn.warframestat.us/img/ash-prime.png"));
+        assert!(allowed("https://browse.wf/Lotus/Interface/Icons/BaroKiTeer.png"));
         assert!(get("https://example.com/a.png", 64).is_err());
         assert!(get("https://warframe.market/static/assets/../../api/x", 64).is_err());
+        assert!(!allowed("https://warframe.market/static/assets/%2e%2e/api/x"));
+        assert!(!allowed("https://warframe.market/static/assets/.%2E/api/x"));
+        assert!(!allowed("https://warframe.market/static/assets/a%2fb.png"));
+        assert!(!allowed("https://warframe.market/static/assets/a\\b.png"));
+        assert!(!allowed("https://warframe.market/static/assets/a.png?redirect=1"));
+        assert!(!allowed("https://warframe.market/static/assets/a.png#frag"));
+        assert!(!allowed("https://warframe.market/static/assets/"));
+    }
+
+    #[test]
+    fn failed_cache_stays_bounded() {
+        for i in 0..(MAX_FAILED + 32) {
+            note_failed(&format!("https://cdn.warframestat.us/img/missing-{i}.png"));
+        }
+        let guard = FAILED.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(guard.as_ref().unwrap().len() <= MAX_FAILED);
     }
 
     #[test]

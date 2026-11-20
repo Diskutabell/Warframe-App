@@ -56,6 +56,10 @@ pub fn prepare_environment(settings: &Settings) -> Backend {
 }
 
 fn open_externally(uri: &str) {
+    if !crate::net::is_http_url(uri) {
+        eprintln!("refused to open non-http URI: {uri}");
+        return;
+    }
     if let Err(e) = gio::AppInfo::launch_default_for_uri(uri, None::<&gio::AppLaunchContext>) {
         eprintln!("could not open {uri}: {e}");
     }
