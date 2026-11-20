@@ -225,6 +225,27 @@ kbd {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.rail-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+.rail-actions button:first-child {
+  flex: 1;
+  height: 28px;
+  padding: 0 8px;
+  justify-content: flex-start;
+  font: 600 12.5px/1 var(--display);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.rail-actions button.icon {
+  width: 28px;
+  height: 28px;
+}
 .dot {
   width: 6px;
   height: 6px;

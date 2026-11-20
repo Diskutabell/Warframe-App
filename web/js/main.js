@@ -132,11 +132,20 @@ function renderRail() {
   const inv = src.inventory.source ? `Inventory ${ago(src.inventory.imported)}` : "No inventory";
   renderAccounts();
   const playing = S.account.logName && !S.account.playing ? ` <span class="faint">(${esc(S.account.logName)})</span>` : "";
+  const trayActions = S.desktop && S.minimizeToTray
+    ? `<div class="rail-actions"><button type="button" class="ghost" data-hide-tray title="Hide window to system tray">${icon("tray")}<span>Hide to tray</span></button>
+        <button type="button" class="ghost icon" data-quit-app title="Quit warframeproject" aria-label="Quit">${icon("power")}</button></div>`
+    : "";
   $("#railStatus").innerHTML = `
     <div class="rail-stat"><span class="dot ${src.eeLog.active ? "on" : ""}"></span><span>${src.eeLog.active ? "Game running" : "Game offline"}${src.eeLog.active ? playing : ""}</span></div>
     <div class="rail-stat"><span class="dot ${S.account.id ? "on" : "warn"}"></span><span>${S.account.id ? "Profile linked" : "Account not linked"}</span></div>
     <div class="rail-stat"><span class="dot ${src.inventory.source ? "on" : ""}"></span><span>${inv}</span></div>
-    ${ms.state === "scanning" ? `<div class="rail-stat"><span class="dot gold"></span><span>Reading inventory ${Math.round((ms.progress || 0) * 100)}%</span></div>` : ""}`;
+    ${ms.state === "scanning" ? `<div class="rail-stat"><span class="dot gold"></span><span>Reading inventory ${Math.round((ms.progress || 0) * 100)}%</span></div>` : ""}
+    ${trayActions}`;
+  const hideBtn = $("#railStatus [data-hide-tray]");
+  if (hideBtn) hideBtn.onclick = () => act("window/hide");
+  const quitBtn = $("#railStatus [data-quit-app]");
+  if (quitBtn) quitBtn.onclick = () => act("quit");
 }
 
 // ------------------------------------------------------------------ a newer version
@@ -315,6 +324,8 @@ palette.setPages(PAGES);
 // A change made in the drawer (a count, "mark as mastered") shows on the page behind it, and in
 // the sidebar's counts at once rather than at the next poll.
 window.addEventListener("wfp:changed", async () => { await poll(); app.refresh(); });
+// Refreshes shell state (e.g. sidebar tray buttons) without resetting the current page's scroll.
+window.addEventListener("wfp:poll", () => poll());
 // Another account is shown: everything on the page belongs to it.
 window.addEventListener("wfp:account", async () => { await poll(); go(true); });
 hydrateIcons(document.body);

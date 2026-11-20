@@ -30,6 +30,7 @@ mod sources;
 mod standing;
 mod state;
 mod tasks;
+mod tray_icon;
 mod update;
 mod views;
 mod world;
@@ -104,6 +105,8 @@ enum Command {
     Trigger,
     /// Grade the riven on screen now, in the running app (bind this to a hotkey).
     Riven,
+    /// Show or hide the window of the running app (bind this to a hotkey).
+    Toggle,
     /// Close the running app.
     Quit,
     /// Read a saved screenshot (the app keeps the last ones in its cache's frames folder).
@@ -135,6 +138,9 @@ fn main() -> ExitCode {
         Command::Run => run(settings, cli.browser, cli.headless, cli.offline),
         Command::Trigger => trigger(settings.port),
         Command::Riven => riven(settings.port),
+        Command::Toggle => local(settings.port, "window/toggle", true, Duration::from_secs(5))
+            .map(|_| ())
+            .with_context(|| format!("warframeproject is not running (port {})", settings.port)),
         Command::Quit => local(settings.port, "quit", true, Duration::from_secs(5))
             .map(|_| println!("warframeproject is closing."))
             .with_context(|| format!("warframeproject is not running (port {})", settings.port)),

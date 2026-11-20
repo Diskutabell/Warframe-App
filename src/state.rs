@@ -226,6 +226,9 @@ impl MemscanStatus {
 /// What the engine asks of the desktop shell, if one is running.
 pub enum UiEvent {
     ShowWindow,
+    HideWindow,
+    ToggleWindow,
+    TrayEnabled(bool),
     /// New rewards; `fresh` is false when only the prices changed.
     Rewards {
         result: Arc<RewardResult>,
@@ -1429,7 +1432,7 @@ impl State {
     }
 
     pub fn update_settings(self: &Arc<Self>, patch: &Value) -> Result<()> {
-        let scan_now = {
+        let (scan_now, tray_changed) = {
             let _guard = lock(&self.settings_update);
             let previous = self.settings();
             let updated = previous.patched(patch)?;
@@ -1441,6 +1444,8 @@ impl State {
             }
             to_save.save()?;
             let scan_now = updated.memory_scan_enabled && !previous.memory_scan_enabled;
+            let tray_changed =
+                (updated.minimize_to_tray != previous.minimize_to_tray).then_some(updated.minimize_to_tray);
             if updated.inventory_json_path != previous.inventory_json_path {
                 lock(&self.data).inventory_watched = None;
             }
@@ -1451,8 +1456,11 @@ impl State {
                 st.last_attempt = f64::NEG_INFINITY;
             }
             *self.settings.write().unwrap_or_else(|e| e.into_inner()) = updated;
-            scan_now
+            (scan_now, tray_changed)
         };
+        if let Some(enabled) = tray_changed {
+            self.ui(UiEvent::TrayEnabled(enabled));
+        }
         if scan_now && memscan::find_game_pid().is_some() {
             self.schedule_memscan(Duration::from_secs(3), 1);
         }
@@ -1580,6 +1588,7 @@ impl State {
         json!({
             "ready": v.cat.loaded_at.is_some(), "dataError": self.catalog_error(),
             "version": env!("CARGO_PKG_VERSION"), "os": std::env::consts::OS, "desktop": self.has_ui(),
+            "minimizeToTray": self.settings().minimize_to_tray,
             "update": lock(&self.update).clone(),
             "account": account,
             "accounts": accounts_json,
@@ -2276,6 +2285,14 @@ impl State {
         self.ui(UiEvent::ShowWindow);
     }
 
+    pub fn hide_window(&self) {
+        self.ui(UiEvent::HideWindow);
+    }
+
+    pub fn toggle_window(&self) {
+        self.ui(UiEvent::ToggleWindow);
+    }
+
     /// Ends the app shortly after the request that asked for it has been answered.
     pub fn quit(&self) {
         if self.has_ui() {
@@ -2298,9 +2315,12 @@ impl State {
 
     // ------------------------------------------------------------ hotkeys
 
-    fn hotkey_keys(&self) -> (u16, [(String, &'static str); 2]) {
+    fn hotkey_keys(&self) -> (u16, [(String, &'static str); 3]) {
         let s = self.settings();
-        (s.port, [(s.hotkey_rewards, "rewards/scan"), (s.hotkey_riven, "riven/scan")])
+        (
+            s.port,
+            [(s.hotkey_rewards, "rewards/scan"), (s.hotkey_riven, "riven/scan"), (s.hotkey_window, "window/toggle")],
+        )
     }
 
     pub fn hotkeys(&self) -> Value {

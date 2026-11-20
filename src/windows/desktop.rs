@@ -5,6 +5,9 @@
 //! (`web/overlay.html`) in transparent, always-on-top windows that never take focus from the game.
 //! Like the GTK overlays they are hidden and re-shown, never destroyed.
 
+#[path = "tray.rs"]
+mod tray;
+
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -416,6 +419,9 @@ pub fn run(state: Arc<State>, url: &str, _backend: Backend) -> Result<()> {
             anyhow::anyhow!("The window could not open: {e}. The app needs the Microsoft Edge WebView2 Runtime.")
         })?;
 
+    let mut tray = tray::Tray::new(Arc::clone(&state), state.settings().minimize_to_tray, true);
+    let mut visible = true;
+
     let overlays = Overlays {
         strip: Overlay::new(&event_loop, &mut context, url, proxy.clone(), Which::Strip)?,
         riven: Overlay::new(&event_loop, &mut context, url, proxy, Which::Riven)?,
@@ -425,17 +431,39 @@ pub fn run(state: Arc<State>, url: &str, _backend: Backend) -> Result<()> {
     event_loop.run(move |event, _, flow| {
         // Owned by the loop, so they live as long as it runs.
         let _ = (&webview, &context);
+        let show = |window: &Window, tray: &tray::Tray, visible: &mut bool| {
+            window.set_minimized(false);
+            window.set_visible(true);
+            window.set_focus();
+            *visible = true;
+            tray.set_window_visible(true);
+        };
+        let hide = |window: &Window, tray: &tray::Tray, visible: &mut bool| {
+            window.set_visible(false);
+            *visible = false;
+            tray.set_window_visible(false);
+        };
         match event {
             TaoEvent::WindowEvent { event: WindowEvent::CloseRequested, window_id, .. } if window_id == window.id() => {
-                overlays.state.shutdown();
-                *flow = ControlFlow::Exit;
+                if overlays.state.settings().minimize_to_tray {
+                    hide(&window, &tray, &mut visible);
+                } else {
+                    tray.set_enabled(false, false);
+                    overlays.state.shutdown();
+                    *flow = ControlFlow::Exit;
+                }
             }
             TaoEvent::UserEvent(Event::Ui(ev)) => match ev {
-                UiEvent::ShowWindow => {
-                    window.set_minimized(false);
-                    window.set_visible(true);
-                    window.set_focus();
+                UiEvent::ShowWindow => show(&window, &tray, &mut visible),
+                UiEvent::HideWindow => hide(&window, &tray, &mut visible),
+                UiEvent::ToggleWindow => {
+                    if visible && !window.is_minimized() {
+                        hide(&window, &tray, &mut visible);
+                    } else {
+                        show(&window, &tray, &mut visible);
+                    }
                 }
+                UiEvent::TrayEnabled(enabled) => tray.set_enabled(enabled, visible),
                 UiEvent::Rewards { result, fresh } => overlays.show_rewards(&result, fresh),
                 UiEvent::HideRewards => overlays.strip.hide(),
                 UiEvent::Riven { result, fresh } => overlays.show_riven(&result, fresh),
@@ -445,6 +473,7 @@ pub fn run(state: Arc<State>, url: &str, _backend: Backend) -> Result<()> {
                     let _ = ack.send(());
                 }
                 UiEvent::Quit => {
+                    tray.set_enabled(false, false);
                     overlays.state.shutdown();
                     *flow = ControlFlow::Exit;
                 }

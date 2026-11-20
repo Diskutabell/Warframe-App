@@ -2,7 +2,9 @@
 
 mod fonts;
 mod overlay;
+mod tray;
 
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -99,11 +101,23 @@ fn main_window(url: &str) -> gtk::Window {
     });
     webview.load_uri(url);
     window.add(&webview);
-    window.connect_delete_event(|_, _| {
-        gtk::main_quit();
-        glib::Propagation::Proceed
-    });
     window
+}
+
+fn show_main_window(window: &gtk::Window, tray: &RefCell<tray::Tray>) {
+    if !window.is_visible() {
+        // Re-apply the float rule in case Hyprland/Sway reloaded while the window was in the tray.
+        let _ = compositor::float_main_window();
+        window.show_all();
+    }
+    window.deiconify();
+    window.present();
+    tray.borrow().set_window_visible(true);
+}
+
+fn hide_main_window(window: &gtk::Window, tray: &RefCell<tray::Tray>) {
+    window.hide();
+    tray.borrow().set_window_visible(false);
 }
 
 /// Runs the GTK main loop until the main window closes.
@@ -121,6 +135,21 @@ pub fn run(state: Arc<State>, url: &str, backend: Backend) -> Result<()> {
         backend
     };
     let window = main_window(url);
+    let tray = Rc::new(RefCell::new(tray::Tray::new(Arc::clone(&state), state.settings().minimize_to_tray, true)));
+    {
+        let close_state = Arc::clone(&state);
+        let close_tray = Rc::clone(&tray);
+        window.connect_delete_event(move |win, _| {
+            if close_state.settings().minimize_to_tray {
+                hide_main_window(win, &close_tray);
+                glib::Propagation::Stop
+            } else {
+                close_tray.borrow_mut().set_enabled(false, false);
+                gtk::main_quit();
+                glib::Propagation::Proceed
+            }
+        });
+    }
     // Before the window opens: a tiling compositor would otherwise fit it into its layout.
     if let Err(e) = compositor::float_main_window() {
         eprintln!("the window may open tiled: {e:#}");
@@ -130,10 +159,22 @@ pub fn run(state: Arc<State>, url: &str, backend: Backend) -> Result<()> {
     let overlays = Rc::new(overlay::Overlays::new(backend, Arc::clone(&state)));
     let (tx, rx) = async_channel::unbounded::<UiEvent>();
     state.set_ui(tx);
+    let event_tray = Rc::clone(&tray);
     glib::MainContext::default().spawn_local(async move {
         while let Ok(ev) = rx.recv().await {
             match ev {
-                UiEvent::ShowWindow => window.present(),
+                UiEvent::ShowWindow => show_main_window(&window, &event_tray),
+                UiEvent::HideWindow => hide_main_window(&window, &event_tray),
+                UiEvent::ToggleWindow => {
+                    if window.is_visible() {
+                        hide_main_window(&window, &event_tray);
+                    } else {
+                        show_main_window(&window, &event_tray);
+                    }
+                }
+                UiEvent::TrayEnabled(enabled) => {
+                    event_tray.borrow_mut().set_enabled(enabled, window.is_visible());
+                }
                 UiEvent::Rewards { result, fresh } => overlays.show_rewards(&result, fresh),
                 UiEvent::HideRewards => overlays.hide_rewards(),
                 UiEvent::Riven { result, fresh } => overlays.show_riven(&result, fresh),
@@ -142,10 +183,14 @@ pub fn run(state: Arc<State>, url: &str, backend: Backend) -> Result<()> {
                     overlays.hide_all();
                     let _ = ack.send(());
                 }
-                UiEvent::Quit => gtk::main_quit(),
+                UiEvent::Quit => {
+                    event_tray.borrow_mut().set_enabled(false, false);
+                    gtk::main_quit();
+                }
             }
         }
     });
     gtk::main();
+    tray.borrow_mut().set_enabled(false, false);
     Ok(())
 }

@@ -140,6 +140,11 @@ pub struct Settings {
     pub inventory_json_path: String,
     pub hotkey_rewards: String,
     pub hotkey_riven: String,
+    /// Global hotkey to show or hide the main window (especially when minimized to the tray).
+    pub hotkey_window: String,
+    /// Closing the window hides it to the system tray (Quickshell / status bar / Windows tray)
+    /// instead of quitting the app.
+    pub minimize_to_tray: bool,
     pub riven_overlay_enabled: bool,
     pub riven_overlay_seconds: u32,
     /// Last resort; read-only, off by default. When on, the inventory is read automatically after
@@ -177,6 +182,8 @@ impl Default for Settings {
             inventory_json_path: String::new(),
             hotkey_rewards: "F9".into(),
             hotkey_riven: "F10".into(),
+            hotkey_window: "F8".into(),
+            minimize_to_tray: false,
             riven_overlay_enabled: true,
             riven_overlay_seconds: 20,
             memory_scan_enabled: false,
@@ -237,7 +244,7 @@ impl Settings {
         }
         let updated: Settings = serde_json::from_value(current)
             .map_err(|e| UserError::new(format!("That setting has the wrong type: {e}")))?;
-        for key in [&updated.hotkey_rewards, &updated.hotkey_riven] {
+        for key in [&updated.hotkey_rewards, &updated.hotkey_riven, &updated.hotkey_window] {
             crate::compositor::validate_key(key)?;
         }
         Ok(updated)
@@ -316,8 +323,15 @@ mod tests {
         let s = Settings::default();
         assert!(s.patched(&json!({"overlay_seconds": "abc"})).is_err());
         assert!(s.patched(&json!({"hotkey_rewards": "F9\nexec-once = rm -rf ~"})).is_err());
-        let ok = s.patched(&json!({"overlay_seconds": 20, "unknown": 1})).unwrap();
+        assert!(s.patched(&json!({"hotkey_window": "SUPER+F8, exec, x"})).is_err());
+        let ok = s
+            .patched(
+                &json!({"overlay_seconds": 20, "minimize_to_tray": true, "hotkey_window": "SUPER + F8", "unknown": 1}),
+            )
+            .unwrap();
         assert_eq!(ok.overlay_seconds, 20);
+        assert!(ok.minimize_to_tray);
+        assert_eq!(ok.hotkey_window, "SUPER + F8");
     }
 
     #[test]

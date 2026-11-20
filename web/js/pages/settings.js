@@ -149,7 +149,7 @@ export default {
       <a href="#settings" data-sec="sec-memscan">Memory scan</a>
       <a href="#settings" data-sec="sec-notifications">Notifications</a>
       <a href="#settings" data-sec="sec-overlays">Overlays</a>
-      <a href="#settings" data-sec="sec-hotkeys">Hotkeys</a>
+      <a href="#settings" data-sec="sec-hotkeys">Tray &amp; hotkeys</a>
       <a href="#settings" data-sec="sec-files">Files &amp; platform</a>
     </div>
     <div class="settings">
@@ -181,7 +181,11 @@ export default {
         ${!linux ? "" : select("screenshot_tool", "Screenshot tool", "", [["auto", "Automatic" + (tools.screenshot ? ` (${tools.screenshot})` : "")], ["grim", "grim (Hyprland, Sway)"], ["spectacle", "Spectacle (KDE)"], ["gnome-screenshot", "GNOME Screenshot"], ["maim", "maim (X11)"], ["scrot", "scrot (X11)"], ["import", "ImageMagick import (X11)"]])}
         ${S.desktop ? `<div class="row" style="margin-top:12px"><button id="testOverlay">Show a test overlay</button><span class="muted" style="font-size:13px">Sample rewards, where the panels will appear for four cards.</span></div>` : ""}`, "sec-overlays")}
 
-      ${section("Hotkeys", `
+      ${section("Tray and hotkeys", `
+        ${toggle("minimize_to_tray", "Minimize to system tray", linux
+          ? "Closing the window hides it to your system tray / status bar instead of quitting. Click the tray icon or press the window hotkey below to bring it back."
+          : "Closing the window hides it to the system tray instead of quitting. Click the tray icon or press the window hotkey below to bring it back.")}
+        ${text("hotkey_window", "Show or hide the window", "Toggles the window between the tray and your screen. Clear to disable.")}
         ${text("hotkey_rewards", "Read the reward screen", "")}
         ${text("hotkey_riven", "Grade the riven on screen", "")}
         <div class="row" style="margin-top:12px"><button id="installKeys">${linux ? "Install hotkeys" : "Register hotkeys"}</button><span class="muted" id="keysNote" style="font-size:13px"></span></div>
@@ -196,7 +200,9 @@ export default {
         ${number("price_cache_minutes", "Keep bulk prices for", "Minutes. Reward-screen prices refresh after 15 minutes regardless.", { min: 5, max: 1440 })}
         ${number("port", "Engine port", "Takes effect after a restart.", { min: 1024, max: 65535 })}`, "sec-files")}
 
-      <div class="row"><button id="reload">Re-download game data</button><span class="faint" style="font-size:13px">warframeproject ${esc(S.version || "")}</span></div>
+      <div class="row"><button id="reload">Re-download game data</button>
+        ${S.desktop ? `<button id="quitApp" class="ghost">Quit app</button>` : ""}
+        <span class="faint" style="font-size:13px">warframeproject ${esc(S.version || "")}</span></div>
     </div></div>`;
 
     $("#settingsNav").onclick = (e) => {
@@ -224,6 +230,7 @@ export default {
           const S2 = await api("state").catch(() => null);
           if (S2 && $("#memscan")) $("#memscan").innerHTML = memscan(S2);
         }
+        if (k === "minimize_to_tray") window.dispatchEvent(new CustomEvent("wfp:poll"));
         if (k.startsWith("hotkey_")) showKeys();
       });
     }
@@ -244,6 +251,8 @@ export default {
       await act("data/reload", {}, "Game data downloaded again");
       e.target.disabled = false;
     };
+    const quitBtn = $("#quitApp");
+    if (quitBtn) quitBtn.onclick = () => act("quit");
     const test = $("#testOverlay");
     if (test) test.onclick = () => act("overlay/test");
     wireSources(view);

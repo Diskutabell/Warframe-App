@@ -388,6 +388,8 @@ fn post_api(s: &Arc<State>, path: &str, b: &Value) -> Result<Option<Value>> {
         "manual/mastered" => s.set_manual_mastered(&uid()?, b["mastered"].as_bool().unwrap_or(false))?,
         "rewards/scan" => return Ok(Some(serde_json::to_value(&*s.scan_rewards())?)),
         "window/show" => s.show_window(),
+        "window/hide" => s.hide_window(),
+        "window/toggle" => s.toggle_window(),
         "quit" => s.quit(),
         "overlay/test" => s.test_overlay()?,
         "hotkeys/register" => return Ok(Some(s.install_hotkeys()?)),

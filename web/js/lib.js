@@ -120,6 +120,8 @@ const PATHS = {
   down: "M6 9l6 6 6-6",
   inventory: "M4 8l8-4 8 4v9l-8 4-8-4z M4 8l8 4 8-4 M12 12v9",
   tasks: "M9 3.5h6v3H9z M9 5H6a1 1 0 0 0-1 1v14a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1h-3 M8.5 13.5l2.5 2.5 4.5-5",
+  tray: "M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3 M12 4v10 M8 10l4 4 4-4",
+  power: "M12 3v8 M6.8 6.8a8 8 0 1 0 10.4 0",
 };
 export const icon = (name, cls = "") => `<svg class="ic ${cls}" viewBox="0 0 24 24" aria-hidden="true"><path d="${PATHS[name] || ""}"/></svg>`;
 export function hydrateIcons(root = document) {

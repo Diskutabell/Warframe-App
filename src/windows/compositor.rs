@@ -272,10 +272,12 @@ pub fn hotkey_lines(_flavour: Option<Flavour>, _port: u16, keys: &[(&str, &str)]
     keys.iter()
         .filter(|(k, _)| !k.trim().is_empty() && validate_key(k).is_ok())
         .map(|(k, p)| {
-            format!(
-                "{k} -> {}",
-                if *p == "riven/scan" { "grade the riven on screen" } else { "scan the reward screen" }
-            )
+            let desc = match *p {
+                "riven/scan" => "grade the riven on screen",
+                "window/toggle" => "show or hide the window",
+                _ => "scan the reward screen",
+            };
+            format!("{k} -> {desc}")
         })
         .collect()
 }
