@@ -8,7 +8,9 @@
 //!
 //! Digital Extremes' position on third-party tools is "use at your own risk".
 
+use std::borrow::Cow;
 use std::collections::HashSet;
+use std::io::Read as _;
 use std::sync::LazyLock;
 use std::time::Instant;
 
@@ -86,6 +88,16 @@ static SECRET_HINT: LazyLock<Regex> =
 const CHUNK: usize = 16 * 1024 * 1024;
 const MAX_EXTENT: u64 = 64 * 1024 * 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReadError {
+    /// Localized unreadable or unmapped page(s): skip and continue scanning.
+    Unreadable,
+    /// The target process exited mid-scan: abort immediately.
+    ProcessGone,
+    /// Permission to read the target process was revoked: abort immediately.
+    AccessDenied,
+}
+
 #[derive(Debug)]
 pub enum ScanError {
     NotRunning,
@@ -117,6 +129,77 @@ impl std::fmt::Display for ScanError {
 
 impl std::error::Error for ScanError {}
 
+/// Overwrites sensitive memory using volatile writes and a compiler fence so the optimizer cannot
+/// elide the wipe before the buffer is freed.
+fn zeroize_bytes(buf: &mut [u8]) {
+    for b in buf.iter_mut() {
+        // SAFETY: `b` points to a valid, aligned byte inside `buf`.
+        unsafe { std::ptr::write_volatile(b, 0) };
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+}
+
+fn zeroize_string(mut s: String) {
+    // SAFETY: zero bytes are valid UTF-8, and `s` is dropped immediately after.
+    unsafe { zeroize_bytes(s.as_bytes_mut()) };
+    drop(s);
+}
+
+#[cfg(test)]
+fn zeroize_value(v: Value) {
+    match v {
+        Value::String(s) => zeroize_string(s),
+        Value::Array(items) => {
+            for item in items {
+                zeroize_value(item);
+            }
+        }
+        Value::Object(map) => {
+            for (k, val) in map {
+                zeroize_string(k);
+                zeroize_value(val);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Byte buffer holding raw game memory (which may contain session tokens): wiped on drop.
+struct SensitiveBuf(Vec<u8>);
+
+impl SensitiveBuf {
+    fn new(buf: Vec<u8>) -> Self {
+        Self(buf)
+    }
+
+    fn with_capacity(cap: usize) -> Self {
+        Self(Vec::with_capacity(cap))
+    }
+
+    fn zeroed(len: usize) -> Self {
+        Self(vec![0u8; len])
+    }
+}
+
+impl std::ops::Deref for SensitiveBuf {
+    type Target = Vec<u8>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for SensitiveBuf {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for SensitiveBuf {
+    fn drop(&mut self) {
+        zeroize_bytes(&mut self.0);
+    }
+}
+
 /// Whether a key may be kept: a known inventory field, one of the families named above, or a
 /// Mongo wrapper - and never anything that sounds like a credential.
 fn allowed(key: &str) -> bool {
@@ -128,14 +211,233 @@ fn allowed(key: &str) -> bool {
     known && !SECRET_HINT.is_match(key)
 }
 
-/// Keeps only known inventory fields. Anything unrecognised is dropped, not inspected.
+/// Keeps only known inventory fields; dropped strings are wiped before freeing.
+#[cfg(test)]
 pub fn sanitise(v: Value) -> Value {
     match v {
         Value::Array(items) => Value::Array(items.into_iter().map(sanitise).collect()),
-        Value::Object(map) => Value::Object(
-            map.into_iter().filter(|(k, _)| allowed(k)).map(|(k, v)| (k, sanitise(v))).collect::<Map<String, Value>>(),
-        ),
+        Value::Object(map) => {
+            let mut out = Map::new();
+            for (k, val) in map {
+                if allowed(&k) {
+                    out.insert(k, sanitise(val));
+                } else {
+                    zeroize_string(k);
+                    zeroize_value(val);
+                }
+            }
+            Value::Object(out)
+        }
         other => other,
+    }
+}
+
+struct CowKey<'de>(Cow<'de, str>);
+
+impl<'de> serde::Deserialize<'de> for CowKey<'de> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = Cow<'de, str>;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a JSON key")
+            }
+            fn visit_borrowed_str<E>(self, v: &'de str) -> Result<Self::Value, E> {
+                Ok(Cow::Borrowed(v))
+            }
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> {
+                Ok(Cow::Owned(v.to_owned()))
+            }
+            fn visit_string<E>(self, v: String) -> Result<Self::Value, E> {
+                Ok(Cow::Owned(v))
+            }
+        }
+        deserializer.deserialize_str(V).map(CowKey)
+    }
+}
+
+fn parse_oid_prefix(s: &str) -> i64 {
+    s.get(..8).and_then(|h| i64::from_str_radix(h, 16).ok()).unwrap_or(0)
+}
+
+struct OidTime(i64);
+
+impl<'de> serde::Deserialize<'de> for OidTime {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = i64;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("an ObjectId string")
+            }
+            fn visit_borrowed_str<E>(self, v: &'de str) -> Result<i64, E> {
+                Ok(parse_oid_prefix(v))
+            }
+            fn visit_str<E>(self, v: &str) -> Result<i64, E> {
+                Ok(parse_oid_prefix(v))
+            }
+            fn visit_string<E>(self, v: String) -> Result<i64, E> {
+                let ts = parse_oid_prefix(&v);
+                zeroize_string(v);
+                Ok(ts)
+            }
+            fn visit_bool<E>(self, _: bool) -> Result<i64, E> {
+                Ok(0)
+            }
+            fn visit_i64<E>(self, _: i64) -> Result<i64, E> {
+                Ok(0)
+            }
+            fn visit_u64<E>(self, _: u64) -> Result<i64, E> {
+                Ok(0)
+            }
+            fn visit_f64<E>(self, _: f64) -> Result<i64, E> {
+                Ok(0)
+            }
+            fn visit_unit<E>(self) -> Result<i64, E> {
+                Ok(0)
+            }
+            fn visit_none<E>(self) -> Result<i64, E> {
+                Ok(0)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<i64, A::Error> {
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                Ok(0)
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<i64, A::Error> {
+                while map.next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?.is_some() {}
+                Ok(0)
+            }
+        }
+        deserializer.deserialize_any(V).map(OidTime)
+    }
+}
+
+/// Parses `LastInventorySync` (an integer timestamp or `{"$oid": "..."}`) straight to `i64`.
+struct SyncValue(i64);
+
+impl<'de> serde::Deserialize<'de> for SyncValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = i64;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a sync timestamp or Mongo ObjectId")
+            }
+            fn visit_i64<E>(self, v: i64) -> Result<i64, E> {
+                Ok(v)
+            }
+            fn visit_u64<E>(self, v: u64) -> Result<i64, E> {
+                Ok(v as i64)
+            }
+            fn visit_f64<E>(self, _: f64) -> Result<i64, E> {
+                Ok(0)
+            }
+            fn visit_bool<E>(self, _: bool) -> Result<i64, E> {
+                Ok(0)
+            }
+            fn visit_unit<E>(self) -> Result<i64, E> {
+                Ok(0)
+            }
+            fn visit_none<E>(self) -> Result<i64, E> {
+                Ok(0)
+            }
+            fn visit_borrowed_str<E>(self, s: &'de str) -> Result<i64, E> {
+                Ok(parse_oid_prefix(s))
+            }
+            fn visit_str<E>(self, s: &str) -> Result<i64, E> {
+                Ok(parse_oid_prefix(s))
+            }
+            fn visit_string<E>(self, s: String) -> Result<i64, E> {
+                let ts = parse_oid_prefix(&s);
+                zeroize_string(s);
+                Ok(ts)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<i64, A::Error> {
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                Ok(0)
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<i64, A::Error> {
+                let mut ts = 0i64;
+                while let Some(CowKey(k)) = map.next_key::<CowKey<'de>>()? {
+                    if k.as_ref() == "$oid" {
+                        ts = map.next_value::<OidTime>()?.0;
+                    } else {
+                        let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                    }
+                    if let Cow::Owned(s) = k {
+                        zeroize_string(s);
+                    }
+                }
+                Ok(ts)
+            }
+        }
+        deserializer.deserialize_any(V).map(SyncValue)
+    }
+}
+
+/// Deserializes JSON directly into a sanitised `Value`: disallowed fields (such as `Token` or
+/// `TwitchAuthToken`) are skipped via `IgnoredAny` without ever allocating a `String` on the heap.
+struct SanitisedValue(Value);
+
+impl<'de> serde::Deserialize<'de> for SanitisedValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = Value;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a JSON value")
+            }
+            fn visit_bool<E>(self, v: bool) -> Result<Value, E> {
+                Ok(Value::Bool(v))
+            }
+            fn visit_i64<E>(self, v: i64) -> Result<Value, E> {
+                Ok(Value::from(v))
+            }
+            fn visit_u64<E>(self, v: u64) -> Result<Value, E> {
+                Ok(Value::from(v))
+            }
+            fn visit_f64<E>(self, v: f64) -> Result<Value, E> {
+                Ok(serde_json::Number::from_f64(v).map(Value::Number).unwrap_or(Value::Null))
+            }
+            fn visit_str<E>(self, v: &str) -> Result<Value, E> {
+                Ok(Value::String(v.to_owned()))
+            }
+            fn visit_string<E>(self, v: String) -> Result<Value, E> {
+                Ok(Value::String(v))
+            }
+            fn visit_unit<E>(self) -> Result<Value, E> {
+                Ok(Value::Null)
+            }
+            fn visit_none<E>(self) -> Result<Value, E> {
+                Ok(Value::Null)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+                let mut items = Vec::new();
+                while let Some(SanitisedValue(v)) = seq.next_element()? {
+                    items.push(v);
+                }
+                Ok(Value::Array(items))
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+                let mut out = Map::new();
+                while let Some(CowKey(k)) = map.next_key::<CowKey<'de>>()? {
+                    if k.as_ref() == "LastInventorySync" {
+                        let SyncValue(t) = map.next_value()?;
+                        out.insert(k.into_owned(), Value::from(t));
+                    } else if allowed(k.as_ref()) {
+                        let SanitisedValue(v) = map.next_value()?;
+                        out.insert(k.into_owned(), v);
+                    } else {
+                        let _ = map.next_value::<serde::de::IgnoredAny>()?;
+                        if let Cow::Owned(s) = k {
+                            zeroize_string(s);
+                        }
+                    }
+                }
+                Ok(Value::Object(out))
+            }
+        }
+        deserializer.deserialize_any(V).map(SanitisedValue)
     }
 }
 
@@ -145,12 +447,13 @@ pub fn sanitise(v: Value) -> Value {
 /// with the same functions.
 #[cfg(unix)]
 mod os {
+    use std::ffi::CString;
     use std::fs;
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::fs::FileExt;
 
-    use memchr::memmem;
-
-    use super::ScanError;
+    use super::{ReadError, ScanError};
 
     /// kernel.yama.ptrace_scope, when Yama is active.
     fn ptrace_scope() -> Option<u8> {
@@ -174,11 +477,36 @@ mod os {
         }
     }
 
+    fn is_warframe_exe_arg(arg: &str) -> bool {
+        let base = arg.rsplit(['/', '\\']).next().unwrap_or(arg);
+        base.eq_ignore_ascii_case("Warframe.x64.exe")
+    }
+
+    /// Matches only argv[0] = `Warframe.x64.exe` or Wine invoking `Warframe.x64.exe` as its first
+    /// `.exe` argument, so wrappers (`bwrap`, `pressure-vessel`, `reaper`, `umu`) and unrelated
+    /// tools (editors, log viewers) are never mistaken for the game.
+    pub(super) fn cmdline_is_game(cmd: &[u8]) -> bool {
+        let args: Vec<String> =
+            cmd.split(|&b| b == 0).filter(|s| !s.is_empty()).map(|s| String::from_utf8_lossy(s).into_owned()).collect();
+        let Some(first) = args.first() else { return false };
+        if is_warframe_exe_arg(first) {
+            return true;
+        }
+        let prog = first.rsplit('/').next().unwrap_or(first);
+        let is_wine = prog == "wine"
+            || prog == "wine64"
+            || prog.starts_with("wine-preloader")
+            || prog.starts_with("wine64-preloader");
+        if !is_wine {
+            return false;
+        }
+        let first_exe = args.iter().skip(1).find(|a| a.to_ascii_lowercase().ends_with(".exe"));
+        first_exe.is_some_and(|a| is_warframe_exe_arg(a))
+    }
+
     /// The game process: the one named after its exe (`comm`, which the kernel cuts to 15
     /// characters, so "Warframe.x64.ex"). Only when no process is named so does the command line
-    /// decide, for a Wine that names its processes differently. The programs that start the game
-    /// (Steam's reaper and pressure-vessel, umu, bwrap) carry the exe's path in their command
-    /// lines too; taking the first of those would read a wrapper's memory instead of the game's.
+    /// decide, for a Wine that names its processes differently.
     pub fn find_game_pid() -> Option<u32> {
         let mut by_command_line = None;
         for entry in fs::read_dir("/proc").ok()?.flatten() {
@@ -191,33 +519,37 @@ mod os {
                 continue;
             }
             let cmd = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-            let has = |needle: &[u8]| memmem::find(&cmd, needle).is_some();
-            if has(b"Warframe.x64.exe")
-                && !has(b"Launcher")
-                && !has(b"reaper")
-                && !has(b"pressure-vessel")
-                && !has(b"bwrap")
-                && !has(b"umu")
-            {
+            if cmdline_is_game(&cmd) {
                 by_command_line = Some(pid);
             }
         }
         by_command_line
     }
 
-    /// Writable, anonymous-ish regions: where downloaded JSON lives.
-    fn regions(pid: u32) -> Vec<(u64, u64)> {
-        let maps = fs::read_to_string(format!("/proc/{pid}/maps")).unwrap_or_default();
+    /// Private, writable, non-library regions from `/proc/<pid>/maps`: where downloaded JSON lives.
+    pub(super) fn parse_maps(maps: &str) -> Vec<(u64, u64)> {
         maps.lines()
             .filter_map(|line| {
-                let mut parts = line.split_whitespace();
-                let (range, perms) = (parts.next()?, parts.next()?);
-                let path = parts.nth(3).unwrap_or("");
-                if !perms.starts_with("rw")
-                    || path.ends_with(".so")
-                    || path.ends_with(".dll")
-                    || path.ends_with(".exe")
-                    || path.starts_with("/dev/")
+                let mut parts = line.split_ascii_whitespace();
+                let range = parts.next()?;
+                let perms = parts.next()?;
+                let _offset = parts.next()?;
+                let _dev = parts.next()?;
+                let inode = parts.next()?;
+                if !perms.starts_with("rw") || !perms.ends_with('p') {
+                    return None;
+                }
+                // Everything after the inode column is the pathname, which may contain spaces
+                // (common under Steam/Proton libraries).
+                let inode_end = inode.as_ptr() as usize - line.as_ptr() as usize + inode.len();
+                let path = line[inode_end..].trim();
+                let clean = path.strip_suffix(" (deleted)").unwrap_or(path);
+                let lower = clean.to_ascii_lowercase();
+                if lower.ends_with(".so")
+                    || lower.contains(".so.")
+                    || lower.ends_with(".dll")
+                    || lower.ends_with(".exe")
+                    || clean.starts_with("/dev/")
                 {
                     return None;
                 }
@@ -228,16 +560,28 @@ mod os {
             .collect()
     }
 
-    /// The game's memory, opened for reading.
+    fn open_at(dir: &OwnedFd, name: &str) -> std::io::Result<fs::File> {
+        let cname = CString::new(name).map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        // SAFETY: `dir` is a valid open directory FD and `cname` is NUL-terminated.
+        let fd = unsafe { libc::openat(dir.as_raw_fd(), cname.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `openat` returned a fresh file descriptor owned by us.
+        Ok(unsafe { fs::File::from_raw_fd(fd) })
+    }
+
+    /// The game's memory, opened through a pinned `/proc/<pid>` directory FD so `maps`, `mem`,
+    /// and liveness checks always refer to the exact same process even if the PID is recycled.
     pub struct Memory {
+        proc_dir: OwnedFd,
         file: fs::File,
-        pid: u32,
     }
 
     impl Memory {
         /// Opening is where the kernel decides; a refusal costs nothing but a line in its log.
         pub fn open(pid: u32) -> Result<Memory, ScanError> {
-            let file = fs::File::open(format!("/proc/{pid}/mem")).map_err(|e| match e.kind() {
+            let map_err = |e: std::io::Error| match e.kind() {
                 std::io::ErrorKind::PermissionDenied => {
                     let scope = ptrace_scope().map_or_else(|| "not set".to_string(), |s| s.to_string());
                     ScanError::Denied(format!(
@@ -247,23 +591,61 @@ mod os {
                 }
                 std::io::ErrorKind::NotFound => ScanError::NotRunning,
                 _ => ScanError::Io(e.to_string()),
-            })?;
-            Ok(Memory { file, pid })
+            };
+            let dir_path = CString::new(format!("/proc/{pid}")).map_err(|e| ScanError::Io(e.to_string()))?;
+            // SAFETY: `dir_path` is NUL-terminated; O_DIRECTORY ensures it is the proc directory.
+            let dir_fd = unsafe { libc::open(dir_path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
+            if dir_fd < 0 {
+                return Err(map_err(std::io::Error::last_os_error()));
+            }
+            // SAFETY: `open` returned a fresh descriptor owned by us.
+            let proc_dir = unsafe { OwnedFd::from_raw_fd(dir_fd) };
+            let file = open_at(&proc_dir, "mem").map_err(map_err)?;
+            Ok(Memory { proc_dir, file })
         }
 
         pub fn regions(&self) -> Vec<(u64, u64)> {
-            regions(self.pid)
+            let Ok(mut f) = open_at(&self.proc_dir, "maps") else { return Vec::new() };
+            let mut maps = String::new();
+            if f.read_to_string(&mut maps).is_err() {
+                return Vec::new();
+            }
+            parse_maps(&maps)
         }
 
-        /// Up to `len` bytes at `addr`; fewer (or none) where the memory is not readable.
-        pub fn read(&self, addr: u64, len: usize) -> Vec<u8> {
-            let mut buf = vec![0u8; len];
-            match self.file.read_at(&mut buf, addr) {
-                Ok(n) => {
-                    buf.truncate(n);
-                    buf
+        fn alive(&self) -> bool {
+            let Ok(mut f) = open_at(&self.proc_dir, "stat") else { return false };
+            let mut stat = String::new();
+            if f.read_to_string(&mut stat).is_err() {
+                return false;
+            }
+            // State character sits right after the closing ')' of comm: 'Z' / 'X' means exited.
+            stat.rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_ascii_whitespace().next())
+                .is_some_and(|state| !matches!(state, "Z" | "X" | "x"))
+        }
+
+        /// Copies up to `buf.len()` bytes starting at `addr` into `buf`, distinguishing fatal
+        /// process exit / permission loss from localized unreadable pages.
+        pub fn read_into(&self, addr: u64, buf: &mut [u8]) -> Result<usize, ReadError> {
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            match self.file.read_at(buf, addr) {
+                Ok(0) => {
+                    if !self.alive() {
+                        Err(ReadError::ProcessGone)
+                    } else {
+                        Ok(0)
+                    }
                 }
-                Err(_) => Vec::new(),
+                Ok(n) => Ok(n),
+                Err(e) => match e.raw_os_error() {
+                    Some(libc::ESRCH) => Err(ReadError::ProcessGone),
+                    Some(libc::EACCES | libc::EPERM) => Err(ReadError::AccessDenied),
+                    _ if !self.alive() => Err(ReadError::ProcessGone),
+                    _ => Err(ReadError::Unreadable),
+                },
             }
         }
     }
@@ -285,74 +667,155 @@ fn sync_time(v: &Value) -> i64 {
     v["LastInventorySync"].as_i64().unwrap_or_else(|| oid_time(&v["LastInventorySync"]))
 }
 
-/// Grows outward from the marker until NUL bytes bound the text, then decodes the JSON object.
-fn extract_blob(mem: &os::Memory, (start_lim, end_lim): (u64, u64), hit: u64) -> Option<Value> {
-    extract_blob_from(|addr, len| mem.read(addr, len), (start_lim, end_lim), hit)
+/// Reads the exact range `[addr, addr + buf.len())`, looping on short reads (such as crossing a
+/// sub-region boundary on Windows) until filled or an unreadable page / fatal error is reached.
+fn read_exact_range(
+    read: &impl Fn(u64, &mut [u8]) -> Result<usize, ReadError>,
+    addr: u64,
+    buf: &mut [u8],
+) -> Result<bool, ReadError> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match read(addr + filled as u64, &mut buf[filled..]) {
+            Ok(0) => return Ok(false),
+            Ok(n) => filled += n,
+            Err(ReadError::Unreadable) => return Ok(false),
+            Err(fatal) => return Err(fatal),
+        }
+    }
+    Ok(true)
 }
 
+/// Grows outward from the marker until NUL bytes bound the text, then decodes the JSON object.
+fn extract_blob(mem: &os::Memory, (start_lim, end_lim): (u64, u64), hit: u64) -> Result<Option<Value>, ReadError> {
+    extract_blob_from(|addr, buf| mem.read_into(addr, buf), (start_lim, end_lim), hit)
+}
+
+/// Retains every chunk read during the backward and forward scans and stitches them once (never
+/// re-reading live memory a second time), clamping strictly to `MAX_EXTENT` in each direction.
 fn extract_blob_from(
-    read: impl Fn(u64, usize) -> Vec<u8>,
+    read: impl Fn(u64, &mut [u8]) -> Result<usize, ReadError>,
     (start_lim, end_lim): (u64, u64),
     hit: u64,
-) -> Option<Value> {
+) -> Result<Option<Value>, ReadError> {
     const STEP: u64 = 1024 * 1024;
     let mut lo = hit;
+    let mut prefix_chunks: Vec<SensitiveBuf> = Vec::new();
+    let mut scratch = SensitiveBuf::zeroed(STEP as usize);
+
     while lo > start_lim && hit - lo < MAX_EXTENT {
-        let a = start_lim.max(lo.saturating_sub(STEP));
-        let buf = read(a, (lo - a) as usize);
-        if buf.len() != (lo - a) as usize {
-            break;
+        let budget = (lo - start_lim).min(MAX_EXTENT - (hit - lo));
+        // Try 1 MiB, then 64 KiB, 4 KiB, and finally any partial tail up to a 4 KiB page boundary
+        // so one unreadable page inside a 1 MiB step does not discard the whole readable prefix.
+        let page_rem = lo % 4096;
+        let candidates = [STEP.min(budget), (64 * 1024).min(budget), 4096u64.min(budget), page_rem.min(budget)];
+        let mut step_got = None;
+        let mut last_tried = 0u64;
+        for &want in &candidates {
+            if want == 0 || want == last_tried {
+                continue;
+            }
+            last_tried = want;
+            let a = lo - want;
+            let slice = &mut scratch[..want as usize];
+            if read_exact_range(&read, a, slice)? {
+                step_got = Some((a, want as usize));
+                break;
+            }
         }
-        if let Some(z) = memchr::memrchr(0, &buf) {
+        let Some((a, want)) = step_got else {
+            break;
+        };
+        let slice = &scratch[..want];
+        if let Some(z) = memchr::memrchr(0, slice) {
+            if z + 1 < want {
+                prefix_chunks.push(SensitiveBuf::new(slice[z + 1..].to_vec()));
+            }
             lo = a + z as u64 + 1;
             break;
         }
+        prefix_chunks.push(SensitiveBuf::new(slice.to_vec()));
         lo = a;
     }
+
     let mut hi = hit;
+    let mut suffix = SensitiveBuf::with_capacity(64 * 1024);
     while hi < end_lim && hi - hit < MAX_EXTENT {
-        let buf = read(hi, STEP.min(end_lim - hi) as usize);
-        if buf.is_empty() {
+        let budget = (end_lim - hi).min(MAX_EXTENT - (hi - hit));
+        let want = STEP.min(budget) as usize;
+        let mut got = match read(hi, &mut scratch[..want]) {
+            Ok(n) => n,
+            Err(ReadError::Unreadable) => 0,
+            Err(fatal) => return Err(fatal),
+        };
+        if got == 0 && want > 64 * 1024 {
+            got = match read(hi, &mut scratch[..64 * 1024]) {
+                Ok(n) => n,
+                Err(ReadError::Unreadable) => 0,
+                Err(fatal) => return Err(fatal),
+            };
+        }
+        if got == 0 && want > 4096 {
+            got = match read(hi, &mut scratch[..4096]) {
+                Ok(n) => n,
+                Err(ReadError::Unreadable) => 0,
+                Err(fatal) => return Err(fatal),
+            };
+        }
+        if got == 0 {
             break;
         }
-        if let Some(z) = memchr::memchr(0, &buf) {
-            hi += z as u64;
+        let slice = &scratch[..got];
+        if let Some(z) = memchr::memchr(0, slice) {
+            suffix.extend_from_slice(&slice[..z]);
             break;
         }
-        hi += buf.len() as u64;
+        suffix.extend_from_slice(slice);
+        hi += got as u64;
     }
-    let raw = read(lo, (hi - lo) as usize);
-    if raw.len() != (hi - lo) as usize {
-        return None;
+
+    let prefix_len: usize = prefix_chunks.iter().map(|c| c.len()).sum();
+    if prefix_len as u64 != hit - lo {
+        return Ok(None);
     }
-    decode_blob(&raw, (hit - lo) as usize)
+    let mut raw = SensitiveBuf::with_capacity(prefix_len + suffix.len());
+    for chunk in prefix_chunks.iter().rev() {
+        raw.extend_from_slice(chunk);
+    }
+    raw.extend_from_slice(&suffix);
+    drop(prefix_chunks);
+    drop(suffix);
+    drop(scratch);
+    Ok(decode_blob(&raw, prefix_len))
 }
 
-/// Recovers a JSON suffix whose beginning was overwritten.
+/// Recovers a JSON suffix whose beginning was overwritten, streaming directly into a sanitised
+/// `Value` without copying the buffer on retry or allocating heap strings for skipped secrets.
 fn decode_blob(raw: &[u8], hit: usize) -> Option<Value> {
     if raw.get(hit..hit.checked_add(MARKER.len())?)? != MARKER {
         return None;
     }
 
     let decode = |start: usize, prepend: bool| -> Option<Value> {
-        let prefix = if prepend { 1 } else { 0 };
-        let mut candidate = Vec::with_capacity(raw.len() - start + prefix);
-        if prepend {
-            candidate.push(b'{');
-        }
-        candidate.extend_from_slice(&raw[start..]);
-        let mut stream = serde_json::Deserializer::from_slice(&candidate).into_iter::<Value>();
-        let mut obj = stream.next()?.ok()?;
+        let prefix = usize::from(prepend);
+        let (obj, consumed) = if prepend {
+            let mut stream = serde_json::Deserializer::from_reader(b"{".as_slice().chain(&raw[start..]))
+                .into_iter::<SanitisedValue>();
+            let SanitisedValue(obj) = stream.next()?.ok()?;
+            (obj, stream.byte_offset())
+        } else {
+            let mut stream = serde_json::Deserializer::from_slice(&raw[start..]).into_iter::<SanitisedValue>();
+            let SanitisedValue(obj) = stream.next()?.ok()?;
+            (obj, stream.byte_offset())
+        };
         // The parsed object must contain this hit, not an unrelated earlier JSON object.
-        if stream.byte_offset() < hit - start + prefix + MARKER.len()
+        if consumed < hit - start + prefix + MARKER.len()
             || obj.get("LastInventorySync").is_none()
             || (obj.get("MiscItems").is_none() && obj.get("Suits").is_none())
         {
             return None;
         }
-        let t = sync_time(&obj);
-        obj["LastInventorySync"] = Value::from(t);
-        Some(sanitise(obj))
+        Some(obj)
     };
 
     let start = raw.iter().position(|b| !b.is_ascii_whitespace())?;
@@ -361,7 +824,7 @@ fn decode_blob(raw: &[u8], hit: usize) -> Option<Value> {
             if let Some(obj) = decode(start, false) {
                 return Some(obj);
             }
-            let mut stream = serde_json::Deserializer::from_slice(&raw[start..]).into_iter::<Value>();
+            let mut stream = serde_json::Deserializer::from_slice(&raw[start..]).into_iter::<serde::de::IgnoredAny>();
             if matches!(stream.next(), Some(Ok(_))) && stream.byte_offset() >= hit - start + MARKER.len() {
                 return None;
             }
@@ -477,17 +940,24 @@ pub fn scan_inventory(pid: u32, progress: impl Fn(f64)) -> Result<(Vec<Value>, S
     let total: u64 = regions.iter().map(|(a, b)| b - a).sum::<u64>().max(1);
     let (mut found, mut hits, mut done) = (Vec::<Value>::new(), 0usize, 0u64);
     let mut seen = HashSet::new();
+    // Single reusable scratch buffer across the entire scan; wiped on drop.
+    let mut scratch = SensitiveBuf::zeroed(CHUNK + MARKER.len() - 1);
+    let mut fatal: Option<ReadError> = None;
     for &(a, b) in &regions {
-        scan_region(
+        let mut hit_fatal: Option<ReadError> = None;
+        let res = scan_region(
             (a, b),
-            |addr, len| mem.read(addr, len),
+            &mut scratch,
+            |addr, buf| mem.read_into(addr, buf),
             |addr| {
-                if !seen.insert(addr) {
+                if !seen.insert(addr) || hit_fatal.is_some() {
                     return;
                 }
                 hits += 1;
-                if let Some(obj) = extract_blob(&mem, (a, b), addr) {
-                    keep_capture(&mut found, obj);
+                match extract_blob(&mem, (a, b), addr) {
+                    Ok(Some(obj)) => keep_capture(&mut found, obj),
+                    Ok(None) => {}
+                    Err(e) => hit_fatal = Some(e),
                 }
             },
             |advanced| {
@@ -495,48 +965,84 @@ pub fn scan_inventory(pid: u32, progress: impl Fn(f64)) -> Result<(Vec<Value>, S
                 progress(done as f64 / total as f64);
             },
         );
+        if let Err(e) = res {
+            fatal = Some(e);
+            break;
+        }
+        if let Some(e) = hit_fatal {
+            fatal = Some(e);
+            break;
+        }
     }
+    drop(scratch);
     let info = ScanInfo { seconds: (started.elapsed().as_secs_f64() * 10.0).round() / 10.0 };
-    if found.is_empty() {
-        return Err(ScanError::NotFound { matches: hits });
+    if !found.is_empty() {
+        return Ok((found, info));
     }
-    Ok((found, info))
+    match fatal {
+        Some(ReadError::ProcessGone) => Err(ScanError::NotRunning),
+        Some(ReadError::AccessDenied) => Err(ScanError::Denied("Access to the game's memory was revoked.".into())),
+        _ => Err(ScanError::NotFound { matches: hits }),
+    }
 }
 
-/// Reads within region boundaries, retaining overlap even after a short read. If a large read
-/// fails because memory changed since enumeration, retry smaller pieces before skipping a page.
+/// Reads within region boundaries into a reused scratch buffer, retaining overlap even after a
+/// short read. Aborts immediately on fatal process errors (`ProcessGone` / `AccessDenied`), and
+/// retries smaller sizes on localized unreadable pages before skipping to the next 4 KiB page.
 fn scan_region(
     (start, end): (u64, u64),
-    read: impl Fn(u64, usize) -> Vec<u8>,
+    scratch: &mut [u8],
+    read: impl Fn(u64, &mut [u8]) -> Result<usize, ReadError>,
     mut hit: impl FnMut(u64),
     mut progress: impl FnMut(u64),
-) {
+) -> Result<(), ReadError> {
     let finder = memmem::Finder::new(MARKER);
     let mut off = start;
+    let max_chunk = CHUNK.min(scratch.len().saturating_sub(MARKER.len() - 1)).max(1);
     while off < end {
         let remaining = end - off;
-        let n = remaining.min(CHUNK as u64) as usize;
-        let request = remaining.min((n + MARKER.len() - 1) as u64) as usize;
-        let mut buf = read(off, request);
-        if buf.is_empty() && request > 64 * 1024 {
-            buf = read(off, 64 * 1024);
+        let n = remaining.min(max_chunk as u64) as usize;
+        let request = remaining.min((n + MARKER.len() - 1) as u64).min(scratch.len() as u64) as usize;
+        let mut got = match read(off, &mut scratch[..request]) {
+            Ok(len) => len,
+            Err(ReadError::Unreadable) => 0,
+            Err(fatal) => return Err(fatal),
+        };
+        if got == 0 && request > 64 * 1024 {
+            got = match read(off, &mut scratch[..64 * 1024]) {
+                Ok(len) => len,
+                Err(ReadError::Unreadable) => 0,
+                Err(fatal) => return Err(fatal),
+            };
         }
-        if buf.is_empty() && request > 4096 {
-            buf = read(off, 4096);
+        if got == 0 && request > 4096 {
+            got = match read(off, &mut scratch[..4096]) {
+                Ok(len) => len,
+                Err(ReadError::Unreadable) => 0,
+                Err(fatal) => return Err(fatal),
+            };
         }
-        let advance = if buf.is_empty() {
-            remaining.min(4096 - (off - start) % 4096) as usize
-        } else if buf.len() < request {
-            buf.len().saturating_sub(MARKER.len() - 1).max(1)
+        let next_page = || remaining.min(4096 - (off % 4096)) as usize;
+        let advance = if got == 0 {
+            next_page()
+        } else if got < request {
+            if got < MARKER.len() {
+                // Too few bytes before an unreadable boundary to hold the marker: jump straight to
+                // the next 4 KiB page instead of crawling byte by byte.
+                next_page().max(got)
+            } else {
+                got - (MARKER.len() - 1)
+            }
         } else {
             n
         };
-        for at in finder.find_iter(&buf).filter(|&at| at < advance) {
+        for at in finder.find_iter(&scratch[..got]).filter(|&at| at < advance) {
             hit(off + at as u64);
         }
         off += advance as u64;
         progress(advance as u64);
     }
+    Ok(())
 }
 
 /// Adds a capture to `found`, newest sync first. Copies of one sync are one capture: the most
@@ -573,11 +1079,24 @@ mod tests {
         let raw = b"\0{\"Suits\":[{\"ItemType\":\"/A\"}],\"MiscItems\":[],\"LastInventorySync\":123}\0";
         let hit = memmem::find(raw, MARKER).unwrap();
         let regions = join_regions(vec![(0, 20), (20, 50), (50, raw.len() as u64)]);
-        let read = |addr: u64, len: usize| raw[addr as usize..addr as usize + len].to_vec();
+        let read = |addr: u64, buf: &mut [u8]| -> Result<usize, ReadError> {
+            let start = addr as usize;
+            let n = buf.len().min(raw.len().saturating_sub(start));
+            buf[..n].copy_from_slice(&raw[start..start + n]);
+            Ok(n)
+        };
+        let mut scratch = vec![0u8; 4096];
         let mut captures = Vec::new();
-        scan_region(regions[0], read, |addr| captures.push(extract_blob_from(read, regions[0], addr)), |_| {});
+        scan_region(
+            regions[0],
+            &mut scratch,
+            read,
+            |addr| captures.push(extract_blob_from(read, regions[0], addr).unwrap()),
+            |_| {},
+        )
+        .unwrap();
         assert_eq!(captures, [Some(json!({"Suits": [{"ItemType": "/A"}], "MiscItems": [], "LastInventorySync": 123}))]);
-        assert!(extract_blob_from(read, ((hit - 3) as u64, raw.len() as u64), hit as u64).is_none());
+        assert!(extract_blob_from(read, ((hit - 3) as u64, raw.len() as u64), hit as u64).unwrap().is_none());
     }
 
     #[test]
@@ -627,19 +1146,24 @@ mod tests {
         }
         let base = 1000;
         let end = base + bytes.len() as u64;
+        let mut scratch = vec![0u8; CHUNK + MARKER.len() - 1];
         for limit in [CHUNK + MARKER.len(), 700_000] {
             let mut hits = Vec::new();
             let mut progress = 0;
             scan_region(
                 (base, end),
-                |addr, len| {
-                    assert!(addr + len as u64 <= end, "reads must not cross the region boundary");
+                &mut scratch,
+                |addr, buf| {
+                    assert!(addr + buf.len() as u64 <= end, "reads must not cross the region boundary");
                     let offset = (addr - base) as usize;
-                    bytes[offset..offset + len.min(limit)].to_vec()
+                    let n = buf.len().min(limit);
+                    buf[..n].copy_from_slice(&bytes[offset..offset + n]);
+                    Ok(n)
                 },
                 |addr| hits.push((addr - base) as usize),
                 |n| progress += n,
-            );
+            )
+            .unwrap();
             assert_eq!(hits, positions);
             assert_eq!(progress, bytes.len() as u64);
         }
@@ -654,18 +1178,128 @@ mod tests {
         }
         let mut hits = Vec::new();
         let mut progress = 0;
+        let mut scratch = vec![0u8; CHUNK + MARKER.len() - 1];
         scan_region(
             (0, bytes.len() as u64),
-            |addr, len| {
+            &mut scratch,
+            |addr, buf| {
                 let start = addr as usize;
-                let end = start + len;
-                if len > 4096 || (start < 8192 && end > 4096) { Vec::new() } else { bytes[start..end].to_vec() }
+                let end = start + buf.len();
+                if buf.len() > 4096 || (start < 8192 && end > 4096) {
+                    Err(ReadError::Unreadable)
+                } else {
+                    buf.copy_from_slice(&bytes[start..end]);
+                    Ok(buf.len())
+                }
             },
             |addr| hits.push(addr as usize),
             |n| progress += n,
-        );
+        )
+        .unwrap();
         assert_eq!(hits, positions);
         assert_eq!(progress, bytes.len() as u64);
+    }
+
+    #[test]
+    fn fatal_read_error_aborts_scan_and_short_partial_jumps_page() {
+        let calls = std::cell::Cell::new(0usize);
+        let mut scratch = vec![0u8; 64 * 1024];
+        let err = scan_region(
+            (0, 1024 * 1024),
+            &mut scratch,
+            |_, _| {
+                calls.set(calls.get() + 1);
+                Err(ReadError::ProcessGone)
+            },
+            |_| {},
+            |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(err, ReadError::ProcessGone);
+        assert_eq!(calls.get(), 1, "fatal error must abort immediately on the first read");
+
+        // Partial read of 5 bytes (< MARKER.len()) right before an unreadable boundary jumps to
+        // the next 4 KiB page instead of crawling 1 byte at a time.
+        let reads = std::cell::Cell::new(0usize);
+        scan_region(
+            (4091, 8192),
+            &mut scratch,
+            |addr, buf| {
+                reads.set(reads.get() + 1);
+                if addr == 4091 {
+                    buf[..5].fill(b'a');
+                    Ok(5)
+                } else {
+                    buf.fill(b'b');
+                    Ok(buf.len())
+                }
+            },
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(reads.get(), 2, "must jump directly to page 4096 rather than stepping 1 byte at a time");
+    }
+
+    #[test]
+    fn extract_blob_recovers_across_backward_unreadable_page_in_one_pass() {
+        // Unreadable page [0, 4096), readable JSON in [4096, 12288) spanning > 4 KiB before hit.
+        let mut mem = vec![b' '; 12288];
+        let prefix =
+            b"{\"MiscItems\":[{\"ItemType\":\"/A\",\"ItemCount\":1}],\"Suits\":[],\"Token\":\"secret\",\"Padding\":\"";
+        let suffix = b"\",\"LastInventorySync\":777}\0";
+        mem[4096..4096 + prefix.len()].copy_from_slice(prefix);
+        let hit_start = 9000;
+        mem[hit_start..hit_start + suffix.len()].copy_from_slice(suffix);
+        let hit = memmem::find(&mem, MARKER).unwrap() as u64;
+
+        let read_ranges = std::cell::RefCell::new(Vec::<(u64, u64)>::new());
+        let obj = extract_blob_from(
+            |addr, buf| {
+                let end = addr + buf.len() as u64;
+                if addr < 4096 {
+                    return Err(ReadError::Unreadable);
+                }
+                read_ranges.borrow_mut().push((addr, end));
+                let n = buf.len().min(mem.len().saturating_sub(addr as usize));
+                buf[..n].copy_from_slice(&mem[addr as usize..addr as usize + n]);
+                Ok(n)
+            },
+            (0, mem.len() as u64),
+            hit,
+        )
+        .unwrap()
+        .expect("should recover JSON prefix across smaller backward steps");
+        assert_eq!(obj["LastInventorySync"], 777);
+        assert!(obj.get("Token").is_none());
+        // No final full-range re-read after backward/forward scans.
+        let ranges = read_ranges.borrow();
+        assert!(ranges.iter().all(|&(a, b)| !(a <= 4096 && b > hit)), "must not re-read [lo, hi) a second time");
+    }
+
+    #[test]
+    fn zeroize_bytes_wipes_buffer() {
+        let mut buf = b"live-session-token".to_vec();
+        zeroize_bytes(&mut buf);
+        assert!(buf.iter().all(|&b| b == 0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linux_maps_and_cmdline_filters_handle_spaces_versioned_libs_and_wrappers() {
+        let maps = "\
+7f0000000000-7f0000100000 rw-p 00000000 00:00 0\n\
+7f0000200000-7f0000300000 rw-s 00000000 00:01 123 /memfd:vulkan\n\
+7f0000400000-7f0000500000 rw-p 00001000 08:01 456 /mnt/Steam Library/steamapps/common/Warframe/Game.dll\n\
+7f0000600000-7f0000700000 rw-p 00001000 08:01 457 /usr/lib/libc.so.6\n\
+7f0000800000-7f0000900000 rw-p 00001000 08:01 458 /usr/lib/libvulkan.so.1 (deleted)\n\
+7f0000a00000-7f0000b00000 rw-p 00000000 00:00 0 [heap]\n";
+        assert_eq!(os::parse_maps(maps), vec![(0x7f0000000000, 0x7f0000100000), (0x7f0000a00000, 0x7f0000b00000)]);
+        assert!(os::cmdline_is_game(b"C:\\Warframe\\Warframe.x64.exe\0-cluster:public\0"));
+        assert!(os::cmdline_is_game(b"/proton/bin/wine64-preloader\0/game/Warframe.x64.exe\0"));
+        assert!(!os::cmdline_is_game(b"/usr/bin/bwrap\0--ro-bind\0/a\0/b\0Warframe.x64.exe\0"));
+        assert!(!os::cmdline_is_game(b"/usr/bin/vim\0Warframe.x64.exe\0"));
+        assert!(!os::cmdline_is_game(b"/proton/bin/wine64\0Launcher.exe\0Warframe.x64.exe\0"));
     }
 
     #[test]

@@ -8,7 +8,8 @@
 use std::ffi::c_void;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER, ERROR_PARTIAL_COPY, GetLastError,
+    HANDLE, INVALID_HANDLE_VALUE, STILL_ACTIVE,
 };
 use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -17,12 +18,18 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
 use windows_sys::Win32::System::Memory::{
     MEM_COMMIT, MEM_PRIVATE, MEMORY_BASIC_INFORMATION, PAGE_GUARD, PAGE_READWRITE, VirtualQueryEx,
 };
-use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
+use windows_sys::Win32::System::Threading::{
+    GetExitCodeProcess, OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+};
 
-use super::ScanError;
+use super::{ReadError, ScanError};
 
-/// Nothing to rule out up front: only opening the process can tell.
+/// A 64-bit build is needed to address `Warframe.x64.exe`'s 64-bit address space; on 64-bit
+/// Windows nothing is ruled out up front — only opening the process can tell.
 pub fn availability() -> Result<(), String> {
+    #[cfg(not(target_pointer_width = "64"))]
+    return Err("Memory scanning requires a 64-bit build to read Warframe.x64.exe.".into());
+    #[cfg(target_pointer_width = "64")]
     Ok(())
 }
 
@@ -80,6 +87,19 @@ impl Memory {
         Ok(Memory { process })
     }
 
+    fn is_readable(info: &MEMORY_BASIC_INFORMATION) -> bool {
+        info.State == MEM_COMMIT
+            && info.Type == MEM_PRIVATE
+            && info.Protect & PAGE_READWRITE != 0
+            && info.Protect & PAGE_GUARD == 0
+    }
+
+    fn alive(&self) -> bool {
+        let mut code: u32 = 0;
+        // SAFETY: `self.process` was opened with PROCESS_QUERY_INFORMATION.
+        unsafe { GetExitCodeProcess(self.process, &mut code) != 0 && code == STILL_ACTIVE as u32 }
+    }
+
     /// Committed, private, read-write regions: the heap, where downloaded JSON lives. Mapped
     /// files and the program's own code are left out.
     pub fn regions(&self) -> Vec<(u64, u64)> {
@@ -95,13 +115,12 @@ impl Memory {
             if got == 0 || info.RegionSize == 0 {
                 break;
             }
-            let (start, size) = (info.BaseAddress as u64, info.RegionSize as u64);
-            let readable = info.State == MEM_COMMIT
-                && info.Type == MEM_PRIVATE
-                && info.Protect & PAGE_READWRITE != 0
-                && info.Protect & PAGE_GUARD == 0;
-            if readable {
-                out.push((start, start + size));
+            let (start, size) = (info.BaseAddress as usize as u64, info.RegionSize as u64);
+            let Some(end) = start.checked_add(size) else {
+                break;
+            };
+            if Self::is_readable(&info) {
+                out.push((start, end));
             }
             match (info.BaseAddress as usize).checked_add(info.RegionSize) {
                 Some(next) if next > addr => addr = next,
@@ -111,17 +130,67 @@ impl Memory {
         out
     }
 
-    /// Up to `len` bytes at `addr`; fewer (or none) where the memory is not readable.
-    pub fn read(&self, addr: u64, len: usize) -> Vec<u8> {
-        let mut buf = vec![0u8; len];
-        let mut got: usize = 0;
-        // SAFETY: the buffer is `len` bytes long, and ReadProcessMemory writes at most that many.
-        // A partial read (the region ended) still reports how many bytes it copied.
-        unsafe {
-            ReadProcessMemory(self.process, addr as *const c_void, buf.as_mut_ptr().cast(), len, &mut got);
+    /// Copies up to `buf.len()` bytes starting at `addr` into `buf`, distinguishing fatal process
+    /// errors from localized unreadable pages.
+    ///
+    /// Re-queries the sub-region's protection immediately before reading and clamps the read to
+    /// that queried extent so newly placed `PAGE_GUARD` pages are skipped rather than triggered
+    /// (because the target runs unsuspended, a microscopic race between query and read remains).
+    pub fn read_into(&self, addr: u64, buf: &mut [u8]) -> Result<usize, ReadError> {
+        if buf.is_empty() {
+            return Ok(0);
         }
-        buf.truncate(got);
-        buf
+        let Ok(ptr_addr) = usize::try_from(addr) else {
+            return Err(ReadError::Unreadable);
+        };
+        // SAFETY: VirtualQueryEx writes to `info` for a valid process handle.
+        let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+        let queried = unsafe {
+            VirtualQueryEx(self.process, ptr_addr as *const c_void, &mut info, size_of::<MEMORY_BASIC_INFORMATION>())
+        };
+        if queried == 0 {
+            let code = unsafe { GetLastError() };
+            return Err(match code {
+                ERROR_ACCESS_DENIED => ReadError::AccessDenied,
+                ERROR_INVALID_HANDLE => ReadError::ProcessGone,
+                _ if !self.alive() => ReadError::ProcessGone,
+                _ => ReadError::Unreadable,
+            });
+        }
+        if !Self::is_readable(&info) {
+            return Err(if !self.alive() { ReadError::ProcessGone } else { ReadError::Unreadable });
+        }
+        let reg_base = info.BaseAddress as usize;
+        let Some(reg_end) = reg_base.checked_add(info.RegionSize) else {
+            return Err(ReadError::Unreadable);
+        };
+        if ptr_addr < reg_base || ptr_addr >= reg_end {
+            return Err(ReadError::Unreadable);
+        }
+        let safe_len = buf.len().min(reg_end - ptr_addr);
+        let mut got: usize = 0;
+        // SAFETY: `buf` is at least `safe_len` bytes long and ReadProcessMemory writes at most `safe_len`.
+        let ok = unsafe {
+            ReadProcessMemory(self.process, ptr_addr as *const c_void, buf.as_mut_ptr().cast(), safe_len, &mut got)
+        };
+        let got = got.min(safe_len);
+        if ok != 0 || got > 0 {
+            return Ok(got);
+        }
+        let code = unsafe { GetLastError() };
+        Err(match code {
+            ERROR_ACCESS_DENIED => ReadError::AccessDenied,
+            ERROR_INVALID_HANDLE => ReadError::ProcessGone,
+            ERROR_PARTIAL_COPY => {
+                if self.alive() {
+                    ReadError::Unreadable
+                } else {
+                    ReadError::ProcessGone
+                }
+            }
+            _ if !self.alive() => ReadError::ProcessGone,
+            _ => ReadError::Unreadable,
+        })
     }
 }
 
