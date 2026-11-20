@@ -45,25 +45,29 @@ function hero(S) {
     ? `<div class="hint warn">${icon("home")}<span><b>${esc(S.account.logName)}</b> is logged in to the game; this is ${esc(S.account.name)}.</span>
         <button class="ghost" data-show-game>Show ${esc(S.account.logName)}</button></div>` : "";
   return `${other}<div class="card hero">
-    <div class="mr-badge" title="${ringTitle}">
-      ${gimg(mr == null ? ICON.mastery : mrBadge(top), 116)}
-      <b>${mr == null ? "?" : `MR ${shown}`}</b><span>Mastery rank</span>
-    </div>
-    <div class="grow">
-      <h1>${esc(S.account.name || S.account.logName || "Tenno")}</h1>
-      <div class="facts">
-        <span><b>${fmt(S.mastered)}</b>of ${fmt(S.total)} mastered</span>
-        <span><b>${fmt(S.total - S.mastered)}</b>to go</span>
-        <span title="${esc(breakdown)}"><b>${fmt(m.total)}${m.lacks ? "+" : ""}</b>mastery XP</span>
+    <div class="hero-main">
+      <div class="mr-badge" title="${ringTitle}">
+        ${gimg(mr == null ? ICON.mastery : mrBadge(top), 96)}
+        <b>${mr == null ? "?" : `MR ${shown}`}</b><span>Mastery rank</span>
       </div>
-      <div class="row" style="margin-top:10px;max-width:560px">
-        <div class="bar grow"><i style="width:${(share * 100).toFixed(1)}%"></i></div>
-        <span class="muted num" style="font-size:12.5px">${(share * 100).toFixed(1)}% of all item mastery · ${fmt((m.possible || 0) - (m.points || 0))} points left in gear</span>
+      <div class="grow">
+        <h1>${esc(S.account.name || S.account.logName || "Tenno")}</h1>
+        <div class="facts">
+          <span><b>${fmt(S.mastered)}</b>of ${fmt(S.total)} mastered</span>
+          <span><b>${fmt(S.total - S.mastered)}</b>remaining</span>
+          <span title="${esc(breakdown)}"><b>${fmt(m.total)}${m.lacks ? "+" : ""}</b>mastery XP</span>
+        </div>
+        <div class="hero-prog">
+          <div class="bar"><i style="width:${(share * 100).toFixed(1)}%"></i></div>
+          <span class="num">${(share * 100).toFixed(1)}% · ${fmt((m.possible || 0) - (m.points || 0))} gear XP left</span>
+        </div>
       </div>
-      ${hint ? `<div class="hint">${icon("mastery")}<span>${hint}</span></div>` : ""}
-      ${breakdown && !m.lacks ? `<div class="muted num" style="font-size:12.5px;margin-top:6px">${esc(breakdown)}</div>` : ""}
+      ${purse ? `<div class="purse">${purse}</div>` : ""}
     </div>
-    ${purse ? `<div class="purse">${purse}</div>` : ""}
+    ${hint || (breakdown && !m.lacks) ? `<div class="hero-foot">
+      ${hint ? `<span class="hero-next">${icon("mastery")}<span>${hint}</span></span>` : "<span></span>"}
+      ${breakdown && !m.lacks ? `<span class="hero-break num">${esc(breakdown)}</span>` : ""}
+    </div>` : ""}
   </div>`;
 }
 

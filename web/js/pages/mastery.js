@@ -36,7 +36,7 @@ export default {
     const allCats = [...new Set(data.map((r) => r.category))].sort();
     view.innerHTML = `<div class="page">
       <div class="page-head"><div><h1>Mastery</h1><p>${fmt(app.state.mastered)} of ${fmt(app.state.total)} mastered · ${fmt(app.state.mastery?.total)}${app.state.mastery?.lacks ? "+" : ""} mastery XP · ${fmt(app.state.mastery?.points)} of ${fmt(app.state.mastery?.possible)} from gear<br>Choose an item to see its parts.</p></div></div>
-      <div class="tiles" style="margin-bottom:16px">${cats.map((c) => `<div class="tile" style="cursor:pointer" data-cat="${esc(c.category)}">
+      <div class="tiles" style="margin-bottom:14px">${cats.map((c) => `<div class="tile click ${st.cat === c.category ? "on" : ""}" data-cat="${esc(c.category)}">
           <div class="row spread"><span class="muted" style="font-size:12.5px">${esc(c.category)}</span><span class="num" style="font-size:12.5px">${c.mastered}/${c.total}</span></div>
           <div class="bar thin" style="margin-top:8px"><i style="width:${(100 * c.mastered / Math.max(1, c.total)).toFixed(1)}%"></i></div></div>`).join("")}</div>
       <div class="toolbar">
@@ -95,7 +95,10 @@ export default {
     for (const b of view.querySelectorAll("#status button")) {
       b.onclick = () => { st.status = b.dataset.v; for (const x of view.querySelectorAll("#status button")) x.classList.toggle("on", x === b); draw(); };
     }
-    $("#cat").onchange = (e) => { st.cat = e.target.value; draw(); };
+    const syncCatTiles = () => {
+      for (const t of view.querySelectorAll("[data-cat]")) t.classList.toggle("on", t.dataset.cat === st.cat);
+    };
+    $("#cat").onchange = (e) => { st.cat = e.target.value; syncCatTiles(); draw(); };
     $("#mr").onchange = (e) => { st.maxMr = e.target.value; draw(); };
     $("#prime").onchange = (e) => { st.prime = e.target.value; draw(); };
     for (const b of view.querySelectorAll("#layout button")) {
@@ -111,7 +114,7 @@ export default {
     $("#unv").onchange = (e) => { st.unvaulted = e.target.checked; draw(); };
     $("#bld").onchange = (e) => { st.buildable = e.target.checked; draw(); };
     for (const t of view.querySelectorAll("[data-cat]")) {
-      t.onclick = () => { st.cat = st.cat === t.dataset.cat ? "" : t.dataset.cat; $("#cat").value = st.cat; draw(); };
+      t.onclick = () => { st.cat = st.cat === t.dataset.cat ? "" : t.dataset.cat; $("#cat").value = st.cat; syncCatTiles(); draw(); };
     }
     $("#results").onclick = (e) => { const item = e.target.closest("[data-uid]"); if (item) drawer.open(item.dataset.uid); };
   },

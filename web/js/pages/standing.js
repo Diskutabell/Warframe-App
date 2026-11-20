@@ -119,7 +119,7 @@ function render(s) {
       <div class="card"><div class="card-head"><h2>Faction syndicates</h2><span class="grow"></span>
           <span class="${shared?.left === 0 ? "warn-text" : "muted"}" style="font-size:13px">${shared?.left == null ? "one shared daily pool" : shared.left === 0 ? "shared pool capped today" : `${fmt(shared.left)} left today, shared`}</span></div>
         <div class="list">${factions.map((r) => factionRow(r, s.pools)).join("")}</div></div>
-      <div class="stack">${nightwave.map((r) => `<div class="card"><div class="card-head"><h2>Nightwave</h2></div>${card(r, s.pools)}</div>`).join("")}
+      <div class="stack">${nightwave.map((r) => card(r, s.pools)).join("")}
         <div class="card"><div class="card-head"><h2>How standing works here</h2></div>
           <p class="muted" style="margin:0;font-size:13.5px">Standing counts toward a rank until its bar is full; then the rank-up costs what is listed, and the bar starts on the next rank. At the top rank a full bar means standing is lost until you spend some. Medallions and other hand-ins are listed under each syndicate. Pick a syndicate to see what its standing buys and what that is worth on warframe.market.</p></div></div>
     </div>

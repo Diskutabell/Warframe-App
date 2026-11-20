@@ -11,7 +11,7 @@
 <aside class="rail">
   <div class="acct" id="acct"></div>
   <button class="search-trigger" id="openPalette" type="button">
-    <span data-icon="search"></span><span>Search</span><kbd>Ctrl K</kbd>
+    <span data-icon="search"></span><span>Quick jump…</span><kbd>Ctrl K</kbd>
   </button>
   <nav aria-label="Sections" id="nav"></nav>
   <div class="rail-status" id="railStatus"></div>
@@ -22,9 +22,10 @@
 <div class="palette" id="palette" hidden>
   <div class="palette-box" role="dialog" aria-label="Search">
     <div class="palette-input"><span data-icon="search"></span>
-      <input id="paletteInput" type="search" placeholder="Items, parts, relics, syndicates, pages…" autocomplete="off" spellcheck="false">
+      <input id="paletteInput" type="search" placeholder="Search items, parts, relics, syndicates, or pages…" autocomplete="off" spellcheck="false">
       <kbd>Esc</kbd></div>
     <ul class="palette-results" id="paletteResults" role="listbox"></ul>
+    <div class="palette-foot"><span><kbd>↑</kbd><kbd>↓</kbd> navigate</span><span><kbd>↵</kbd> open</span><span><kbd>/</kbd> anywhere to search</span></div>
   </div>
 </div>
 <div class="modal" id="update" hidden>

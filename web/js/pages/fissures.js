@@ -15,7 +15,7 @@ function mine(f) {
   if (f.storm) return `<span class="mine none">Railjack</span>`;
   if (!r || !r.owned) return `<span class="mine none">No ${esc(f.tier)} relics</span>`;
   const b = r.best;
-  return `<div class="mine"><span class="click-relic" data-relic="${esc(b?.name || "")}" style="cursor:pointer;font-weight:600">${esc(b?.name || "")}</span>
+  return `<div class="mine"><span class="click-relic" data-relic="${esc(b?.name || "")}">${esc(b?.name || "")}</span>
     <span class="muted"> · ${fmt(r.owned)} owned${b?.needs ? ` · ${b.needs} needed` : ""} · ${plat(b?.ev)}</span></div>`;
 }
 
@@ -39,20 +39,23 @@ export default {
         <span class="count" id="cnt"></span>
       </div>
       <div class="card flush" id="list"></div>
-      <p class="faint" style="font-size:13px;margin-top:10px">${icon("bell")} watches a tier, mission and kind - "Axi Capture, Steel Path" - not one fissure, so you hear about the next one too.</p>
+      <p class="footnote">${icon("bell")}<span>Watches a tier, mission and kind (for example “Axi Capture, Steel Path”), not just one fissure, so you hear about the next one too.</span></p>
     </div>`;
     const draw = (d) => {
       const rows = (d.fissures || []).filter((f) => kindOf(f) === st.kind && (!st.tier || f.tier === st.tier));
       $("#cnt").textContent = `${rows.length} open`;
-      $("#list").innerHTML = rows.map((f) => `<div class="fis">
-          <div class="tier">${gimg(relicIcon(f.tier), 30)}${era(f.tier)}</div>
-          <div class="what">${missionScene(f.mission) ? `<img class="scene" alt="" loading="lazy" decoding="async" src="${esc(tex(missionScene(f.mission), 54))}" onerror="this.remove()">` : ""}
-            <div><div class="mission">${esc(f.mission)}</div><div class="node">${esc(f.node)}</div></div></div>
-          <div>${factionTag(f.enemy, 20)}</div>
-          <div class="num">${countdown(f.expiry, "ending")}</div>
-          ${mine(f)}
-          <button class="ghost icon watch ${watch.has(f.watch) ? "on" : ""}" data-watch="${esc(f.watch)}" title="${watch.has(f.watch) ? "Stop watching" : "Watch"} ${esc(f.tier)} ${esc(f.mission)}">${icon("bell")}</button>
-        </div>`).join("") || `<div class="empty" style="margin:12px"><b>None open</b>Nothing of this kind right now.</div>`;
+      $("#list").innerHTML = rows.length
+        ? `<div class="fis-head"><span>Tier</span><span>Mission</span><span>Faction</span><span>Expires</span><span>Best relic</span><span></span></div>`
+          + rows.map((f) => `<div class="fis">
+            <div class="tier">${gimg(relicIcon(f.tier), 30)}${era(f.tier)}</div>
+            <div class="what">${missionScene(f.mission) ? `<img class="scene" alt="" loading="lazy" decoding="async" src="${esc(tex(missionScene(f.mission), 54))}" onerror="this.remove()">` : ""}
+              <div><div class="mission">${esc(f.mission)}</div><div class="node">${esc(f.node)}</div></div></div>
+            <div>${factionTag(f.enemy, 20)}</div>
+            <div class="num">${countdown(f.expiry, "ending")}</div>
+            ${mine(f)}
+            <button class="ghost icon watch ${watch.has(f.watch) ? "on" : ""}" data-watch="${esc(f.watch)}" title="${watch.has(f.watch) ? "Stop watching" : "Watch"} ${esc(f.tier)} ${esc(f.mission)}">${icon("bell")}</button>
+          </div>`).join("")
+        : `<div class="empty" style="margin:12px"><b>None open</b>Nothing of this kind right now.</div>`;
     };
     draw(data);
     const seg = (id, key) => {

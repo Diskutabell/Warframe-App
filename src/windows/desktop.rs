@@ -403,8 +403,8 @@ pub fn run(state: Arc<State>, url: &str, _backend: Backend) -> Result<()> {
     let debug = std::env::var_os("WARFRAMEPROJECT_DEBUG").is_some();
     let webview = WebViewBuilder::new_with_web_context(&mut context)
         .with_url(url)
-        // The page's own background, so nothing flashes white while it loads.
-        .with_background_color((11, 18, 24, 255))
+        // The page's own background (#0b0c0f), so nothing flashes white while it loads.
+        .with_background_color((11, 12, 15, 255))
         .with_devtools(debug)
         // Links the UI opens in a new tab (warframe.market pages) belong in the browser.
         .with_new_window_req_handler(|uri, _| {

@@ -54,11 +54,16 @@ function route() {
   return { page: PAGES.find((p) => p.id === id) || home, params: new URLSearchParams(query || "") };
 }
 
+const NAV_GROUPS = { mastery: "Progression", fissures: "Origin System", foundry: "Orbiter" };
+
 function renderNav() {
   const { page } = route();
-  $("#nav").innerHTML = PAGES.map((p, i) =>
-    (p.id === "settings" ? `<div class="sep"></div>` : "") +
-    `<a href="#${p.id}" class="${p === page ? "on" : ""}" data-page="${p.id}" title="${esc(p.title)}${pageKey(p, i) ? ` (${pageKey(p, i)})` : ""}">${icon(p.icon)}<span>${esc(p.title)}</span>${p.badge ? `<b class="nav-badge" hidden></b>` : ""}</a>`).join("");
+  $("#nav").innerHTML = PAGES.map((p, i) => {
+    const key = pageKey(p, i);
+    const prefix = p.id === "settings" ? `<div class="sep"></div>` : NAV_GROUPS[p.id] ? `<div class="nav-group">${NAV_GROUPS[p.id]}</div>` : "";
+    const right = p.badge ? `<b class="nav-badge" hidden></b>` : key ? `<span class="nav-k">${key}</span>` : "";
+    return prefix + `<a href="#${p.id}" class="${p === page ? "on" : ""}" data-page="${p.id}" title="${esc(p.title)}${key ? ` (${key})` : ""}">${icon(p.icon)}<span>${esc(p.title)}</span>${right}</a>`;
+  }).join("");
   renderBadges();
 }
 
@@ -120,7 +125,7 @@ document.addEventListener("click", (e) => {
 function renderRail() {
   const S = app.state;
   if (!S) {
-    $("#railStatus").innerHTML = `<div><span class="dot warn"></span>Engine not responding</div>`;
+    $("#railStatus").innerHTML = `<div class="rail-stat"><span class="dot warn"></span><span>Engine not responding</span></div>`;
     return;
   }
   const src = S.sources, ms = src.memscan || {};
@@ -128,10 +133,10 @@ function renderRail() {
   renderAccounts();
   const playing = S.account.logName && !S.account.playing ? ` <span class="faint">(${esc(S.account.logName)})</span>` : "";
   $("#railStatus").innerHTML = `
-    <div><span class="dot ${src.eeLog.active ? "on" : ""}"></span>${src.eeLog.active ? "Game running" : "Game not running"}${src.eeLog.active ? playing : ""}</div>
-    <div><span class="dot ${S.account.id ? "on" : "warn"}"></span>${S.account.id ? "Profile linked" : "Account not linked"}</div>
-    <div><span class="dot ${src.inventory.source ? "on" : ""}"></span>${inv}</div>
-    ${ms.state === "scanning" ? `<div><span class="dot gold"></span>Reading inventory ${Math.round((ms.progress || 0) * 100)}%</div>` : ""}`;
+    <div class="rail-stat"><span class="dot ${src.eeLog.active ? "on" : ""}"></span><span>${src.eeLog.active ? "Game running" : "Game offline"}${src.eeLog.active ? playing : ""}</span></div>
+    <div class="rail-stat"><span class="dot ${S.account.id ? "on" : "warn"}"></span><span>${S.account.id ? "Profile linked" : "Account not linked"}</span></div>
+    <div class="rail-stat"><span class="dot ${src.inventory.source ? "on" : ""}"></span><span>${inv}</span></div>
+    ${ms.state === "scanning" ? `<div class="rail-stat"><span class="dot gold"></span><span>Reading inventory ${Math.round((ms.progress || 0) * 100)}%</span></div>` : ""}`;
 }
 
 // ------------------------------------------------------------------ a newer version

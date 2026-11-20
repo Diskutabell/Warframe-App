@@ -40,7 +40,7 @@ export default {
       $("#list").innerHTML = rows.slice(0, 400).map((r) => {
         const owned = Object.entries(r.counts).filter(([, n]) => n).map(([k, n]) => `${n}× ${k}`).join(", ");
         return `<div class="icard" data-relic="${esc(r.name)}">
-          <div style="position:relative">${art(r.image, "lg")}${r.total ? `<span class="pill gold" style="position:absolute;right:-6px;bottom:-6px">${r.total}</span>` : ""}</div>
+          <div class="relic-art">${art(r.image, "lg")}${r.total ? `<span class="relic-qty num">${r.total}</span>` : ""}</div>
           <div class="body">
             <div class="row"><span class="name grow">${esc(r.name)}</span>${era(r.era)}</div>
             <div class="pips">${r.rewards.map((x) => `<span class="pip ${x.have > 0 ? "ok" : ""} ${x.needed > x.have ? "want" : ""}"

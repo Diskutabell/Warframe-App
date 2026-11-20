@@ -82,7 +82,7 @@ function syndicate(x) {
       ${syndicateArt(r.icon, 28)}<div class="main"><div class="t">${esc(r.name)}</div></div><span class="faint num">rank ${r.level}</span></div>`).join("");
   return `<div class="dhead">${syndicateArt(x.rankIcon || x.icon, 96)}<div class="grow">
       <h2>${esc(x.name)}</h2>
-      <div class="row wrap"><span class="pill" style="${x.colour ? `color:${esc(x.colour)}` : ""}">${esc(x.rankName)}</span>
+      <div class="row wrap"><span class="pill" style="${x.colour ? `color:color-mix(in srgb, ${esc(x.colour)} 65%, #fff 35%);border-color:color-mix(in srgb, ${esc(x.colour)} 45%, transparent)` : ""}">${esc(x.rankName)}</span>
         ${x.atCap ? `<span class="pill gold">Rank up ready</span>` : ""}${x.full ? `<span class="pill warn">Full - spend it</span>` : ""}</div></div></div>
     <div class="kv">
       <div><span>Standing</span><b>${fmt(x.standing)}</b></div>

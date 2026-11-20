@@ -41,7 +41,7 @@ function rivenCard(r) {
       ${r.overall ? `<span class="riv-overall ${gradeClass(r.overall)}" title="The average roll">${esc(r.overall)}</span>` : ""}</div>
     <div class="riv-stats">${r.stats.map((g) => `<div class="riv-stat"><span class="riv-grade ${gradeClass(g.grade)}">${esc(g.grade)}</span>
       <span class="grow">${g.negative ? "−" : "+"}<b>${Math.abs(g.value)}${UNITS[g.stat] ?? "%"}</b> ${esc(g.stat)}</span><span class="muted num">${g.deviation > 0 ? "+" : ""}${g.deviation.toFixed(1)}%</span>
-      <div class="riv-roll ${gradeClass(g.grade)}"><i style="width:${Math.max(0, Math.min(100, (g.deviation + 10) * 5))}%"></i></div></div>`).join("")}</div>
+      <div class="riv-roll ${gradeClass(g.grade)}"><i style="width:${Math.max(0, Math.min(100, (g.deviation + 10) * 5))}%"></i><b></b></div></div>`).join("")}</div>
     <div class="tiles" style="margin-top:12px">
       <div class="tile"><b>${m?.count ? plat(m.lowest) : "–"}</b><span>${m ? `lowest of ${fmt(m.count)} listed with these positives` : r.marketError ? "warframe.market did not answer" : "looking up listings…"}</span></div>
       <div class="tile"><b>${m?.median != null ? plat(m.median) : "–"}</b><span>median listing</span></div>
