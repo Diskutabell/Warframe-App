@@ -510,11 +510,68 @@ fn download_to_with(
     fetch_cached(url, path, force, get, |bytes| serde_json::from_slice(bytes).context("invalid JSON"))
 }
 
+/// Cap for decompressed LZMA export index output (the real index is a few kilobytes).
+const MAX_INDEX_BYTES: usize = 4 * 1024 * 1024;
+
+struct LimitedWriter {
+    buf: Vec<u8>,
+    limit: usize,
+}
+
+impl std::io::Write for LimitedWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        if self.buf.len().saturating_add(data.len()) > self.limit {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "decompressed data exceeds limit"));
+        }
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// The text inside an LZMA file: DE's export index.
 fn unlzma(bytes: &[u8]) -> Result<String> {
-    let mut out = Vec::new();
+    unlzma_limit(bytes, MAX_INDEX_BYTES)
+}
+
+fn unlzma_limit(bytes: &[u8], limit: usize) -> Result<String> {
+    let mut out = LimitedWriter { buf: Vec::new(), limit };
     lzma_rs::lzma_decompress(&mut std::io::Cursor::new(bytes), &mut out).map_err(|e| anyhow!("not LZMA: {e}"))?;
-    Ok(String::from_utf8(out)?)
+    Ok(String::from_utf8(out.buf)?)
+}
+
+/// Fetches a content-hashed manifest file into `path`, tracking the manifest name alongside it so
+/// a new hash in the index invalidates the cache immediately without sending the old URL's ETag.
+fn fetch_manifest_json(
+    url: &str,
+    manifest: &str,
+    path: &Path,
+    force: bool,
+    get: impl FnOnce(&str, &[(&str, &str)], Duration) -> Result<net::Response>,
+) -> Result<Value> {
+    let manifest_path = path.with_extension("manifest");
+    let cached_manifest = fs::read_to_string(&manifest_path).ok();
+    let changed = cached_manifest.as_deref().map(str::trim) != Some(manifest);
+    let mut updated = false;
+    let wrapped_get = |u: &str, headers: &[(&str, &str)], timeout: Duration| -> Result<net::Response> {
+        let resp = get(u, headers, timeout)?;
+        if (200..300).contains(&resp.status) {
+            updated = true;
+        }
+        Ok(resp)
+    };
+    let value = fetch_cached(url, path, force || changed, wrapped_get, |bytes| {
+        serde_json::from_slice(bytes).context("invalid JSON")
+    })?;
+    if updated {
+        if let Err(e) = config::write_atomic(&manifest_path, manifest.as_bytes()) {
+            eprintln!("could not save manifest name for {}: {e}", path.display());
+        }
+    }
+    Ok(value)
 }
 
 /// The foundry recipes of DE's own export: `[{uniqueName, resultType, buildPrice, num,
@@ -525,9 +582,21 @@ fn de_recipes(force: bool) -> Result<Vec<Value>> {
     // "ExportRecipes_en.json!00_oac+LCAtIyqDxZF8Qe1ZZA"
     let file = index
         .lines()
+        .map(str::trim)
         .find(|line| line.starts_with("ExportRecipes_en.json!"))
         .ok_or_else(|| anyhow!("DE's export index names no recipe file"))?;
-    let raw = download_to(&format!("{DE_FILES_URL}{}", file.trim()), &cache.join("de_ExportRecipes_en.json"), force)?;
+    if file.chars().any(|c| c.is_control() || c.is_whitespace() || matches!(c, '/' | '\\' | '?' | '#'))
+        || file.contains("..")
+    {
+        return Err(anyhow!("DE's export index named an invalid recipe file"));
+    }
+    let raw = fetch_manifest_json(
+        &format!("{DE_FILES_URL}{file}"),
+        file,
+        &cache.join("de_ExportRecipes_en.json"),
+        force,
+        net::get,
+    )?;
     match raw.get("ExportRecipes") {
         Some(Value::Array(list)) => Ok(list.clone()),
         _ => Err(anyhow!("DE's recipe export has an unexpected format")),
@@ -1627,5 +1696,63 @@ mod tests {
         assert_eq!(part.relics[0].relic, "Axi A1");
         assert!(!part.vaulted);
         assert_eq!(c.reward_names().get("Ash Prime Chassis Blueprint").map(String::as_str), Some(bp));
+    }
+
+    #[test]
+    fn hashed_manifest_refetches_when_hash_changes_without_stale_etag() {
+        let dir = std::env::temp_dir().join(format!("wfp-manifest-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("de_ExportRecipes_en.json");
+        let resp = |body: &str, etag: &str| {
+            Ok(net::Response { status: 200, etag: Some(etag.into()), body: body.as_bytes().to_vec() })
+        };
+
+        // First fetch populates cache, etag, and manifest sidecar.
+        let v1 = fetch_manifest_json("https://example/v1", "ExportRecipes_en.json!00_aaa", &path, false, |_, _, _| {
+            resp("{\"v\":1}", "\"etag-1\"")
+        })
+        .unwrap();
+        assert_eq!(v1["v"], 1);
+
+        // Same manifest within MAX_AGE serves directly from cache without calling get.
+        let cached =
+            fetch_manifest_json("https://example/v1", "ExportRecipes_en.json!00_aaa", &path, false, |_, _, _| {
+                panic!("same manifest should stay cached")
+            })
+            .unwrap();
+        assert_eq!(cached["v"], 1);
+
+        // Changed manifest forces a fresh fetch and must NOT send the old URL's If-None-Match.
+        let mut saw_etag = false;
+        let v2 = fetch_manifest_json("https://example/v2", "ExportRecipes_en.json!00_bbb", &path, false, |_, h, _| {
+            saw_etag = h.iter().any(|(k, _)| k.eq_ignore_ascii_case("if-none-match"));
+            resp("{\"v\":2}", "\"etag-2\"")
+        })
+        .unwrap();
+        assert!(!saw_etag, "must not send previous manifest's ETag to a new URL");
+        assert_eq!(v2["v"], 2);
+
+        // Offline after another manifest change falls back to v2 without overwriting the manifest.
+        let offline =
+            fetch_manifest_json("https://example/v3", "ExportRecipes_en.json!00_ccc", &path, false, |_, _, _| {
+                Err(anyhow!("offline"))
+            })
+            .unwrap();
+        assert_eq!(offline["v"], 2);
+        let v3 = fetch_manifest_json("https://example/v3", "ExportRecipes_en.json!00_ccc", &path, false, |_, _, _| {
+            resp("{\"v\":3}", "\"etag-3\"")
+        })
+        .unwrap();
+        assert_eq!(v3["v"], 3);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unlzma_enforces_size_limit() {
+        let mut compressed = Vec::new();
+        lzma_rs::lzma_compress(&mut std::io::Cursor::new(b"ExportRecipes_en.json!00_hash\n"), &mut compressed).unwrap();
+        assert!(unlzma_limit(&compressed, 100).is_ok());
+        assert!(unlzma_limit(&compressed, 10).is_err());
     }
 }

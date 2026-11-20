@@ -27,8 +27,15 @@ impl Rgb {
         Rgb { width: w as usize, height: h as usize, data: img.into_raw() }
     }
 
-    /// The pixels inside [x0, x1) x [y0, y1); the box must lie inside the image.
+    /// The pixels inside [x0, x1) x [y0, y1), clamped to the image bounds.
     pub fn crop(&self, x0: usize, y0: usize, x1: usize, y1: usize) -> Rgb {
+        let x0 = x0.min(self.width);
+        let y0 = y0.min(self.height);
+        let x1 = x1.min(self.width);
+        let y1 = y1.min(self.height);
+        if x1 <= x0 || y1 <= y0 {
+            return Rgb { width: 0, height: 0, data: Vec::new() };
+        }
         let (w, h) = (x1 - x0, y1 - y0);
         let mut data = Vec::with_capacity(w * h * 3);
         for y in y0..y1 {
@@ -104,6 +111,9 @@ impl Gray {
     /// Pillow's `resize((w, h))`, whose default filter is bicubic (a = -0.5): a horizontal pass
     /// into an 8-bit intermediate, then a vertical pass, both in 22-bit fixed point.
     pub fn resize_bicubic(&self, out_w: usize, out_h: usize) -> Gray {
+        if self.width == 0 || self.height == 0 || out_w == 0 || out_h == 0 {
+            return Gray { width: out_w, height: out_h, data: vec![0; out_w.saturating_mul(out_h)] };
+        }
         let need_h = out_w != self.width;
         let need_v = out_h != self.height;
         let (kh, bounds_h, ksize_h) = coefficients(self.width, out_w);
@@ -328,5 +338,18 @@ mod tests {
         let variants = reward_variants(&frame);
         assert!(variants[4].data.iter().any(|&pixel| pixel > 0));
         assert!(variants[5].data.contains(&255));
+    }
+
+    #[test]
+    fn resize_bicubic_handles_zero_dimensions() {
+        let empty = Gray { width: 0, height: 0, data: vec![] };
+        assert_eq!(empty.resize_bicubic(4, 4), Gray { width: 4, height: 4, data: vec![0; 16] });
+        let g = Gray { width: 3, height: 2, data: vec![1, 2, 3, 4, 5, 6] };
+        assert_eq!(g.resize_bicubic(0, 2), Gray { width: 0, height: 2, data: vec![] });
+        assert_eq!(g.resize_bicubic(3, 0), Gray { width: 3, height: 0, data: vec![] });
+        let tiny = Rgb { width: 1, height: 1, data: vec![10, 20, 30] };
+        assert_eq!(riven_frame(&tiny), Gray { width: 1, height: 1, data: vec![18] });
+        let variants = reward_variants(&tiny);
+        assert!(variants.iter().all(|v| v.width == 0 || v.height == 0));
     }
 }

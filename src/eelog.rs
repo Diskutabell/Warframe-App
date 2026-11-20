@@ -229,9 +229,70 @@ fn line_seconds(line: &str) -> Option<f64> {
 /// with another account, and everything after a login belongs to that account.
 fn scan_log(path: &Path, end: u64) -> (Vec<LogEvent>, Vec<u8>) {
     const MAX_BYTES: u64 = 64_000_000;
+    const HEAD_BYTES: u64 = 256 * 1024;
+    scan_log_with_cap(path, end, MAX_BYTES, HEAD_BYTES)
+}
+
+fn scan_log_with_cap(path: &Path, end: u64, max_bytes: u64, head_bytes: u64) -> (Vec<LogEvent>, Vec<u8>) {
     let mut events = Vec::new();
     let Ok(mut f) = fs::File::open(path) else { return (events, Vec::new()) };
-    let start = end.saturating_sub(MAX_BYTES);
+    let start = end.saturating_sub(max_bytes);
+    let mut player: Option<String> = None;
+    let mut badge = None;
+    let mut seen = std::collections::HashSet::new();
+    let mut started: Option<f64> = None;
+    let mut duviri = DuviriRoll::default();
+
+    let mut process_lines = |slice: &[u8], reset_duviri: bool| {
+        if reset_duviri {
+            duviri = DuviriRoll::default();
+        }
+        let text = String::from_utf8_lossy(slice);
+        for line in text.lines() {
+            if let Some(t) = log_start(line) {
+                started = Some(t);
+            }
+            if let Some(picks) = duviri.feed(line) {
+                let rolled = started.zip(line_seconds(line)).map(|(start, secs)| start + secs);
+                events.push(LogEvent::Duviri(DuviriOffers { picks, rolled }));
+            }
+            if let Some(n) = player_name(line) {
+                if player.as_deref() != Some(n.as_str()) {
+                    player = Some(n.clone());
+                    badge = None;
+                    events.push(LogEvent::Name(n, false));
+                }
+            }
+            if let Some(acc) = explicit_account(line) {
+                events.push(LogEvent::Account(acc, player.clone()));
+            }
+            if let Some(mr) = mastery_rank(line) {
+                // The squad overlay redraws the badge many times a session; one report is enough.
+                if badge != Some(mr) {
+                    badge = Some(mr);
+                    events.push(LogEvent::Mastery(mr.0, mr.1));
+                }
+            }
+            for (id, sure) in candidate_ids(line, player.as_deref()) {
+                if seen.insert(id.clone()) {
+                    events.push(LogEvent::Candidate(id, sure, tail(line.trim(), 200)));
+                }
+            }
+        }
+    };
+
+    // For logs larger than the tail window, read a small head prefix first so the session start
+    // timestamp (line 1) and initial login are not lost.
+    if start > 0 {
+        let head_len = head_bytes.min(start);
+        let mut head = Vec::new();
+        if (&f).take(head_len).read_to_end(&mut head).is_ok() {
+            if let Some(last) = head.iter().rposition(|b| *b == b'\n') {
+                process_lines(&head[..=last], false);
+            }
+        }
+    }
+
     if f.seek(SeekFrom::Start(start)).is_err() {
         return (events, Vec::new());
     }
@@ -241,45 +302,19 @@ fn scan_log(path: &Path, end: u64) -> (Vec<LogEvent>, Vec<u8>) {
     }
     let pending = match raw.iter().rposition(|b| *b == b'\n') {
         Some(last) => raw.split_off(last + 1),
-        None => std::mem::take(&mut raw),
+        None => return (events, if start == 0 { raw } else { Vec::new() }),
     };
-    let text = String::from_utf8_lossy(&raw);
-    let mut player: Option<String> = None;
-    let mut badge = None;
-    let mut seen = std::collections::HashSet::new();
-    let mut started: Option<f64> = None;
-    let mut duviri = DuviriRoll::default();
-    for line in text.lines() {
-        if let Some(t) = log_start(line) {
-            started = Some(t);
+    let tail_slice = if start > 0 {
+        // Skip the first partial line when seeking into the middle of the file.
+        match raw.iter().position(|b| *b == b'\n') {
+            Some(first) => &raw[first + 1..],
+            None => &[],
         }
-        if let Some(picks) = duviri.feed(line) {
-            let rolled = started.zip(line_seconds(line)).map(|(start, secs)| start + secs);
-            events.push(LogEvent::Duviri(DuviriOffers { picks, rolled }));
-        }
-        if let Some(n) = player_name(line) {
-            if player.as_deref() != Some(n.as_str()) {
-                player = Some(n.clone());
-                badge = None;
-                events.push(LogEvent::Name(n, false));
-            }
-        }
-        if let Some(acc) = explicit_account(line) {
-            events.push(LogEvent::Account(acc, player.clone()));
-        }
-        if let Some(mr) = mastery_rank(line) {
-            // The squad overlay redraws the badge many times a session; one report is enough.
-            if badge != Some(mr) {
-                badge = Some(mr);
-                events.push(LogEvent::Mastery(mr.0, mr.1));
-            }
-        }
-        for (id, sure) in candidate_ids(line, player.as_deref()) {
-            if seen.insert(id.clone()) {
-                events.push(LogEvent::Candidate(id, sure, tail(line.trim(), 200)));
-            }
-        }
-    }
+    } else {
+        &raw[..]
+    };
+    // Any half-finished Duviri block at the head boundary belongs before the skipped gap.
+    process_lines(tail_slice, start > 0);
     (events, pending)
 }
 
@@ -400,7 +435,16 @@ struct Found {
 
 static FOUND: Mutex<Found> = Mutex::new(Found { checked: f64::NEG_INFINITY, path: None, searching: false });
 
+struct SearchGuard;
+
+impl Drop for SearchGuard {
+    fn drop(&mut self) {
+        FOUND.lock().unwrap_or_else(|e| e.into_inner()).searching = false;
+    }
+}
+
 fn search() {
+    let _guard = SearchGuard;
     let newest = candidate_paths()
         .into_iter()
         .filter_map(|p| fs::metadata(&p).ok().filter(|m| m.is_file()).and_then(|m| Some((m.modified().ok()?, p))))
@@ -409,7 +453,6 @@ fn search() {
     let mut f = FOUND.lock().unwrap_or_else(|e| e.into_inner());
     f.path = newest;
     f.checked = now();
-    f.searching = false;
 }
 
 /// How often the disk is searched again: every minute while no log is known, and every ten once
@@ -425,7 +468,10 @@ pub fn find_ee_log() -> Option<PathBuf> {
     let again = if f.path.as_ref().is_some_and(|p| p.is_file()) { SEARCH_AGAIN_FOUND } else { SEARCH_AGAIN_MISSING };
     if now() - f.checked > again && !f.searching {
         f.searching = true;
-        std::thread::Builder::new().name("find-eelog".into()).spawn(search).ok();
+        if let Err(e) = std::thread::Builder::new().name("find-eelog".into()).spawn(search) {
+            f.searching = false;
+            eprintln!("could not start EE.log search: {e}");
+        }
     }
     f.path.clone()
 }
@@ -926,5 +972,34 @@ mod tests {
         assert_eq!(mastery_rank(&mine.replace("Rank0", "Rank16to18")), Some((16, Some(18))));
         let squadmate = mine.replace("Ready1", "Ready2").replace("Rank0", "Rank13to15");
         assert_eq!(mastery_rank(&squadmate), None, "slots 2-4 are squadmates");
+    }
+
+    #[test]
+    fn large_log_replay_preserves_header_and_initial_login() {
+        let id = "5f1e2d3c4b5a69788796a5b4";
+        let mut log = String::from(
+            "0.072 Sys [Diag]: Current time: Tue Nov 10 00:07:35 2026 [UTC: Tue Nov 10 00:07:35 2026]\n\
+             14.454 Sys [Info]: Logged in Tenno\n",
+        );
+        // Filler larger than the tail window so the seek lands inside the filler.
+        for i in 0..80 {
+            log.push_str(&format!("{i}.000 Sys [Info]: ordinary mission log line padding padding padding\n"));
+        }
+        log.push_str(&format!(
+            "900.000 Script [Info]: MapRedux.lua: RollDuviriOffers - Generating new Duviri offers\n\
+             900.001 Script [Info]: MapRedux.lua: /Lotus/Powersuits/Paladin/Paladin generated as an owned Cave selection for category: 3\n\
+             900.002 Script [Info]: MapRedux.lua: RollDuviriOffers - Duviri Seed: 99\n\
+             910.000 Net [Info]: Race started for Tenno\u{e000} {id}\n"
+        ));
+        let path = std::env::temp_dir().join(format!("wfp-eelog-large-{}.log", std::process::id()));
+        fs::write(&path, &log).unwrap();
+        let (events, pending) = scan_log_with_cap(&path, log.len() as u64, 1024, 512);
+        let _ = fs::remove_file(&path);
+        assert!(pending.is_empty());
+        assert!(events.iter().any(|e| matches!(e, LogEvent::Name(n, false) if n == "Tenno")));
+        let duviri = events.iter().find_map(|e| if let LogEvent::Duviri(d) = e { Some(d) } else { None }).unwrap();
+        let expected_time = clock::parse_iso("2026-11-10T00:07:35Z").unwrap() + 900.002;
+        assert!((duviri.rolled.unwrap() - expected_time).abs() < 0.001);
+        assert!(events.iter().any(|e| matches!(e, LogEvent::Candidate(got, true, _) if got == id)));
     }
 }

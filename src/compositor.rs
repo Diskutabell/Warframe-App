@@ -192,13 +192,75 @@ pub fn monitors() -> Vec<Monitor> {
 
 // ------------------------------------------------------------------ hotkeys
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mod {
+    Super,
+    Ctrl,
+    Alt,
+    Shift,
+}
+
+impl Mod {
+    fn parse(token: &str) -> Option<Mod> {
+        match token.to_ascii_uppercase().as_str() {
+            "SUPER" | "WIN" | "WINDOWS" | "META" | "MOD4" => Some(Mod::Super),
+            "CTRL" | "CONTROL" => Some(Mod::Ctrl),
+            "ALT" | "MOD1" => Some(Mod::Alt),
+            "SHIFT" => Some(Mod::Shift),
+            _ => None,
+        }
+    }
+
+    fn hypr(self) -> &'static str {
+        match self {
+            Mod::Super => "SUPER",
+            Mod::Ctrl => "CTRL",
+            Mod::Alt => "ALT",
+            Mod::Shift => "SHIFT",
+        }
+    }
+
+    fn sway(self) -> &'static str {
+        match self {
+            Mod::Super => "Mod4",
+            Mod::Ctrl => "Ctrl",
+            Mod::Alt => "Alt",
+            Mod::Shift => "Shift",
+        }
+    }
+}
+
+/// Splits a hotkey like `"SUPER + shift + F9"` into `(modifiers, key)`.
+fn parse_hotkey(raw: &str) -> Option<(Vec<Mod>, String)> {
+    let mut mods = Vec::new();
+    let mut key: Option<String> = None;
+    for part in raw.split(['+', ' ']).map(str::trim).filter(|p| !p.is_empty()) {
+        if let Some(m) = Mod::parse(part) {
+            if !mods.contains(&m) {
+                mods.push(m);
+            }
+        } else if key.is_some() {
+            return None;
+        } else {
+            key = Some(part.to_string());
+        }
+    }
+    key.map(|k| (mods, k))
+}
+
 /// A key the compositor config can bind: letters, digits, '_', '+', '-' and spaces only.
 ///
 /// The value ends up inside a compositor config file, which runs commands; anything else
 /// (quotes, commas, newlines) could turn a key name into a config line of its own.
 pub fn validate_key(key: &str) -> Result<()> {
-    let ok = key.len() <= 40 && key.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '-' | ' '));
-    if ok { Ok(()) } else { Err(UserError::new(format!("\"{key}\" is not a key name a compositor can bind.")).into()) }
+    let chars_ok =
+        key.len() <= 40 && key.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '-' | ' '));
+    let shape_ok = key.trim().is_empty() || parse_hotkey(key).is_some();
+    if chars_ok && shape_ok {
+        Ok(())
+    } else {
+        Err(UserError::new(format!("\"{key}\" is not a key name a compositor can bind.")).into())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -281,12 +343,37 @@ pub fn float_main_window() -> Result<()> {
 pub fn hotkey_lines(flavour: Option<Flavour>, port: u16, keys: &[(&str, &str)]) -> Vec<String> {
     let cmd = |p: &str| format!("curl -s -X POST http://127.0.0.1:{port}/api/{p}");
     keys.iter()
-        .filter(|(k, _)| !k.trim().is_empty() && validate_key(k).is_ok())
-        .map(|(k, p)| match flavour {
-            Some(Flavour::HyprlandLua) => format!("hl.bind(\"{k}\", hl.dsp.exec_cmd(\"{}\"))", cmd(p)),
-            Some(Flavour::Hyprland) => format!("bind = , {k}, exec, {}", cmd(p)),
-            Some(Flavour::Sway) => format!("bindsym {k} exec {}", cmd(p)),
-            None => format!("{k} -> {}", cmd(p)),
+        .filter_map(|(k, p)| {
+            if k.trim().is_empty() || validate_key(k).is_err() {
+                return None;
+            }
+            let (mods, key) = parse_hotkey(k)?;
+            let line = match flavour {
+                Some(Flavour::HyprlandLua) => {
+                    let combo = if mods.is_empty() {
+                        key
+                    } else {
+                        let m: Vec<&str> = mods.iter().map(|m| m.hypr()).collect();
+                        format!("{}+{key}", m.join("+"))
+                    };
+                    format!("hl.bind(\"{combo}\", hl.dsp.exec_cmd(\"{}\"))", cmd(p))
+                }
+                Some(Flavour::Hyprland) => {
+                    let m: Vec<&str> = mods.iter().map(|m| m.hypr()).collect();
+                    format!("bind = {}, {key}, exec, {}", m.join(" "), cmd(p))
+                }
+                Some(Flavour::Sway) => {
+                    let combo = if mods.is_empty() {
+                        key
+                    } else {
+                        let m: Vec<&str> = mods.iter().map(|m| m.sway()).collect();
+                        format!("{}+{key}", m.join("+"))
+                    };
+                    format!("bindsym {combo} exec {}", cmd(p))
+                }
+                None => format!("{k} -> {}", cmd(p)),
+            };
+            Some(line)
         })
         .collect()
 }
@@ -360,7 +447,10 @@ pub fn install_hotkeys(flavour: Option<Flavour>, lines: &[String]) -> Result<Ins
                 return Err(UserError::new(format!("Could not find {}.", main.display())).into());
             }
             let target = if dir.join(sub).is_dir() { dir.join(sub) } else { dir.clone() }.join("warframeproject.conf");
-            fs::write(&target, format!("# Written by warframeproject. Safe to delete.\n{}\n", lines.join("\n")))?;
+            crate::config::write_atomic(
+                &target,
+                format!("# Written by warframeproject. Safe to delete.\n{}\n", lines.join("\n")).as_bytes(),
+            )?;
             let include = if f == Flavour::Hyprland {
                 format!("source = {}", target.display())
             } else {
@@ -369,7 +459,10 @@ pub fn install_hotkeys(flavour: Option<Flavour>, lines: &[String]) -> Result<Ins
             let text = fs::read_to_string(&main)?;
             let added = !text.contains(&target.display().to_string());
             if added {
-                fs::write(&main, format!("{}\n\n# warframeproject hotkeys\n{include}\n", text.trim_end_matches('\n')))?;
+                crate::config::write_atomic(
+                    &main,
+                    format!("{}\n\n# warframeproject hotkeys\n{include}\n", text.trim_end_matches('\n')).as_bytes(),
+                )?;
             }
             reload(reload_cmd)?;
             Ok(Installed { file: target, sourced: added })
@@ -390,6 +483,8 @@ mod tests {
         assert!(validate_key("F9\"), os.execute(\"rm").is_err());
         assert!(validate_key("F9\nexec-once = x").is_err());
         assert!(validate_key("F9, exec, x").is_err());
+        assert!(validate_key("SUPER").is_err());
+        assert!(validate_key("F9 + F10").is_err());
     }
 
     #[test]
@@ -400,8 +495,35 @@ mod tests {
             ["hl.bind(\"F9\", hl.dsp.exec_cmd(\"curl -s -X POST http://127.0.0.1:8642/api/rewards/scan\"))"]
         );
         assert_eq!(
+            hotkey_lines(Some(Flavour::Hyprland), 8642, &keys),
+            ["bind = , F9, exec, curl -s -X POST http://127.0.0.1:8642/api/rewards/scan"]
+        );
+        assert_eq!(
             hotkey_lines(Some(Flavour::Sway), 1, &keys),
             ["bindsym F9 exec curl -s -X POST http://127.0.0.1:1/api/rewards/scan"]
+        );
+
+        let modded = [("SUPER + F9", "rewards/scan"), ("ctrl + shift + F10", "riven/scan")];
+        assert_eq!(
+            hotkey_lines(Some(Flavour::Hyprland), 8642, &modded),
+            [
+                "bind = SUPER, F9, exec, curl -s -X POST http://127.0.0.1:8642/api/rewards/scan",
+                "bind = CTRL SHIFT, F10, exec, curl -s -X POST http://127.0.0.1:8642/api/riven/scan",
+            ]
+        );
+        assert_eq!(
+            hotkey_lines(Some(Flavour::Sway), 8642, &modded),
+            [
+                "bindsym Mod4+F9 exec curl -s -X POST http://127.0.0.1:8642/api/rewards/scan",
+                "bindsym Ctrl+Shift+F10 exec curl -s -X POST http://127.0.0.1:8642/api/riven/scan",
+            ]
+        );
+        assert_eq!(
+            hotkey_lines(Some(Flavour::HyprlandLua), 8642, &modded),
+            [
+                "hl.bind(\"SUPER+F9\", hl.dsp.exec_cmd(\"curl -s -X POST http://127.0.0.1:8642/api/rewards/scan\"))",
+                "hl.bind(\"CTRL+SHIFT+F10\", hl.dsp.exec_cmd(\"curl -s -X POST http://127.0.0.1:8642/api/riven/scan\"))",
+            ]
         );
     }
 

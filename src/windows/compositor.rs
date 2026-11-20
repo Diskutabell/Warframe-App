@@ -185,11 +185,22 @@ pub fn capture() -> Result<Rgb> {
     if w <= 0 || h <= 0 {
         bail!("no monitor to take a screenshot of");
     }
-    // SAFETY: the usual GDI sequence. Every object made here is released before returning, and
-    // `bits` points at w * h * 4 bytes owned by the DIB section until DeleteObject.
+    let (w_usize, h_usize) = (usize::try_from(w)?, usize::try_from(h)?);
+    let pixels = w_usize.checked_mul(h_usize).ok_or_else(|| anyhow::anyhow!("capture size overflow"))?;
+    let bgra_len = pixels.checked_mul(4).ok_or_else(|| anyhow::anyhow!("capture size overflow"))?;
+    let rgb_len = pixels.checked_mul(3).ok_or_else(|| anyhow::anyhow!("capture size overflow"))?;
+    // SAFETY: the usual GDI sequence. Every non-null handle created here is released before
+    // returning, and `bits` points at `bgra_len` bytes owned by the DIB section until DeleteObject.
     unsafe {
         let screen = GetDC(std::ptr::null_mut());
+        if screen.is_null() {
+            bail!("could not open the screen device context");
+        }
         let dc = CreateCompatibleDC(screen);
+        if dc.is_null() {
+            ReleaseDC(std::ptr::null_mut(), screen);
+            bail!("could not create a compatible device context");
+        }
         let mut info: BITMAPINFO = std::mem::zeroed();
         info.bmiHeader = BITMAPINFOHEADER {
             biSize: size_of::<BITMAPINFOHEADER>() as u32,
@@ -202,20 +213,24 @@ pub fn capture() -> Result<Rgb> {
         };
         let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
         let bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
-        let ok = !bitmap.is_null() && {
+        let ok = !bitmap.is_null() && !bits.is_null() && {
             let old = SelectObject(dc, bitmap);
-            let copied = BitBlt(dc, 0, 0, w, h, screen, m.x, m.y, SRCCOPY | CAPTUREBLT) != 0;
-            SelectObject(dc, old);
-            copied
+            if old.is_null() {
+                false
+            } else {
+                let copied = BitBlt(dc, 0, 0, w, h, screen, m.x, m.y, SRCCOPY | CAPTUREBLT) != 0;
+                SelectObject(dc, old);
+                copied
+            }
         };
         let result = if ok {
             // GDI hands out BGRA; the OCR wants RGB.
-            let bgra = std::slice::from_raw_parts(bits as *const u8, (w * h * 4) as usize);
-            let mut rgb = Vec::with_capacity((w * h * 3) as usize);
+            let bgra = std::slice::from_raw_parts(bits as *const u8, bgra_len);
+            let mut rgb = Vec::with_capacity(rgb_len);
             for px in bgra.chunks_exact(4) {
                 rgb.extend_from_slice(&[px[2], px[1], px[0]]);
             }
-            Ok(Rgb { width: w as usize, height: h as usize, data: rgb })
+            Ok(Rgb { width: w_usize, height: h_usize, data: rgb })
         } else {
             Err(anyhow::anyhow!("the screen could not be copied"))
         };

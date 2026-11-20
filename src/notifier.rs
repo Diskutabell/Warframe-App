@@ -7,15 +7,27 @@ use std::collections::HashSet;
 use crate::compositor::which;
 use crate::{clock, now, world};
 
+/// Arguments passed to `notify-send`: `--` keeps titles or bodies beginning with `-` from being
+/// parsed as options.
+#[cfg(unix)]
+fn notify_send_args<'a>(title: &'a str, body: &'a str) -> [&'a str; 7] {
+    ["-a", "warframeproject", "-t", "15000", "--", title, body]
+}
+
 /// Shows a desktop notification through `notify-send`, if it is installed.
 #[cfg(unix)]
 pub fn send(title: &str, body: &str) {
-    if which("notify-send").is_some() {
-        let _ = std::process::Command::new("notify-send")
-            .args(["-a", "warframeproject", "-t", "15000", title, body])
-            .stdin(std::process::Stdio::null())
-            .spawn();
+    if which("notify-send").is_none() {
+        return;
     }
+    let (title, body) = (title.to_string(), body.to_string());
+    // Wait on a background thread so notify-send is always reaped instead of leaking zombies,
+    // without blocking the caller if the notification daemon is slow.
+    let _ = std::thread::Builder::new().name("notify".into()).spawn(move || {
+        let mut cmd = std::process::Command::new("notify-send");
+        cmd.args(notify_send_args(&title, &body));
+        let _ = crate::process::run(&mut cmd, None, std::time::Duration::from_secs(5));
+    });
 }
 
 /// Shows a Windows toast notification.
@@ -49,7 +61,11 @@ impl Notifier {
         if watch.is_empty() {
             return;
         }
-        let (fissures, _) = world::fissures(platform);
+        let (fissures, err) = world::fissures(platform);
+        if err.is_none() {
+            let active: HashSet<&str> = fissures.iter().filter_map(|f| f["id"].as_str()).collect();
+            self.fissures.retain(|id| active.contains(id.as_str()));
+        }
         for f in fissures {
             let id = f["id"].as_str().unwrap_or_default().to_string();
             if id.is_empty() || !watch.contains(&world::watch_key(&f)) || !self.fissures.insert(id) {
@@ -90,10 +106,37 @@ impl Notifier {
     }
 
     pub fn foundry(&mut self, done: &[Build]) {
+        let active: HashSet<String> = done.iter().map(|(uid, _, at)| format!("{uid}@{at}")).collect();
+        self.foundry.retain(|k| active.contains(k));
         for (uid, name, at) in done {
             if *at <= now() && self.foundry.insert(format!("{uid}@{at}")) {
                 send("Foundry", &format!("{name} is ready to claim"));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn notify_send_uses_option_terminator() {
+        assert_eq!(
+            notify_send_args("-urgent", "-body"),
+            ["-a", "warframeproject", "-t", "15000", "--", "-urgent", "-body"]
+        );
+    }
+
+    #[test]
+    fn foundry_prunes_claimed_builds() {
+        let mut n = Notifier::default();
+        let future = now() + 3600.0;
+        n.foundry.insert("old@1".into());
+        n.foundry.insert(format!("keep@{future}"));
+        n.foundry(&[("keep".into(), "Ash".into(), future)]);
+        assert!(!n.foundry.contains("old@1"));
+        assert!(n.foundry.contains(&format!("keep@{future}")));
     }
 }

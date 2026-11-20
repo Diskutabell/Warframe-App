@@ -105,7 +105,8 @@ fn variant(uid: &str) -> bool {
 
 /// Copies an arcane of rank `rank` was fused from: 1, 3, 6, 10, 15, 21.
 pub fn arcane_copies(rank: i64) -> i64 {
-    let r = rank.max(0);
+    // Real arcanes top out at rank 5; clamping guards against i64 overflow on malformed fingerprints.
+    let r = rank.clamp(0, 100);
     (r + 1) * (r + 2) / 2
 }
 
@@ -750,6 +751,8 @@ mod tests {
         assert_eq!(state(&view(Some(old), &[]), FIBER), "missing: Not owned");
         assert_eq!(arcane_copies(5), 21);
         assert_eq!(arcane_copies(3), 10);
+        assert_eq!(arcane_copies(-5), 1);
+        assert_eq!(arcane_copies(i64::MAX), 5151);
         assert_eq!(arcane_rank(0, 5), None);
         assert_eq!(arcane_rank(20, 5), Some(4));
         assert_eq!(arcane_rank(500, 5), Some(5));

@@ -313,6 +313,15 @@ impl View {
     /// parts and relics, the game's export for the rest, and the uid's last word when neither
     /// knows it.
     fn inventory_entry(&self, uid: &str) -> (String, String, Option<String>) {
+        self.inventory_entry_inner(uid, &mut [""; 4], 0)
+    }
+
+    fn inventory_entry_inner<'a>(
+        &'a self,
+        uid: &'a str,
+        seen: &mut [&'a str; 4],
+        depth: usize,
+    ) -> (String, String, Option<String>) {
         let export = self.cat.inventory.get(uid);
         // Resources only: WFCD's mod pictures are not on its image host.
         let resource = export.filter(|e| matches!(e.kind, "Resources" | "Gems and ores" | "Fish"));
@@ -344,12 +353,17 @@ impl View {
             return (format!("{base} {refinement}"), "Relics".to_string(), pic);
         }
         if let Some(e) = export {
-            let name = e
-                .name
-                .clone()
-                .or_else(|| e.result.as_deref().map(|r| format!("{} Blueprint", self.inventory_entry(r).0)));
+            let resolved = if depth < seen.len() && (e.name.is_none() || icon.is_none()) {
+                e.result.as_deref().filter(|&r| r != uid && !seen[..depth].contains(&r)).map(|r| {
+                    seen[depth] = uid;
+                    self.inventory_entry_inner(r, seen, depth + 1)
+                })
+            } else {
+                None
+            };
+            let name = e.name.clone().or_else(|| resolved.as_ref().map(|(n, _, _)| format!("{n} Blueprint")));
             if let Some(name) = name {
-                let pic = icon.or_else(|| e.result.as_deref().and_then(|r| self.inventory_entry(r).2));
+                let pic = icon.or_else(|| resolved.and_then(|(_, _, p)| p));
                 return (name, e.kind.to_string(), pic);
             }
         }
@@ -1146,5 +1160,58 @@ mod tests {
         assert_eq!(match_rank("Ash", "ash", &["ash"]), Some(0));
         assert_eq!(match_rank("Trash Prime", "ash", &["ash"]), Some(3));
         assert_eq!(match_rank("Braton", "ash", &["ash"]), None);
+    }
+
+    #[test]
+    fn cyclic_recipes_do_not_overflow_stack() {
+        let mut cat = Catalog::default();
+        cat.inventory.insert(
+            "/SelfBp".into(),
+            crate::inventory::Entry {
+                name: None,
+                icon: None,
+                kind: "Blueprints",
+                result: Some("/SelfBp".into()),
+                rarity: None,
+                rank: None,
+                hidden: false,
+            },
+        );
+        cat.inventory.insert(
+            "/CycleA".into(),
+            crate::inventory::Entry {
+                name: None,
+                icon: None,
+                kind: "Blueprints",
+                result: Some("/CycleB".into()),
+                rarity: None,
+                rank: None,
+                hidden: false,
+            },
+        );
+        cat.inventory.insert(
+            "/CycleB".into(),
+            crate::inventory::Entry {
+                name: None,
+                icon: None,
+                kind: "Blueprints",
+                result: Some("/CycleA".into()),
+                rarity: None,
+                rank: None,
+                hidden: false,
+            },
+        );
+        let view = View {
+            cat: Arc::new(cat),
+            profile: None,
+            inv: None,
+            manual: Arc::new(Manual::default()),
+            market: Market::new(Arc::new(std::sync::RwLock::new(crate::config::Settings::default()))),
+            foundry: HashSet::new(),
+        };
+        let (self_name, _, _) = view.inventory_entry("/SelfBp");
+        assert!(!self_name.is_empty());
+        let (cycle_name, _, _) = view.inventory_entry("/CycleA");
+        assert!(cycle_name.ends_with("Blueprint"));
     }
 }

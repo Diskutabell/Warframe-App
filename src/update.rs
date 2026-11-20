@@ -10,21 +10,35 @@ use crate::net;
 
 /// The newest published release. GitHub never counts drafts or pre-releases as "latest".
 const LATEST: &str = "https://api.github.com/repos/Diskutabell/Warframe-App/releases/latest";
+const REPO_URL: &str = "https://github.com/Diskutabell/Warframe-App/";
 
-/// "v0.10.2" -> [0, 10, 2]. Whatever follows a '-' or '+' is not compared.
-fn numbers(version: &str) -> Option<Vec<u64>> {
-    let core = version.trim().trim_start_matches(['v', 'V']);
-    let core = core.split(['-', '+']).next()?;
-    core.split('.').map(|n| n.parse().ok()).collect()
+/// "v0.10.2-rc1" -> ([0, 10, 2], Some("rc1")). Build metadata after '+' is ignored.
+fn parse_version(version: &str) -> Option<(Vec<u64>, Option<&str>)> {
+    let trimmed = version.trim().trim_start_matches(['v', 'V']);
+    let without_build = trimmed.split('+').next()?;
+    let (core, pre) = match without_build.split_once('-') {
+        Some((c, p)) => (c, Some(p)),
+        None => (without_build, None),
+    };
+    let nums: Vec<u64> = core.split('.').map(|n| n.parse().ok()).collect::<Option<_>>()?;
+    (!nums.is_empty()).then_some((nums, pre))
 }
 
 /// Whether `latest` is a later version than `running`; false when either cannot be read.
 pub fn is_newer(latest: &str, running: &str) -> bool {
-    match (numbers(latest), numbers(running)) {
-        // Vectors compare number by number: [0, 10, 0] > [0, 9, 3].
-        (Some(latest), Some(running)) => latest > running,
-        _ => false,
+    let (Some((l_nums, l_pre)), Some((r_nums, r_pre))) = (parse_version(latest), parse_version(running)) else {
+        return false;
+    };
+    let len = l_nums.len().max(r_nums.len());
+    for i in 0..len {
+        let l = l_nums.get(i).copied().unwrap_or(0);
+        let r = r_nums.get(i).copied().unwrap_or(0);
+        if l != r {
+            return l > r;
+        }
     }
+    // Same numeric version: a final release is newer than a pre-release.
+    l_pre.is_none() && r_pre.is_some()
 }
 
 /// The latest release, when it is newer than this build: `{version, current, name, url, notes,
@@ -37,10 +51,13 @@ pub fn check() -> Result<Option<Value>> {
 /// What the popup needs from GitHub's answer, if its release is newer than `running`.
 fn newer_release(release: &Value, running: &str) -> Option<Value> {
     let tag = release["tag_name"].as_str().unwrap_or("");
+    let url = release["html_url"]
+        .as_str()
+        .filter(|u| u.starts_with(REPO_URL) && !u.chars().any(|c| c.is_control() || c.is_whitespace()));
     is_newer(tag, running).then(|| {
         json!({
             "version": tag.trim_start_matches(['v', 'V']), "current": running,
-            "name": release["name"], "url": release["html_url"], "notes": release["body"],
+            "name": release["name"], "url": url, "notes": release["body"],
             "published": release["published_at"],
         })
     })
@@ -57,7 +74,10 @@ mod tests {
         assert!(is_newer("v1.0", "0.99.99"));
         assert!(is_newer("0.8.1", "0.8.0"));
         assert!(!is_newer("v0.8.0", "0.8.0"));
+        assert!(!is_newer("0.9.0", "0.9"), "shorter versions zero-pad when comparing");
+        assert!(!is_newer("0.9", "0.9.0"));
         assert!(!is_newer("0.7.9", "0.8.0"), "an older release is no update");
+        assert!(is_newer("0.9.0", "0.9.0-rc1"), "final release is newer than pre-release");
         assert!(!is_newer("v0.9.0-rc1", "0.9.0"));
         assert!(!is_newer("", "0.8.0"));
         assert!(!is_newer("nightly", "0.8.0"));
@@ -75,5 +95,8 @@ mod tests {
         assert_eq!(found["notes"], release["body"]);
         assert_eq!(newer_release(&release, "0.9.0"), None);
         assert_eq!(newer_release(&json!({"message": "API rate limit exceeded"}), "0.8.0"), None);
+
+        let untrusted = json!({"tag_name": "v0.9.0", "html_url": "https://evil.example/releases/v0.9.0"});
+        assert!(newer_release(&untrusted, "0.8.0").unwrap()["url"].is_null());
     }
 }

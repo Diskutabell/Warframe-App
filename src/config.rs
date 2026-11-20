@@ -4,6 +4,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
@@ -69,7 +70,7 @@ pub fn settings_file() -> PathBuf {
     dirs().config.join("settings.json")
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Platform {
     #[default]
@@ -262,13 +263,27 @@ pub fn write_json_pretty<T: Serialize + ?Sized>(path: &Path, value: &T) -> Resul
 }
 
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
+    tmp.push(format!(".{}-{n}.tmp", std::process::id()));
     let tmp = PathBuf::from(tmp);
-    let mut file = fs::File::create(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
+    let write_res = (|| -> Result<()> {
+        let mut file = fs::File::create(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        // Drop the file handle before renaming so Windows scanners do not contend with rename.
+        drop(file);
+        Ok(())
+    })();
+    if let Err(e) = write_res {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display())) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
     Ok(())
 }
 
@@ -303,5 +318,27 @@ mod tests {
         assert!(s.patched(&json!({"hotkey_rewards": "F9\nexec-once = rm -rf ~"})).is_err());
         let ok = s.patched(&json!({"overlay_seconds": 20, "unknown": 1})).unwrap();
         assert_eq!(ok.overlay_seconds, 20);
+    }
+
+    #[test]
+    fn write_atomic_handles_concurrent_writers_without_leaving_temp_files() {
+        let dir = std::env::temp_dir().join(format!("wfp-atomic-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("data.json");
+        std::thread::scope(|s| {
+            for i in 0..8 {
+                let target = target.clone();
+                s.spawn(move || {
+                    for j in 0..10 {
+                        write_atomic(&target, format!("{{\"t\":{i},\"n\":{j}}}").as_bytes()).unwrap();
+                    }
+                });
+            }
+        });
+        let final_text = fs::read_to_string(&target).unwrap();
+        assert!(serde_json::from_str::<serde_json::Value>(&final_text).is_ok());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "no stale .tmp files left behind");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

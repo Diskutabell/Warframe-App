@@ -197,9 +197,17 @@ impl std::fmt::Display for ProfileRefused {
 
 impl std::error::Error for ProfileRefused {}
 
+/// Whether `id` is a Warframe account id (Mongo ObjectId: 24 lowercase hex characters).
+pub fn valid_account_id(id: &str) -> bool {
+    id.len() == 24 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 /// Fetches the public profile. The caller enforces the cooldown: DE temporarily IP-blocks game
 /// login for clients that query profiles too often.
 pub fn fetch_profile(account_id: &str, platform: Platform) -> Result<Profile> {
+    if !valid_account_id(account_id) {
+        return Err(UserError::new("The account id is not valid. Check it in Settings.").into());
+    }
     let url = format!("{}/cdn/getProfileViewingData.php?playerId={account_id}", profile_host(platform));
     let resp = net::get(&url, &[("Accept", "application/json")], Duration::from_secs(20))
         .map_err(|e| UserError::new(format!("Could not reach DE's profile service: {e}")))?;
@@ -264,7 +272,12 @@ pub fn parse_profile(data: &Value) -> Result<Profile> {
         .find(|v| !v.is_null())
         .and_then(Value::as_i64);
     // {"$oid": "..."} in DE's answer; a plain string in files other tools wrote.
-    let id = res.get("AccountId").map(|v| v.get("$oid").unwrap_or(v)).and_then(Value::as_str).map(str::to_owned);
+    let id = res
+        .get("AccountId")
+        .map(|v| v.get("$oid").unwrap_or(v))
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| valid_account_id(s));
     Ok(Profile {
         name,
         id,
@@ -471,6 +484,23 @@ mod tests {
         assert_eq!(p.name.as_deref(), Some("Tenno\u{e000}"));
         assert_eq!(p.mastery_rank, None);
         assert!(parse_profile(&json!({"Results": [{}]})).is_err());
+    }
+
+    #[test]
+    fn profile_validates_account_id() {
+        let valid = parse_profile(&json!({"Results": [{
+            "AccountId": {"$oid": "5F1E2D3C4B5A69788796A5B4"},
+            "LoadOutInventory": {"XPInfo": [{"ItemType": "/A", "XP": 1}]}
+        }]}))
+        .unwrap();
+        assert_eq!(valid.id.as_deref(), Some("5f1e2d3c4b5a69788796a5b4"));
+
+        let bad = parse_profile(&json!({"Results": [{
+            "AccountId": {"$oid": "5f1e2d3c&evil=1"},
+            "LoadOutInventory": {"XPInfo": [{"ItemType": "/A", "XP": 1}]}
+        }]}))
+        .unwrap();
+        assert_eq!(bad.id, None);
     }
 
     #[test]
