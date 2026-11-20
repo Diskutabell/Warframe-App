@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.5 - 2026-11-20
+
+### Added
+
+- **Minimize to system tray.** Enable *Minimize to system tray* under Settings → Tray and hotkeys
+  so closing the window (or clicking *Hide to tray* in the sidebar) hides the app to your status
+  bar / system tray instead of quitting. Works via native D-Bus `StatusNotifierItem` + `DBusMenu`
+  on Linux (Quickshell, Waybar, KDE Plasma, GNOME AppIndicator) and `Shell_NotifyIconW` on Windows.
+  Left-click toggles the window; right-click opens a menu with Show/Hide, Scan reward screen, Grade
+  riven, and Quit.
+- **Window toggle hotkey (`F8` by default).** Configure *Show or hide the window* under Settings →
+  Tray and hotkeys (and press *Install hotkeys* / *Register hotkeys*) to minimize or bring the
+  window back from anywhere, including `warframeproject toggle` from the CLI or
+  `POST /api/window/toggle`.
+
 ## 0.9.4 - 2026-11-20
 
 ### Changed
