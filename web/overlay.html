@@ -64,7 +64,7 @@
 <body>
 <div id="root"></div>
 <script>
-  const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
   const root = document.getElementById("root");
 
   // `boxes`: x, y, width, height of each panel in this window, one per card (one for a message).
@@ -72,6 +72,7 @@
 
   function rewards(r, boxes) {
     if (!r.items.length) {
+      if (!boxes.length) return "";
       return `<div class="slot" style="${at(boxes[0])}"><div class="name">Reward scan</div>
         <div class="err">${esc(r.error || "No reward names recognized.")}</div></div>`;
     }
@@ -94,7 +95,7 @@
     return slots.join("");
   }
 
-  const gradeClass = (g) => (g[0] === "A" ? "a" : g[0] === "B" ? "b" : "c");
+  const gradeClass = (g) => (g?.[0] === "A" ? "a" : g?.[0] === "B" ? "b" : "c");
   const UNITS = { "Punch Through": "m", "Combo Duration": "s", "Initial Combo": "" };
 
   function riven(r) {

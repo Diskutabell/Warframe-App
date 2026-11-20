@@ -26,9 +26,10 @@ export default {
   icon: "mastery",
   async render(view, params, app) {
     const data = await api("mastery");
+    if (!app.isCurrent()) return;
     if (data.loading) {
       view.innerHTML = `<div class="page"><div class="empty"><b>Downloading game data…</b>${esc(data.error || "")}</div></div>`;
-      setTimeout(() => app.refresh(), 2500);
+      app.after(() => app.refresh(), 2500);
       return;
     }
     const cats = (app.state.mastery?.byCategory || []);

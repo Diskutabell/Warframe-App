@@ -12,7 +12,8 @@ export default {
   icon: "primes",
   async render(view, params, app) {
     const data = await api("primes");
-    if (data.loading) { setTimeout(() => app.refresh(), 2500); throw new Error("Downloading game data…"); }
+    if (!app.isCurrent()) return;
+    if (data.loading) { app.after(() => app.refresh(), 2500); throw new Error("Downloading game data…"); }
     const complete = data.filter((r) => r.complete).length;
     const started = data.filter((r) => !r.complete && r.have > 0).length;
     view.innerHTML = `<div class="page">

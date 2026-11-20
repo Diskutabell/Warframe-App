@@ -36,8 +36,10 @@ export default {
   id: "inventory",
   title: "Inventory",
   icon: "inventory",
-  async render(view) {
+  async render(view, params, app) {
     const data = await api("inventory");
+    if (!app.isCurrent()) return;
+    if (data.loading) { app.after(() => app.refresh(), 2500); throw new Error("Downloading game data…"); }
     const items = data.items || [];
     if (!items.length) {
       view.innerHTML = `<div class="page"><div class="page-head"><div><h1>Inventory</h1></div></div>

@@ -216,6 +216,7 @@ export default {
   icon: "world",
   async render(view, params, app) {
     const w = await api("world");
+    if (!app.isCurrent()) return;
     view.innerHTML = `<div class="page"><div class="page-head"><div><h1>World</h1><p>Cycles, vendors and rotations. Times update live.</p></div></div>
       <div id="world">${render(w)}</div></div>`;
     // The countdowns tick on their own; redrawing replaces every picture, so only do it for news.
@@ -223,7 +224,7 @@ export default {
     let shown = news(w);
     app.every(async () => {
       const n = await api("world").catch(() => null);
-      if (n && $("#world") && news(n) !== shown) {
+      if (n && app.isCurrent() && $("#world") && news(n) !== shown) {
         shown = news(n);
         $("#world").innerHTML = render(n);
       }

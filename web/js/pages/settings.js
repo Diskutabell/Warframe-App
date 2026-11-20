@@ -138,6 +138,7 @@ export default {
   icon: "settings",
   async render(view, params, app) {
     s = await api("settings");
+    if (!app.isCurrent()) return;
     const S = app.state;
     const tools = S.sources.tools || {};
     // Windows copies the screen itself and has one kind of overlay, so those choices are Linux's.

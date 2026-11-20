@@ -56,7 +56,8 @@ export default {
   icon: "market",
   async render(view, params, app) {
     const [d, riven] = await Promise.all([api("trade"), api("riven/result").catch(() => null)]);
-    if (d.loading) { setTimeout(() => app.refresh(), 2500); throw new Error("Downloading game data…"); }
+    if (!app.isCurrent()) return;
+    if (d.loading) { app.after(() => app.refresh(), 2500); throw new Error("Downloading game data…"); }
     const rows = d.rows;
     const platTotal = rows.reduce((a, r) => a + (r.price || 0) * r.spare, 0);
     const ducTotal = rows.reduce((a, r) => a + (r.ducats || 0) * r.spare, 0);
@@ -99,10 +100,10 @@ export default {
       const mine = ++token;
       if (q.trim().length < 2) { $("#check").innerHTML = `<tr><td colspan="4" class="muted">Type two letters or more.</td></tr>`; return; }
       const res = await api("search?q=" + encodeURIComponent(q)).catch((e) => ({ error: e.message }));
-      if (mine !== token || !$("#check")) return;
+      if (mine !== token || !app.isCurrent() || !$("#check")) return;
       if (res.error) { $("#check").innerHTML = `<tr><td colspan="4" class="warn-text">${esc(res.error)}</td></tr>`; return; }
       $("#check").innerHTML = checkRows(res);
-      if (res.some((r) => r.sell == null) && tries < 6) setTimeout(() => mine === token && check(q, tries + 1), 1500);
+      if (res.some((r) => r.sell == null) && tries < 6) app.after(() => mine === token && check(q, tries + 1), 1500);
     };
     const later = debounce((q) => check(q), 250);
     $("#q").oninput = (e) => { st.q = e.target.value; later(st.q); };

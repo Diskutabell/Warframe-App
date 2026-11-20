@@ -25,6 +25,8 @@ export default {
   icon: "fissures",
   async render(view, params, app) {
     const [data, settings] = await Promise.all([api("fissures"), api("settings")]);
+    if (!app.isCurrent()) return;
+    if (data.loading) { app.after(() => app.refresh(), 2500); throw new Error("Downloading game data…"); }
     let watch = new Set(data.watch || []);
     view.innerHTML = `<div class="page">
       <div class="page-head"><div class="grow"><h1>Fissures</h1><p>Live void fissures, with the relics you own for each.</p></div>
@@ -76,7 +78,7 @@ export default {
     $("#notify").onchange = (e) => act("settings", { notify_fissures: e.target.checked }, e.target.checked ? "Notifications on" : "Notifications off");
     app.every(async () => {
       const d = await api("fissures").catch(() => null);
-      if (d && $("#list")) { Object.assign(data, d); draw(data); }
+      if (d && !d.loading && app.isCurrent() && $("#list")) { Object.assign(data, d); draw(data); }
     }, 60000);
   },
 };

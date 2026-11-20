@@ -14,7 +14,8 @@ export default {
   icon: "foundry",
   async render(view, params, app) {
     const d = await api("foundry");
-    if (d.loading) { setTimeout(() => app.refresh(), 2500); throw new Error("Downloading game data…"); }
+    if (!app.isCurrent()) return;
+    if (d.loading) { app.after(() => app.refresh(), 2500); throw new Error("Downloading game data…"); }
     const cats = [...new Set(d.items.map((r) => r.category))].sort();
     const ready = d.items.filter((r) => r.buildable && r.status !== "mastered").length;
     // The low end of a badge band ("16-18") is the rank that is certain.

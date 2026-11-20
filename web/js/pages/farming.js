@@ -60,9 +60,10 @@ export default {
   badgeTitle: (n) => `${n} farming task${n === 1 ? "" : "s"} done`,
   async render(view, params, app) {
     const data = await api("tasks");
+    if (!app.isCurrent()) return;
     if (data.loading) {
       view.innerHTML = `<div class="page"><div class="empty"><b>Loading game data…</b>${esc(data.error || "")}</div></div>`;
-      setTimeout(() => app.refresh(), 2500);
+      app.after(() => app.refresh(), 2500);
       return;
     }
     shown = data.sig;

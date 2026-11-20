@@ -62,7 +62,7 @@ function poolLeft(r, pools) {
 }
 
 function factionRow(r, pools) {
-  const allies = (r.allies || []).map((a) => `<span class="ally ${a.share > 0 ? "up" : "down"}" title="Standing gained here gives ${a.name} ${a.share > 0 ? "+" : ""}${Math.round(a.share * 100)}%">${a.share > 0 ? "+" : "−"}${esc(a.name)}</span>`).join("");
+  const allies = (r.allies || []).map((a) => `<span class="ally ${a.share > 0 ? "up" : "down"}" title="Standing gained here gives ${esc(a.name)} ${a.share > 0 ? "+" : ""}${Math.round(a.share * 100)}%">${a.share > 0 ? "+" : "−"}${esc(a.name)}</span>`).join("");
   return `<div class="list-row click syn-row" data-syn="${esc(r.tag)}">
       <span class="sigil">${sigil(r.rankIcon || r.icon, 40)}</span>
       <div class="main"><div class="t">${esc(r.name)} <span class="muted" style="font-weight:400">· ${esc(r.rankName)}</span></div>
@@ -133,7 +133,8 @@ export default {
   icon: "standing",
   async render(view, params, app) {
     const s = await api("standing");
-    if (s.loading) { setTimeout(() => app.refresh(), 2500); throw new Error("Downloading game data…"); }
+    if (!app.isCurrent()) return;
+    if (s.loading) { app.after(() => app.refresh(), 2500); throw new Error("Downloading game data…"); }
     view.innerHTML = `<div class="page"><div class="page-head"><div><h1>Standing</h1>
         <p>${s.account ? `${esc(s.account)} · ` : ""}ranks, rank-up costs, the daily limits and what standing buys</p></div></div>
       <div id="standing">${render(s)}</div></div>`;
@@ -146,7 +147,7 @@ export default {
     app.every(async () => {
       const n = await api("standing").catch(() => null);
       const box = $("#standing");
-      if (!n || !box || JSON.stringify(n) === shown) return;
+      if (!n || n.loading || !app.isCurrent() || !box || JSON.stringify(n) === shown) return;
       shown = JSON.stringify(n);
       box.innerHTML = render(n);
       wire();

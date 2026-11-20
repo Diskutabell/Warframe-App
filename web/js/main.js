@@ -21,14 +21,32 @@ export const PAGES = [home, mastery, primes, relics, fissures, world, standing, 
 /** Preserve 1-9 for the original pages and 0 for Settings. */
 const pageKey = (page, i) => page === settings ? "0" : i < 9 ? String(i + 1) : "";
 
+let navVersion = 0;
+let pageCleanups = [];
+
+function clearTimers() {
+  for (const stop of pageCleanups) stop();
+  pageCleanups = [];
+}
+
 /** What every page can read: the latest /api/state, and a way to re-render. */
 export const app = {
   state: null,
-  timers: [],
   /** Re-renders the current page (after a change made in the drawer, say). */
   refresh: () => go(true),
   /** Runs `fn` every `ms` while the current page is shown. */
-  every(fn, ms) { this.timers.push(setInterval(fn, ms)); },
+  every(fn, ms) {
+    const v = navVersion;
+    const id = setInterval(() => { if (v === navVersion) fn(); else clearInterval(id); }, ms);
+    pageCleanups.push(() => clearInterval(id));
+  },
+  /** Runs `fn` once after `ms` while the current page is shown. */
+  after(fn, ms) {
+    const v = navVersion;
+    const id = setTimeout(() => { if (v === navVersion) fn(); }, ms);
+    pageCleanups.push(() => clearTimeout(id));
+  },
+  isCurrent: () => true,
 };
 
 function route() {
@@ -180,19 +198,41 @@ async function poll() {
   renderRail();
   renderBadges();
   const { page } = route();
-  if (app.state && page.onState) page.onState(app.state);
+  if (app.state && page === current && page.onState) page.onState(app.state);
 }
 
 let current = null;
 
 async function go(keepScroll = false) {
+  const version = ++navVersion;
   const { page, params } = route();
   renderNav();
-  for (const t of app.timers) clearInterval(t);
-  app.timers = [];
+  clearTimers();
+  const pageApp = {
+    get state() { return app.state; },
+    refresh: () => { if (version === navVersion) go(true); },
+    every(fn, ms) {
+      if (version !== navVersion) return;
+      const id = setInterval(() => {
+        if (version !== navVersion) { clearInterval(id); return; }
+        fn();
+      }, ms);
+      pageCleanups.push(() => clearInterval(id));
+    },
+    after(fn, ms) {
+      if (version !== navVersion) return;
+      const id = setTimeout(() => {
+        if (version !== navVersion) return;
+        fn();
+      }, ms);
+      pageCleanups.push(() => clearTimeout(id));
+    },
+    isCurrent: () => version === navVersion,
+  };
   const view = $("#view");
   const scroll = keepScroll && current === page ? view.scrollTop : 0;
   if (!app.state) await poll();
+  if (version !== navVersion) return;
   if (!app.state) {
     view.innerHTML = `<div class="page"><div class="page-head"><div><h1>The engine isn't responding</h1>
       <p>Retrying every few seconds. If it keeps failing, start the app again from a terminal and read its output.</p></div></div></div>`;
@@ -204,8 +244,10 @@ async function go(keepScroll = false) {
   }
   current = page;
   try {
-    await page.render(view, params, app);
+    await page.render(view, params, pageApp);
+    if (version !== navVersion) return;
   } catch (e) {
+    if (version !== navVersion) return;
     view.innerHTML = `<div class="page"><div class="page-head"><div><h1>${esc(page.title)}</h1></div></div>
       <div class="callout">${esc(e.message)}</div></div>`;
   }
@@ -267,7 +309,7 @@ $("#openPalette").onclick = () => palette.open();
 palette.setPages(PAGES);
 // A change made in the drawer (a count, "mark as mastered") shows on the page behind it, and in
 // the sidebar's counts at once rather than at the next poll.
-window.addEventListener("wfp:changed", () => { app.refresh(); poll(); });
+window.addEventListener("wfp:changed", async () => { await poll(); app.refresh(); });
 // Another account is shown: everything on the page belongs to it.
 window.addEventListener("wfp:account", async () => { await poll(); go(true); });
 hydrateIcons(document.body);

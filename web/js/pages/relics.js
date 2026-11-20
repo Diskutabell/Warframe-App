@@ -13,7 +13,8 @@ export default {
   icon: "relics",
   async render(view, params, app) {
     const [data, fis] = await Promise.all([api("relics" + (st.owned ? "?owned=1" : "")), api("fissures").catch(() => null)]);
-    if (data.loading) { setTimeout(() => app.refresh(), 2500); throw new Error("Downloading game data…"); }
+    if (!app.isCurrent()) return;
+    if (data.loading) { app.after(() => app.refresh(), 2500); throw new Error("Downloading game data…"); }
     const open = new Set((fis?.fissures || []).filter((f) => !f.storm).map((f) => f.tier));
     // Vaulted relics you hold crack like any other.
     const isOpen = (r) => (!r.vaulted || r.total > 0) && (open.has(r.era) || open.has("Omnia"));

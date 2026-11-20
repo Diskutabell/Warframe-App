@@ -199,6 +199,7 @@ export default {
     const [fis, world, hist, stand] = await Promise.all([
       api("fissures").catch(() => null), api("world").catch(() => null), api("history").catch(() => null),
       api("standing").catch(() => null)]);
+    if (!app.isCurrent()) return;
     lastScreens = S.session?.screens;
     view.innerHTML = `<div class="page">
       ${S.dataError ? `<div class="callout" style="margin-bottom:16px">${esc(S.dataError)}</div>` : ""}
@@ -221,6 +222,7 @@ export default {
     app.every(async () => {
       const [f, w, st] = await Promise.all([api("fissures").catch(() => null), api("world").catch(() => null),
         api("standing").catch(() => null)]);
+      if (!app.isCurrent()) return;
       const c = $("#crack"), wo = $("#world"), sc = $("#standingCard");
       if (c && f) { c.innerHTML = crackNow(f); wire(c); }
       if (wo && w) wo.innerHTML = worldCard(w);
