@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.9.4 - 2026-11-20
+
+### Changed
+
+- **Redesigned desktop interface.** Replaced the rounded blue-grey dashboard look with a sharper
+  matte obsidian and brushed-gold Vitruvian aesthetic: crisp corners, hairline dividers, studio
+  pedestals behind item art, compact uppercase tags instead of rounded pills, unified control
+  heights across toolbars, and matched native window startup backgrounds on Linux and Windows.
+- **Structured navigation and command palette.** Grouped sidebar pages into Progression, Origin
+  System, and Orbiter with inline keyboard shortcut hints (`1–9`, `0`), tightened the bottom
+  telemetry status rows, and added keyboard hints to the Ctrl+K search palette.
+- **Overview hero and page polish.** Rebuilt the Overview hero into a cleaner command banner with a
+  hairline-divided currency ledger and footer breakdown strip; added column headers on Fissures,
+  active selection highlighting on Mastery category tiles, a midpoint roll marker on the Market
+  riven card, quick-jump section links on Settings, and removed nested cards on Standing and washed
+  card gradients on the Farming board.
+
 ## 0.9.3 - 2026-11-20
 
 ### Changed
