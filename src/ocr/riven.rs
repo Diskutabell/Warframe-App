@@ -186,14 +186,11 @@ const CARD_TEXT_TOP: f64 = 70.0;
 const CARD_TEXT_BOTTOM: f64 = 285.0;
 
 /// The grade panel beside such a card, in the same units: its width, how far above the middle
-/// its top sits (level with the top of the card's picture), its height for `rows` stat lines,
-/// and its gap to the card.
+/// its top sits (level with the top of the card's picture), and its gap to the card. Its height
+/// is what it shows.
 pub const PANEL_W: f64 = 330.0;
 pub const PANEL_TOP: f64 = 95.0;
 pub const PANEL_GAP: f64 = 12.0;
-pub fn panel_height(rows: usize) -> f64 {
-    96.0 + 44.0 * rows.max(1) as f64 + 58.0
-}
 
 /// The pixel box (x0, y0, x1, y1) of that text at `ui_scale`, if it fits on the frame.
 pub fn card_box(width: usize, height: usize, ui_scale: f64) -> Option<(usize, usize, usize, usize)> {

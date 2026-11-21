@@ -43,11 +43,26 @@ struct State {
 }
 
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
-    fn event(_: &mut Self, _: &wl_registry::WlRegistry, _: wl_registry::Event, _: &GlobalListContents, _: &Connection, _: &QueueHandle<Self>) {}
+    fn event(
+        _: &mut Self,
+        _: &wl_registry::WlRegistry,
+        _: wl_registry::Event,
+        _: &GlobalListContents,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
 }
 
 impl Dispatch<wl_output::WlOutput, usize> for State {
-    fn event(state: &mut Self, _: &wl_output::WlOutput, event: wl_output::Event, index: &usize, _: &Connection, _: &QueueHandle<Self>) {
+    fn event(
+        state: &mut Self,
+        _: &wl_output::WlOutput,
+        event: wl_output::Event,
+        index: &usize,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
         if let wl_output::Event::Name { name } = event {
             if let Some(o) = state.outputs.get_mut(*index) {
                 o.1 = Some(name);
@@ -154,9 +169,16 @@ pub fn capture(name: Option<&str>) -> Result<Rgb> {
         (Some(name), _) => {
             // The names arrive with the outputs' first events.
             let n = state.outputs.len();
-            dispatch_until(&conn, &mut queue, &mut state, deadline, |s| s.outputs.iter().filter(|o| o.1.is_some()).count() == n)
-                .context("the outputs' names")?;
-            state.outputs.iter().find(|o| o.1.as_deref() == Some(name)).map(|o| o.0.clone()).with_context(|| format!("no output {name}"))?
+            dispatch_until(&conn, &mut queue, &mut state, deadline, |s| {
+                s.outputs.iter().filter(|o| o.1.is_some()).count() == n
+            })
+            .context("the outputs' names")?;
+            state
+                .outputs
+                .iter()
+                .find(|o| o.1.as_deref() == Some(name))
+                .map(|o| o.0.clone())
+                .with_context(|| format!("no output {name}"))?
         }
     };
 

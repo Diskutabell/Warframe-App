@@ -12,6 +12,9 @@ anyhow = "1"
 async-channel = "2"
 clap = { version = "4", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png", "pnm", "webp"] }
+# The overlays are drawn by the app itself on both platforms: shapes, and text in the bundled fonts.
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd", "png-format"] }
+ab_glyph = "0.2"
 indexmap = { version = "2", features = ["serde"] }
 # DE's Public Export lists its files in an LZMA-packed index.
 lzma-rs = "0.3"

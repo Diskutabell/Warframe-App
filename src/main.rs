@@ -27,6 +27,7 @@ mod memscan;
 mod net;
 mod notifier;
 mod ocr;
+mod overlay;
 mod process;
 mod relics;
 mod rivens;
@@ -45,8 +46,6 @@ mod world;
 // `desktop::run()` without caring which system it runs on.
 #[cfg(unix)]
 mod compositor;
-#[cfg(unix)]
-mod ipc;
 #[cfg(windows)]
 #[path = "windows/compositor.rs"]
 mod compositor;
@@ -55,6 +54,8 @@ mod desktop;
 #[cfg(windows)]
 #[path = "windows/desktop.rs"]
 mod desktop;
+#[cfg(unix)]
+mod ipc;
 
 use std::path::PathBuf;
 use std::process::ExitCode;

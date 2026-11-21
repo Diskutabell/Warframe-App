@@ -29,7 +29,9 @@ fn connect(path: &PathBuf) -> Result<UnixStream> {
 
 /// Hyprland's request socket for this session.
 fn hyprland_socket() -> Result<PathBuf> {
-    let sig = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").filter(|s| !s.is_empty()).context("not in a Hyprland session")?;
+    let sig = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE")
+        .filter(|s| !s.is_empty())
+        .context("not in a Hyprland session")?;
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
     let candidates = runtime.into_iter().map(|r| r.join("hypr")).chain([PathBuf::from("/tmp/hypr")]);
     candidates
@@ -90,7 +92,8 @@ fn read_sway_answer(r: &mut impl Read) -> Result<Vec<u8>> {
 
 /// One message to Sway and its answer (JSON).
 pub fn sway(kind: SwayMessage, payload: &str) -> Result<serde_json::Value> {
-    let path = std::env::var_os("SWAYSOCK").filter(|s| !s.is_empty()).map(PathBuf::from).context("not in a Sway session")?;
+    let path =
+        std::env::var_os("SWAYSOCK").filter(|s| !s.is_empty()).map(PathBuf::from).context("not in a Sway session")?;
     let mut stream = connect(&path)?;
     stream.write_all(&sway_frame(kind, payload))?;
     let body = read_sway_answer(&mut stream)?;
