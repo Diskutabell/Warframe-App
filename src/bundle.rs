@@ -74,18 +74,14 @@ pub fn decode(packed: &[u8], manifest: &Manifest) -> Result<Prepared> {
     serde_json::from_slice(&json).context("reading the game data")
 }
 
-/// The manifest as a download reader: one of another layout is no use and is not cached.
-fn manifest_reader() -> gamedata::Reader<Manifest> {
-    Arc::new(|bytes: &[u8]| {
-        let m: Manifest = serde_json::from_slice(bytes).context("invalid manifest")?;
-        if m.schema != SCHEMA {
-            bail!("the published game data has layout {}, this version reads {SCHEMA}", m.schema);
-        }
-        if !valid_file_name(&m.file) || m.sha256.len() != 64 {
-            bail!("the manifest names no valid file");
-        }
-        Ok(m)
-    })
+/// A manifest as published. Its layout is checked by the caller: a manifest of another layout
+/// means this version cannot read what CI publishes now.
+fn parse_manifest(bytes: &[u8]) -> Result<Manifest> {
+    let m: Manifest = serde_json::from_slice(bytes).context("invalid manifest")?;
+    if !valid_file_name(&m.file) || m.sha256.len() != 64 {
+        bail!("the manifest names no valid file");
+    }
+    Ok(m)
 }
 
 /// A bundle's name as `encode` makes it: nothing that could leave the release folder or the
@@ -96,34 +92,109 @@ fn valid_file_name(name: &str) -> bool {
         .is_some_and(|hash| hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
-/// The prepared data CI published: the cached copy when the manifest still names it, else a
-/// fresh download. Offline, or with GitHub out of reach, the cached copy (if any) is used.
+/// How long a manifest is used before GitHub is asked again (revalidated with its ETag, so an
+/// unchanged one costs a 304).
+const MANIFEST_AGE: Duration = Duration::from_secs(6 * 3600);
+
+/// The prepared data CI published. The cache holds one manifest and the bundle it names, and
+/// a new pair replaces them only once the new bundle has been downloaded, checked against its
+/// SHA-256 and unpacked: whatever goes wrong with a newer one, the last good pair stays in use.
+/// A manifest of another layout is an error (the caller then builds from the sources): this
+/// version is too old or too new for what CI publishes now.
 pub async fn fetch(force: bool) -> Result<Prepared> {
     let cache = config::dirs().cache.join("catalog");
     std::fs::create_dir_all(&cache).with_context(|| format!("creating {}", cache.display()))?;
-    let manifest_path = cache.join("manifest.json");
-    let (manifest, _) = gamedata::fetch_cached(
+    let (manifest_path, etag_path) = (cache.join("manifest.json"), cache.join("manifest.etag"));
+    // The pair in use, if any.
+    let held = std::fs::read(&manifest_path).ok().and_then(|b| parse_manifest(&b).ok()).filter(|m| m.schema == SCHEMA);
+    let age = std::fs::metadata(&manifest_path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
+    if let Some(m) = held.as_ref().filter(|_| !force && age.is_some_and(|a| a < MANIFEST_AGE)) {
+        match unpack_cached(&cache, m).await {
+            Ok(p) => return Ok(p),
+            Err(e) => eprintln!("the cached game data is unusable, asking for it again: {e:#}"),
+        }
+    }
+    let etag = held.as_ref().and_then(|_| std::fs::read_to_string(&etag_path).ok());
+    let headers: Vec<(&str, &str)> = etag.iter().map(|t| ("If-None-Match", t.as_str())).collect();
+    let answer = net::get_with(
         &format!("{RELEASE}manifest.json"),
-        &manifest_path,
-        force,
-        &gamedata::Network,
-        manifest_reader(),
+        &headers,
+        Duration::from_secs(30),
+        64 * 1024,
+        net::Redirects::Follow,
     )
-    .await?;
-    let path = cache.join(&manifest.file);
-    let packed = match tokio::fs::read(&path).await {
-        Ok(bytes) if sha256_hex(&bytes) == manifest.sha256 => bytes,
-        _ => download(&manifest, &path).await?,
+    .await;
+    let fall_back = |why: anyhow::Error| async {
+        match &held {
+            Some(m) => {
+                eprintln!("using the cached game data: {why:#}");
+                unpack_cached(&cache, m).await
+            }
+            None => Err(why),
+        }
     };
-    let manifest = manifest.clone();
-    let prepared = tokio::task::spawn_blocking(move || decode(&packed, &manifest))
-        .await
-        .map_err(|e| anyhow!("unpacking the game data failed: {e}"))??;
-    forget_older(&cache, &path);
-    Ok(prepared)
+    let resp = match answer {
+        Ok(resp) if resp.status == 304 && held.is_some() => {
+            // Unchanged: the pair in use is good for another while.
+            if let Ok(f) = std::fs::File::options().append(true).open(&manifest_path) {
+                let _ = f.set_modified(std::time::SystemTime::now());
+            }
+            return fall_back(anyhow!("unchanged")).await;
+        }
+        Ok(resp) if resp.status == 200 => resp,
+        Ok(resp) => return fall_back(anyhow!("HTTP {} for the manifest", resp.status)).await,
+        Err(e) => return fall_back(e).await,
+    };
+    let manifest = match parse_manifest(&resp.body) {
+        Ok(m) => m,
+        Err(e) => return fall_back(e).await,
+    };
+    if manifest.schema != SCHEMA {
+        bail!("the published game data has layout {}, this version reads {SCHEMA}", manifest.schema);
+    }
+    let path = cache.join(&manifest.file);
+    let fresh = async {
+        let (packed, downloaded) = match tokio::fs::read(&path).await {
+            Ok(bytes) if sha256_hex(&bytes) == manifest.sha256 => (bytes, false),
+            _ => (download(&manifest).await?, true),
+        };
+        let (m, packed) = (manifest.clone(), Arc::new(packed));
+        let bytes = Arc::clone(&packed);
+        let prepared = tokio::task::spawn_blocking(move || decode(&bytes, &m))
+            .await
+            .map_err(|e| anyhow!("unpacking the game data failed: {e}"))??;
+        anyhow::Ok((prepared, downloaded.then_some(packed)))
+    };
+    match fresh.await {
+        Ok((prepared, downloaded)) => {
+            // Only now is the new pair the one in use.
+            if let Some(packed) = downloaded {
+                config::write_atomic(&path, &packed)?;
+            }
+            config::write_atomic(&manifest_path, &resp.body)?;
+            match &resp.etag {
+                Some(tag) => config::write_atomic(&etag_path, tag.as_bytes())?,
+                None => {
+                    let _ = std::fs::remove_file(&etag_path);
+                }
+            }
+            forget_older(&cache, &path);
+            Ok(prepared)
+        }
+        Err(e) => fall_back(e.context(format!("the new game data ({})", manifest.file))).await,
+    }
 }
 
-async fn download(manifest: &Manifest, path: &Path) -> Result<Vec<u8>> {
+/// The cached bundle a manifest names, unpacked.
+async fn unpack_cached(cache: &Path, manifest: &Manifest) -> Result<Prepared> {
+    let packed = tokio::fs::read(cache.join(&manifest.file)).await.context("reading the cached game data")?;
+    let m = manifest.clone();
+    tokio::task::spawn_blocking(move || decode(&packed, &m))
+        .await
+        .map_err(|e| anyhow!("unpacking the game data failed: {e}"))?
+}
+
+async fn download(manifest: &Manifest) -> Result<Vec<u8>> {
     let url = format!("{RELEASE}{}", manifest.file);
     let resp = net::get_with(&url, &[], Duration::from_secs(120), MAX_BUNDLE, net::Redirects::Follow).await?;
     if resp.status != 200 {
@@ -132,7 +203,6 @@ async fn download(manifest: &Manifest, path: &Path) -> Result<Vec<u8>> {
     if sha256_hex(&resp.body) != manifest.sha256 {
         bail!("the downloaded game data does not match its manifest");
     }
-    config::write_atomic(path, &resp.body)?;
     Ok(resp.body)
 }
 
@@ -151,9 +221,11 @@ fn forget_older(cache: &Path, keep: &Path) {
 /// What prepared data must hold before it is published. Each line is one failed check; none
 /// means it may go out. The floors sit well under what the data held when they were set
 /// (2026-11-21: 810 items, 1,493 parts, 799 relics, 2,024 recipes, 354 nodes, 40 syndicates,
-/// 11,945 inventory names), so an upstream change that empties or halves a part of it stops the release.
+/// 11,945 inventory entries of which 11,337 named, 2,022 names with drops, 169 nodes with mastery),
+/// so an upstream change that empties or halves a part of it stops the release.
 pub fn check(p: &Prepared, c: &Catalog) -> Vec<String> {
-    let mut failed = Vec::new();
+    // Every source, or nothing is published: a source that failed now is there tomorrow.
+    let mut failed: Vec<String> = p.missing.iter().map(|m| format!("source missing: {m}")).collect();
     let mut at_least = |what: &str, n: usize, floor: usize| {
         if n < floor {
             failed.push(format!("{what}: {n}, expected at least {floor}"));
@@ -167,9 +239,14 @@ pub fn check(p: &Prepared, c: &Catalog) -> Vec<String> {
     at_least("unvaulted relics", c.relics.values().filter(|r| !r.vaulted).count(), 20);
     at_least("part recipes", c.part_recipes.len(), 1700);
     at_least("drop tables", p.drops.len(), gamedata::drop_table_count());
-    at_least("star chart nodes", c.nodes.len(), 300);
+    // Counted by what they hold, not by rows: an empty table or dictionary still makes rows.
+    at_least("names with drop sources", c.drops.names().count(), 1700);
+    at_least("named star chart nodes", c.nodes.values().filter(|n| !n.name.is_empty()).count(), 300);
+    at_least("star chart nodes with mastery", c.node_xp.len(), 140);
     at_least("syndicates", c.syndicates.list.len(), 30);
-    at_least("inventory names", c.inventory.len(), 10_000);
+    at_least("named inventory entries", c.inventory.values().filter(|e| e.name.is_some()).count(), 9500);
+    at_least("inventory exports", p.held.len(), crate::inventory::EXPORTS.len());
+    at_least("mods", p.files.get("Mods").and_then(|m| m.as_array()).map_or(0, Vec::len), 1000);
     at_least("arbitration hours ahead", c.arbitrations.slots.len(), 24 * 30);
     at_least("arbitration tiers", c.arbitrations.tiers.len(), 20);
     failed
@@ -190,6 +267,10 @@ pub fn counts(c: &Catalog) -> serde_json::Map<String, serde_json::Value> {
         ("unvaulted relics", c.relics.values().filter(|r| !r.vaulted).count()),
         ("arbitration hours", c.arbitrations.slots.len()),
         ("arbitration tiers", c.arbitrations.tiers.len()),
+        ("names with drops", c.drops.names().count()),
+        ("named nodes", c.nodes.values().filter(|n| !n.name.is_empty()).count()),
+        ("nodes with mastery", c.node_xp.len()),
+        ("named inventory", c.inventory.values().filter(|e| e.name.is_some()).count()),
     ] {
         m.insert(k.into(), v.into());
     }
@@ -214,15 +295,29 @@ mod tests {
     }
 
     #[test]
-    fn a_manifest_of_another_layout_or_naming_another_path_is_refused() {
-        let read = manifest_reader();
+    fn a_source_that_could_not_be_had_stops_the_release() {
+        let p = Prepared { missing: vec!["mod catalog unavailable: HTTP 503".into()], ..Prepared::default() };
+        let failed = check(&p, &Catalog::default());
+        assert!(failed.iter().any(|f| f == "source missing: mod catalog unavailable: HTTP 503"), "{failed:?}");
+        // An old bundle, written before sources were recorded, reads as complete.
+        let old: Prepared = serde_json::from_value(serde_json::json!({"built": 1.0, "files": {}, "drops": {},
+            "regions": null, "syndicate_export": null, "dict": null, "held": {},
+            "arbitrations": {"slots": [], "tiers": {}}}))
+        .unwrap();
+        assert!(old.missing.is_empty());
+    }
+
+    #[test]
+    fn a_manifest_naming_another_path_is_refused_and_its_layout_is_kept() {
+        let read = parse_manifest;
         let m = |schema: u32, file: &str| {
             serde_json::to_vec(&serde_json::json!({"schema": schema, "built": 1.0, "file": file,
                 "sha256": "0".repeat(64), "size": 1}))
             .unwrap()
         };
         assert!(read(&m(SCHEMA, "catalog-0123456789abcdef.json.zst")).is_ok());
-        assert!(read(&m(SCHEMA + 1, "catalog-0123456789abcdef.json.zst")).is_err());
+        // Another layout is read, so that the caller can tell "too old" from "broken".
+        assert_eq!(read(&m(SCHEMA + 1, "catalog-0123456789abcdef.json.zst")).unwrap().schema, SCHEMA + 1);
         assert!(read(&m(SCHEMA, "../catalog-0123456789abcdef.json.zst")).is_err());
         assert!(read(&m(SCHEMA, "catalog-0123456789abcdeg.json.zst")).is_err());
     }

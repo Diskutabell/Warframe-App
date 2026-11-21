@@ -327,6 +327,10 @@ pub struct Prepared {
     /// The exports that name what an inventory holds (`inventory::EXPORTS`), by file name.
     pub held: IndexMap<String, Value>,
     pub arbitrations: crate::arbitration::Schedule,
+    /// The sources that could not be had when it was prepared. A client building for itself
+    /// does without them; CI publishes nothing then (`bundle::check`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing: Vec<String>,
 }
 
 async fn fetch_sources(force: bool) -> Sources {
@@ -367,6 +371,12 @@ async fn fetch_sources(force: bool) -> Sources {
 fn prepare(sources: Sources) -> Result<Prepared> {
     let Sources { wfcd, mods, recipes, de_recipes, regions, syndicates, drops, held, relic_exports, arbitrations } =
         sources;
+    // What could not be had: the app does without, CI publishes nothing (`bundle::check`).
+    let mut missing: Vec<String> = Vec::new();
+    let mut lack = |what: String| {
+        eprintln!("{what}");
+        missing.push(what);
+    };
     let mut files = IndexMap::new();
     for (name, data) in wfcd {
         files.insert(name.to_string(), data.with_context(|| format!("Could not download game data ({name})"))?);
@@ -375,18 +385,18 @@ fn prepare(sources: Sources) -> Result<Prepared> {
         Ok(data) if data.is_array() => {
             files.insert("Mods".into(), data);
         }
-        Ok(_) => eprintln!("mod catalog has an unexpected format"),
-        Err(e) => eprintln!("mod catalog unavailable: {e:#}"),
+        Ok(_) => lack("mod catalog has an unexpected format".into()),
+        Err(e) => lack(format!("mod catalog unavailable: {e:#}")),
     }
     // Either source alone will do; together they cover old and new content (`merge_recipes`).
     let mut all_recipes = match recipes {
         Ok(Value::Object(map)) => map,
         Ok(_) => {
-            eprintln!("component recipe export has an unexpected format");
+            lack("component recipe export has an unexpected format".into());
             serde_json::Map::new()
         }
         Err(e) => {
-            eprintln!("component recipes unavailable: {e:#}");
+            lack(format!("component recipes unavailable: {e:#}"));
             serde_json::Map::new()
         }
     };
@@ -394,42 +404,58 @@ fn prepare(sources: Sources) -> Result<Prepared> {
         Ok(list) => {
             merge_recipes(&mut all_recipes, &list);
         }
-        Err(e) => eprintln!("DE's own recipe export unavailable, recipes may lack the newest items: {e:#}"),
+        Err(e) => lack(format!("DE's own recipe export unavailable, recipes may lack the newest items: {e:#}")),
     }
     if !all_recipes.is_empty() {
         files.insert("ExportRecipes".into(), Value::Object(all_recipes));
     }
     if files.get("Relics").is_some_and(crate::relics::lacks_rewards) {
+        // The printed names of relic drops come from the relics' drop table, the rest from the
+        // game's export.
+        if let Some(Err(e)) = drops.first() {
+            lack(format!("relic drop names unavailable: {e:#}"));
+        }
+        for (f, r) in RELIC_EXPORTS.iter().zip(&relic_exports) {
+            if let Err(e) = r {
+                lack(format!("{f} unavailable, relics lack their drops: {e:#}"));
+            }
+        }
         repair_relics(&mut files, &relic_exports, &drops);
     }
     let mut tables = IndexMap::new();
     for (name, data) in DROP_TABLES.iter().zip(drops).skip(1) {
         match data {
             Ok(data) if data.get(*name).is_some_and(|v| v.is_array() || v.is_object()) => {
+                let empty = data[*name].as_array().is_some_and(Vec::is_empty)
+                    || data[*name].as_object().is_some_and(serde_json::Map::is_empty);
+                if empty {
+                    lack(format!("drop table {name} is empty"));
+                }
                 tables.insert(name.to_string(), data);
             }
-            Ok(_) => eprintln!("drop table {name} has an unexpected format"),
-            Err(e) => eprintln!("drop table {name} unavailable: {e:#}"),
+            Ok(_) => lack(format!("drop table {name} has an unexpected format")),
+            Err(e) => lack(format!("drop table {name} unavailable: {e:#}")),
         }
     }
     // The app works without the star chart: only the mastery total is then short of it, and the
     // arbitration schedule of its node names.
-    let regions = regions.map_err(|e| eprintln!("star chart data unavailable, mastery will leave it out: {e:#}")).ok();
+    let regions =
+        regions.map_err(|e| lack(format!("star chart data unavailable, mastery will leave it out: {e:#}"))).ok();
     let [syndicate_export, dict] = <[Result<Value>; 2]>::try_from(syndicates)
         .map_err(|_| anyhow!("two syndicate files expected"))?
-        .map(|r| r.map_err(|e| eprintln!("syndicate data unavailable: {e:#}")).ok());
+        .map(|r| r.map_err(|e| lack(format!("syndicate data unavailable: {e:#}"))).ok());
     let held = crate::inventory::EXPORTS
         .iter()
         .zip(held)
         .filter_map(|(f, r)| match r {
             Ok(v) => Some((f.to_string(), v)),
             Err(e) => {
-                eprintln!("{f} unavailable, the inventory page names less: {e:#}");
+                lack(format!("{f} unavailable, the inventory page names less: {e:#}"));
                 None
             }
         })
         .collect();
-    Ok(Prepared { built: now(), files, drops: tables, regions, syndicate_export, dict, held, arbitrations })
+    Ok(Prepared { built: now(), files, drops: tables, regions, syndicate_export, dict, held, arbitrations, missing })
 }
 
 /// The catalog from prepared data: pure work on what is in memory.

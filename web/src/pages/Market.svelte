@@ -43,6 +43,7 @@
     const ask = async (tries: number) => {
       try {
         const res = await api<MarketHit[]>("search?q=" + encodeURIComponent(q), undefined, ctl.signal);
+        if (ctl.signal.aborted) return;
         found = res;
         if (res.some((r) => r.sell == null) && tries < 6) timer = setTimeout(() => ask(tries + 1), 1500);
       } catch (e) {

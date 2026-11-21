@@ -35,6 +35,7 @@
     const timer = setTimeout(async () => {
       try {
         const r = await api<TaskHit[] | { loading: true; error: string | null }>("find-task?q=" + encodeURIComponent(q), undefined, ctl.signal);
+        if (ctl.signal.aborted) return;
         if (isLoading(r)) throw new Error(r.error || "Game data is still loading.");
         found = r;
       } catch (e) {

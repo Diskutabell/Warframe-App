@@ -4,7 +4,6 @@
 
 import { api, isLoading } from "./api";
 import { on, type Topic } from "./app.svelte";
-import { debounce } from "./format";
 
 export type Loaded<T> = {
   readonly data: T | null;
@@ -23,14 +22,19 @@ export function loader<T>(fetch: string | ((signal: AbortSignal) => Promise<T>),
   });
   let ctl: AbortController | null = null;
   let retry: ReturnType<typeof setTimeout> | undefined;
+  let later: ReturnType<typeof setTimeout> | undefined;
+  // Once the page is gone nothing of it runs again: not a late topic, not a retry.
+  let alive = true;
 
   async function run() {
+    if (!alive) return;
     ctl?.abort();
     clearTimeout(retry);
+    clearTimeout(later);
     const mine = (ctl = new AbortController());
     try {
       const d = await get(mine.signal);
-      if (mine.signal.aborted) return;
+      if (mine.signal.aborted || !alive) return;
       if (isLoading(d)) {
         s.downloading = d.error ?? true;
         retry = setTimeout(run, 2500);
@@ -40,19 +44,26 @@ export function loader<T>(fetch: string | ((signal: AbortSignal) => Promise<T>),
       s.data = d;
       s.error = null;
     } catch (e) {
-      if (mine.signal.aborted) return;
+      if (mine.signal.aborted || !alive) return;
       s.error = (e as Error).message;
     }
   }
-  const soon = debounce(run, 300);
+  /** A burst of topics is one reload. */
+  function soon() {
+    clearTimeout(later);
+    later = setTimeout(run, 300);
+  }
 
   $effect(() => {
+    alive = true;
     run();
     const off = on([...topics, "resync", "account"], soon);
     return () => {
+      alive = false;
       off();
       ctl?.abort();
       clearTimeout(retry);
+      clearTimeout(later);
     };
   });
 

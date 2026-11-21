@@ -8,6 +8,8 @@ export class ApiError extends Error {}
 export async function api<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const init: RequestInit =
     body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  // Called off already: nothing is asked.
+  signal?.throwIfAborted();
   const ctl = new AbortController();
   const slow = /scan$/.test(path);
   const timer = setTimeout(() => ctl.abort(), slow ? 60000 : 20000);
@@ -16,13 +18,23 @@ export async function api<T>(path: string, body?: unknown, signal?: AbortSignal)
   try {
     r = await fetch("/api/" + path, { ...init, signal: ctl.signal });
   } catch (e) {
+    clearTimeout(timer);
     if (signal?.aborted) throw e;
     const err = e as Error;
     throw new ApiError(err.name === "AbortError" ? `No answer from /api/${path}.` : `Can't reach the engine: ${err.message}`);
+  }
+  let j: unknown;
+  try {
+    j = await r.json();
+  } catch (e) {
+    // Called off while the body arrived: the caller's abort, or our time limit - never an empty answer.
+    if (signal?.aborted) throw e;
+    if (ctl.signal.aborted) throw new ApiError(`No answer from /api/${path}.`);
+    if (r.ok) throw new ApiError(`The engine's answer to /api/${path} is not JSON.`);
+    j = {};
   } finally {
     clearTimeout(timer);
   }
-  const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new ApiError((j as { error?: string }).error || `HTTP ${r.status}`);
   return j as T;
 }

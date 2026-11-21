@@ -44,17 +44,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          file=$(jq -r .file catalog/manifest.json)
+          # jq.exe writes CRLF on Windows: a \r left in a name breaks every use of it.
+          file=$(jq -r .file catalog/manifest.json | tr -d '\r')
           if ! gh release view catalog > /dev/null 2>&1; then
             gh release create catalog --prerelease --title "Game data" \
               --notes "Prepared game data for the app, rebuilt daily. Not a release of the app."
           fi
           # The bundle the app has now stays until the next run: a client between reading the
           # manifest and downloading must still find it.
-          previous=$(gh release download catalog -p manifest.json -O - 2> /dev/null | jq -r .file || true)
+          previous=$( (gh release download catalog -p manifest.json -O - 2> /dev/null || true) | jq -r '.file // empty' | tr -d '\r')
           gh release upload catalog "catalog/$file" --clobber
           gh release upload catalog catalog/manifest.json --clobber
-          gh release view catalog --json assets -q '.assets[].name' \
-            | grep -E '^catalog-[0-9a-f]{16}\.json\.zst$' \
-            | grep -vxF -e "$file" -e "${previous:-none}" \
-            | while read -r old; do gh release delete-asset catalog "$old" -y; done
+          # Older bundles go; no grep in a pipeline, which would fail the step when none is left.
+          gh release view catalog --json assets -q '.assets[].name' | tr -d '\r' > assets.txt
+          while IFS= read -r old; do
+            [[ $old =~ ^catalog-[0-9a-f]{16}\.json\.zst$ ]] || continue
+            [[ $old == "$file" || $old == "$previous" ]] && continue
+            gh release delete-asset catalog "$old" -y
+          done < assets.txt

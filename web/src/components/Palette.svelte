@@ -41,6 +41,7 @@
     const timer = setTimeout(async () => {
       try {
         const r = await api<FindHit[]>("find?q=" + encodeURIComponent(q), undefined, ctl.signal);
+        if (ctl.signal.aborted) return;
         if (isLoading(r)) throw new Error((r as { error?: string }).error || "Game data is still loading.");
         found = r;
       } catch (e) {
