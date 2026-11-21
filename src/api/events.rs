@@ -37,9 +37,12 @@ pub async fn stream(
         tokio::task::spawn_blocking(move || engine.summary()).await.ok()
     };
     let mut first = vec![match summary {
-        Some(s) => {
-            Event::default().event(Topic::State.name()).retry(RETRY).data(serde_json::to_string(&s).unwrap_or_default())
-        }
+        // With an id, so that a reconnect even before the first change says so (`Last-Event-ID`).
+        Some(s) => Event::default()
+            .event(Topic::State.name())
+            .id("0")
+            .retry(RETRY)
+            .data(serde_json::to_string(&s).unwrap_or_default()),
         None => Event::default().retry(RETRY).comment("no summary"),
     }];
     if headers.contains_key("last-event-id") {

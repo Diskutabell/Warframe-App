@@ -231,12 +231,17 @@ pub fn built(view: &View, uid: &str, t: f64) -> Result<Built, String> {
         reward: None,
     };
     let mut out = Built { deltas: vec![change("built", &it.uid, 1, true)], hand_counts: Vec::new() };
-    // The main blueprint: the one whose recipe makes the item.
-    let main = it.components.iter().filter(|c| c.kind == ComponentKind::Part).find_map(|c| {
+    let in_foundry = |u: &str| view.inv.iter().flat_map(|i| &i.foundry).any(|f| f.recipe.as_deref() == Some(u));
+    // The main blueprint: the one whose recipe makes the item, or, without the recipe data, the
+    // one named "<item> Blueprint" (as `View::item_status` tells a build in the foundry).
+    let parts = || it.components.iter().filter(|c| c.kind == ComponentKind::Part);
+    let by_recipe = parts().find_map(|c| {
         view.twins(&c.uid).into_iter().find(|u| view.cat.part_recipes.get(*u).is_some_and(|r| r.result == it.uid))
     });
-    let in_foundry = |u: &str| view.inv.iter().flat_map(|i| &i.foundry).any(|f| f.recipe.as_deref() == Some(u));
-    if let Some(main) = main.filter(|m| in_foundry(m)) {
+    let main_name = format!("{} Blueprint", it.name);
+    let by_name =
+        || parts().filter(|c| c.name.ends_with(&main_name)).flat_map(|c| view.twins(&c.uid)).find(|u| in_foundry(u));
+    if let Some(main) = by_recipe.filter(|m| in_foundry(m)).or_else(by_name) {
         out.deltas.push(change("claimed", main, -1, false));
         return Ok(out);
     }
@@ -263,6 +268,9 @@ pub fn built(view: &View, uid: &str, t: f64) -> Result<Built, String> {
                 if take > 0 {
                     out.deltas.push(change("built", &c.uid, -take, true));
                 }
+            }
+            ComponentKind::Resource if view.hand_counted(&c.uid) => {
+                out.hand_counts.push((c.uid.clone(), (view.count(&c.uid) - c.count).max(0)));
             }
             ComponentKind::Resource => {
                 let take = c.count.min(view.held_stack(&c.uid));
@@ -951,6 +959,20 @@ mod tests {
         v.manual = Arc::new(manual);
         assert_eq!(built(&v, ASH, 50.0).unwrap().hand_counts, [(CHASSIS.to_string(), 1)]);
         assert!(built(&v, CELL, 50.0).is_err(), "only equipment is built");
+        // A resource counted by hand, too.
+        let mut v = view(Some(inventory(&[(BP, 1), (CHASSIS, 1)])), &[]);
+        let mut manual = Manual::default();
+        manual.counts.insert(CELL.into(), (5, 20.0));
+        v.manual = Arc::new(manual);
+        assert!(built(&v, ASH, 50.0).unwrap().hand_counts.contains(&(CELL.to_string(), 3)));
+        // In the foundry without the recipe data: still only collected, by the blueprint's name.
+        let mut cat = catalog();
+        cat.part_recipes.clear();
+        let mut held = inventory(&[(CELL, 3)]);
+        held.foundry.push(FoundryEntry { recipe: Some(BP.into()), done: None });
+        let v = view_of(cat, Some(held), &[]);
+        let b = built(&v, ASH, 50.0).unwrap();
+        assert_eq!(b.deltas.iter().map(|d| d.kind.as_str()).collect::<Vec<_>>(), ["built", "claimed"]);
     }
 
     #[test]

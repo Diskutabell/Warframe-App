@@ -699,6 +699,26 @@ pub struct RelicRow {
     pub ev_radiant: f64,
 }
 
+/// The counts set by hand with the changes made after them: a reward picked or a build marked
+/// done after a count was set by hand goes on top of that count, as it goes on top of an
+/// inventory read before it. A count set after a change already includes it.
+pub fn hand_counts_after(cat: &Catalog, manual: &Manual, deltas: &[crate::sources::Delta]) -> Manual {
+    let mut out = manual.clone();
+    for d in deltas.iter().filter(|d| !d.equipment && d.kind != "claimed") {
+        // A part's count by hand may be on either twin (blueprint or crafted component).
+        let canon = cat.part_alias.get(&d.uid).map_or(d.uid.as_str(), String::as_str);
+        let twins = std::iter::once(canon).chain(cat.parts.get(canon).and_then(|p| p.alt.as_deref()));
+        let newest = twins
+            .filter(|u| out.counts.get(*u).is_some_and(|(_, t)| *t < d.t))
+            .max_by(|a, b| out.counts[*a].1.total_cmp(&out.counts[*b].1));
+        if let Some(uid) = newest.map(str::to_owned) {
+            let (n, t) = out.counts[&uid];
+            out.counts.insert(uid, ((n + d.change).max(0), t));
+        }
+    }
+    out
+}
+
 /// How well `name` matches a search: lower is better, None is no match. Every word of the query
 /// may match the start of any word of the name, so "ash sys" finds "Ash Prime Systems Blueprint".
 pub(crate) fn match_rank(name: &str, q: &str, tokens: &[&str]) -> Option<u8> {
@@ -1967,6 +1987,24 @@ mod tests {
         assert_eq!(mod_detail["kind"], "drop");
         assert_eq!(mod_detail["drops"][0]["chance"], 8.0);
         assert!(view.detail("drop:unknown", &HashSet::new()).map(json).is_none());
+    }
+
+    #[test]
+    fn a_change_after_a_count_set_by_hand_goes_on_top_of_it() {
+        let cat = Catalog::default();
+        let mut manual = Manual::default();
+        manual.counts.insert("/Cell".into(), (4, 120.0));
+        let change = |t, change| crate::sources::Delta {
+            t,
+            kind: "pick".into(),
+            uid: "/Cell".into(),
+            change,
+            equipment: false,
+            reward: None,
+        };
+        assert_eq!(hand_counts_after(&cat, &manual, &[change(200.0, 1)]).counts["/Cell"], (5, 120.0));
+        assert_eq!(hand_counts_after(&cat, &manual, &[change(100.0, 1)]).counts["/Cell"], (4, 120.0), "set after it");
+        assert_eq!(hand_counts_after(&cat, &manual, &[change(200.0, -9)]).counts["/Cell"].0, 0, "never below zero");
     }
 
     #[test]

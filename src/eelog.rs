@@ -639,17 +639,20 @@ impl LogWatcher {
         let (mut pos, mut inode) = (0u64, 0u64);
         let mut lines = LineBuffer::default();
         while !stop.is_cancelled() {
-            let path = (self.path_of)().filter(|p| p.is_file());
-            let Some(path) = path else {
-                // Gone for a moment while the game replaces it: wait for it to come back where
-                // it was, and follow the new one from its start, as a live log.
-                if let (Some(w), Some(was)) = (&wakeups, &current) {
-                    if w.watching() && (self.path_of)().as_ref() == Some(was) {
-                        w.wait(LOOK_MISSING, SETTLE);
+            // The log followed is gone for a moment while the game replaces it: wait for it where
+            // it was - without searching anew, which would remember "no log" for a minute - and
+            // follow the new one from its start, as a live log.
+            if let (Some(w), Some(was)) = (&wakeups, &current) {
+                if w.watching() && !was.is_file() {
+                    w.wait(LOOK_MISSING, SETTLE);
+                    if was.is_file() {
                         (pos, inode) = (0, 0);
                         continue;
                     }
                 }
+            }
+            let path = (self.path_of)().filter(|p| p.is_file());
+            let Some(path) = path else {
                 current = None;
                 wakeups = None;
                 self.status().path = None;

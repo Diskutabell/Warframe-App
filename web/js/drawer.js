@@ -456,7 +456,10 @@ function wire(d, x, version) {
   };
   const built = d.querySelector("[data-built]");
   if (built) built.onclick = async () => {
+    // One build per click: a second click while the first is on its way would count two.
+    built.disabled = true;
     if (await act("foundry/built", { uid: x.uid }, `${x.name} marked built`)) refresh();
+    else built.disabled = false;
   };
   const m = d.querySelector("[data-mastered]");
   if (m) m.onclick = async () => {

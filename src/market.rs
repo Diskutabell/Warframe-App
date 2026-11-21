@@ -277,35 +277,36 @@ impl Market {
 
     /// Switches the in-memory price map when the user changes platforms in Settings.
     fn ensure_platform(&self) -> Platform {
+        let quick = self.platform();
+        if self.prices.lock().unwrap_or_else(|e| e.into_inner()).platform == quick {
+            return quick;
+        }
+        // One switch at a time, all of it under the save lock: the old platform's unsaved
+        // prices are taken and saved, and the new one loaded, with no save of either between.
+        let _guard = self.save_lock.lock().unwrap_or_else(|e| e.into_inner());
         let current = self.platform();
-        let old = {
+        let (old, unsaved) = {
             let p = self.prices.lock().unwrap_or_else(|e| e.into_inner());
             if p.platform == current {
                 return current;
             }
-            p.platform
-        };
-        let loaded: HashMap<String, Price> = self.db.load_prices(current).unwrap_or_default();
-        // The swap and taking the old platform's unsaved prices are one step (prices, then dirty,
-        // as everywhere): a price fetched for the old platform meanwhile is saved with it.
-        let _guard = self.save_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let unsaved = {
-            let mut p = self.prices.lock().unwrap_or_else(|e| e.into_inner());
-            if p.platform != old || current != self.platform() {
-                return current;
-            }
+            // Prices, then dirty, as everywhere: a price fetched meanwhile is in one or the other.
             let slugs = std::mem::take(&mut *self.dirty.lock().unwrap_or_else(|e| e.into_inner()));
             let unsaved: Vec<(String, Price)> =
                 slugs.iter().filter_map(|s| p.entries.get(s).map(|e| (s.clone(), e.clone()))).collect();
-            p.platform = current;
-            p.entries = loaded;
-            unsaved
+            (p.platform, unsaved)
         };
         if !unsaved.is_empty() {
             if let Err(e) = self.db.save_prices(old, &unsaved) {
                 eprintln!("could not save market prices: {e:#}");
             }
         }
+        let loaded: HashMap<String, Price> = self.db.load_prices(current).unwrap_or_default();
+        let mut p = self.prices.lock().unwrap_or_else(|e| e.into_inner());
+        // A price fetched for the old platform after its prices were taken is dropped: a fetch
+        // only stores prices of the platform the cache holds, which is `current` from here on.
+        p.platform = current;
+        p.entries = loaded;
         current
     }
 

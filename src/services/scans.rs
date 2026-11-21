@@ -446,13 +446,20 @@ impl ScanService {
         let mut done = self.reward_done.subscribe();
         let mut joined = false;
         let generation = loop {
+            // Quitting: no new scan starts.
+            if self.stop.is_cancelled() {
+                return None;
+            }
             match self.turn(screen, joined, deadline) {
                 Turn::Share(result) => return Some(result),
                 Turn::Cancelled => return None,
                 Turn::Scan(generation) => break generation,
                 Turn::Wait => {
                     joined = true;
-                    let _ = tokio::time::timeout_at(deadline.into(), done.changed()).await;
+                    tokio::select! {
+                        _ = self.stop.cancelled() => return None,
+                        _ = tokio::time::timeout_at(deadline.into(), done.changed()) => {}
+                    }
                 }
             }
         };
@@ -572,8 +579,9 @@ impl ScanService {
     }
 
     /// Whether the log's reward screen this scan belongs to has closed (or a newer scan took over).
+    /// Whether a scan should give up: its screen closed, or the app is quitting.
     fn cancelled(&self, screen: Option<u64>, generation: u64) -> bool {
-        screen.is_some() && !lock(&self.reward_scan).is_current(generation)
+        self.stop.is_cancelled() || (screen.is_some() && !lock(&self.reward_scan).is_current(generation))
     }
 
     fn reward_scan_failed(&self, e: &anyhow::Error, generation: u64) -> Arc<RewardResult> {

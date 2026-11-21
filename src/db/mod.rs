@@ -387,14 +387,19 @@ impl Db {
 
     /// Records which reward of a screen the player picked (None: undone), with the changes that
     /// makes to the account's inventory, replacing those of an earlier pick on the same screen.
-    pub fn set_pick(&self, id: i64, account: &str, picked: Option<&str>, deltas: &[Delta]) -> Result<()> {
+    /// Says which accounts that earlier pick's changes were for.
+    pub fn set_pick(&self, id: i64, account: &str, picked: Option<&str>, deltas: &[Delta]) -> Result<Vec<String>> {
         self.transaction(|tx| {
+            let before: Vec<String> = {
+                let mut stmt = tx.prepare("SELECT DISTINCT account FROM inventory_deltas WHERE reward = ?1")?;
+                stmt.query_map([id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
+            };
             tx.execute("DELETE FROM inventory_deltas WHERE reward = ?1", [id])?;
             tx.execute("UPDATE reward_history SET picked = ?2 WHERE id = ?1", params![id, picked])?;
             for d in deltas {
                 insert_delta(tx, account, d)?;
             }
-            Ok(())
+            Ok(before)
         })
     }
 

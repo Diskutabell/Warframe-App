@@ -8,7 +8,7 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -19,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use super::catalog::CatalogStore;
+use super::lock;
 use super::settings::SettingsStore;
 use super::watched::Watched;
 use crate::accounts::{self, Account, Evidence};
@@ -314,6 +315,8 @@ pub struct AccountService {
     /// The app's background tasks: profile requests run on it, so that neither a closed page nor
     /// shutdown drops one between sending it and recording its answer.
     tasks: TaskTracker,
+    /// Held by a pick or a build marked done from reading the account to saving the change.
+    changing: Mutex<()>,
 }
 
 /// The rate limit's times as saved, at startup `now`. Never in the future: a clock set back must
@@ -375,6 +378,7 @@ impl AccountService {
             bus: bus.clone(),
             stop,
             tasks,
+            changing: Mutex::new(()),
         }))
     }
 
@@ -390,6 +394,7 @@ impl AccountService {
     pub fn view_of(&self, key: Option<&str>) -> View {
         let d = self.data.read();
         let acc = key.and_then(|k| d.get(k));
+        let cat = self.catalog.get();
         let inv = acc.and_then(|a| {
             let inv = a.inventory.as_ref()?;
             // What was picked or built since the read goes on top of it.
@@ -397,11 +402,19 @@ impl AccountService {
         });
         let foundry =
             inv.as_ref().map_or_else(HashSet::new, |i| i.foundry.iter().filter_map(|f| f.recipe.clone()).collect());
+        // ...and on top of a count set by hand before it, which stands in for the inventory's.
+        let manual = acc.map_or_else(accounts::Manual::default, |a| {
+            if a.deltas.is_empty() {
+                a.manual.clone()
+            } else {
+                crate::views::hand_counts_after(&cat, &a.manual, &a.deltas)
+            }
+        });
         View {
-            cat: self.catalog.get(),
+            cat,
             profile: acc.and_then(|a| a.profile.clone()),
             inv,
-            manual: Arc::new(acc.map(|a| a.manual.clone()).unwrap_or_default()),
+            manual: Arc::new(manual),
             market: Arc::clone(&self.market),
             foundry,
         }
@@ -518,13 +531,21 @@ impl AccountService {
             .iter()
             .flat_map(|a| {
                 let cat = &cat;
-                a.inventory.iter().flat_map(move |i| {
-                    i.foundry.iter().filter_map(move |f| {
-                        let uid = f.recipe.clone()?;
-                        let name = cat.name_of(&uid);
-                        let shown = if several { format!("{name} ({})", a.name) } else { name };
-                        Some((format!("{}:{uid}", a.key), shown, f.done?))
-                    })
+                // A build marked done since the read is not in the foundry any more.
+                let inv = a
+                    .inventory
+                    .as_ref()
+                    .map(|i| if a.deltas.is_empty() { Arc::clone(i) } else { Arc::new(i.with_deltas(&a.deltas)) });
+                inv.into_iter().flat_map(move |i| {
+                    i.foundry
+                        .iter()
+                        .filter_map(move |f| {
+                            let uid = f.recipe.clone()?;
+                            let name = cat.name_of(&uid);
+                            let shown = if several { format!("{name} ({})", a.name) } else { name };
+                            Some((format!("{}:{uid}", a.key), shown, f.done?))
+                        })
+                        .collect::<Vec<_>>()
                 })
             })
             .collect()
@@ -826,12 +847,12 @@ impl AccountService {
             let (minutes, seconds) = ((wait / 60.0) as i64, (wait % 60.0) as i64);
             return Err(UserError::new(format!("{why} Try again in {minutes}:{seconds:02}.")).into());
         }
-        d.profile_requests.requested = now();
-        d.profile_requests.unanswered = true;
+        let next = accounts::ProfileTimes { requested: now(), unanswered: true, ..d.profile_requests };
         // Not saved, not sent: a restart would not know of it.
         self.db
-            .save_registry(&d.active, d.switched, d.profile_requests, &d.accounts)
+            .save_registry(&d.active, d.switched, next, &d.accounts)
             .context("could not save the time of the profile request, so none is made")?;
+        d.profile_requests = next;
         Ok(())
     }
 
@@ -1087,8 +1108,17 @@ impl AccountService {
 
     /// Changes the shown account's hand-set data and saves it.
     fn edit_manual(&self, change: impl FnOnce(&mut accounts::Manual)) -> Result<()> {
+        self.edit_manual_in(None, change)
+    }
+
+    /// `edit_manual` for one account, whichever is shown.
+    fn edit_manual_of(&self, key: &str, change: impl FnOnce(&mut accounts::Manual)) -> Result<()> {
+        self.edit_manual_in(Some(key), change)
+    }
+
+    fn edit_manual_in(&self, key: Option<&str>, change: impl FnOnce(&mut accounts::Manual)) -> Result<()> {
         let mut d = self.data.write();
-        let key = d.active_or_new();
+        let key = key.map_or_else(|| d.active_or_new(), str::to_owned);
         let acc = d.get_mut(&key).ok_or_else(|| UserError::new("No account to save this for."))?;
         change(&mut acc.manual);
         self.db.save_manual(&key, &acc.manual)?;
@@ -1104,6 +1134,7 @@ impl AccountService {
     /// pick). The pick is added to the inventory of the account the screen was read for, until a
     /// read includes it.
     pub fn pick_reward(&self, id: i64, name: Option<&str>) -> Result<()> {
+        let _one = lock(&self.changing);
         let entry = self.db.reward(id)?.ok_or_else(|| UserError::new("That reward screen is not in the history."))?;
         let key = entry
             .account
@@ -1128,7 +1159,12 @@ impl AccountService {
                 }]
             }
         };
-        self.db.set_pick(id, &key, name, &deltas)?;
+        // A screen from before accounts existed shows for every account: an earlier pick on it
+        // may have been another account's.
+        let before = self.db.set_pick(id, &key, name, &deltas)?;
+        for other in before.iter().filter(|k| **k != key) {
+            self.reload_deltas(other)?;
+        }
         self.reload_deltas(&key)?;
         self.bus.signal(Topic::History);
         Ok(())
@@ -1137,8 +1173,10 @@ impl AccountService {
     /// "Mark built": the item is owned, and what building it took is gone from the inventory
     /// (or, when it was in the foundry, its foundry entry is collected).
     pub fn mark_built(&self, uid: &str) -> Result<()> {
-        let view = self.view();
+        // One change at a time, all of it for the one account shown when it began.
+        let _one = lock(&self.changing);
         let key = self.active_key().ok_or_else(|| UserError::new("No account to mark it built for."))?;
+        let view = self.view_of(Some(&key));
         if view.inv.is_none() {
             return Err(UserError::new("Builds can be marked once an inventory has been read.").into());
         }
@@ -1146,7 +1184,7 @@ impl AccountService {
         self.db.add_deltas(&key, &built.deltas)?;
         // Parts counted by hand are counted down by hand: the inventory does not hold them.
         if !built.hand_counts.is_empty() {
-            self.edit_manual(|m| {
+            self.edit_manual_of(&key, |m| {
                 for (part, n) in &built.hand_counts {
                     m.counts.insert(part.clone(), (*n, now()));
                 }

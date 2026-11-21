@@ -259,6 +259,8 @@ fn run(settings: config::Settings, browser: bool, headless: bool, offline: bool)
     // The window is gone: stop the background work, let running requests finish, and write what
     // is not on disk yet. Returning from `main` then ends whatever is left.
     state.stop.cancel();
+    // Scans looking for cards give up now, so the requests waiting on them end too.
+    state.scans.stop_scans();
     runtime.block_on(async {
         if tokio::time::timeout(SHUTDOWN_GRACE, server).await.is_err() {
             eprintln!("the server did not stop in time; quitting anyway");

@@ -185,6 +185,8 @@ function wire(view) {
   for (const el of view.querySelectorAll("[data-pick]")) {
     el.onclick = async (ev) => {
       ev.stopPropagation();
+      if (el.disabled) return;
+      el.disabled = true;
       const undo = el.closest(".chip").classList.contains("picked");
       // The history event redraws the list.
       await act("history/pick", { id: Number(el.dataset.pick), name: undo ? null : el.dataset.name }, undo ? "Pick undone" : "Added to the inventory");
@@ -256,8 +258,16 @@ export default {
     wire($("#pinned"));
     if (S.session?.screens !== lastScreens) {
       lastScreens = S.session?.screens;
-      const hist = await api("history").catch(() => null);
-      if (hist && $("#rewards")) { $("#rewards").innerHTML = rewards(hist); wire($("#rewards")); }
+      await redrawRewards();
     }
   },
+  // A pick (or its undo) changes the history without a new screen.
+  onEvent(topic) {
+    if (topic === "history") redrawRewards();
+  },
 };
+
+async function redrawRewards() {
+  const hist = await api("history").catch(() => null);
+  if (hist && $("#rewards")) { $("#rewards").innerHTML = rewards(hist); wire($("#rewards")); }
+}
