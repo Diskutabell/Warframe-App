@@ -7,8 +7,10 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod accounts;
+mod api;
 mod arbitration;
 mod art;
+mod bus;
 mod clock;
 mod config;
 mod difflib;
@@ -25,7 +27,6 @@ mod ocr;
 mod process;
 mod relics;
 mod rivens;
-mod server;
 mod sources;
 mod standing;
 mod state;
@@ -178,9 +179,14 @@ fn running(port: u16) -> bool {
     local(port, "settings", false, Duration::from_secs(2)).is_ok_and(|v| v.is_object())
 }
 
+/// How long the engine gets, once the window is closed, to finish requests and background work
+/// and to write what is not on disk yet.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
 fn run(settings: config::Settings, browser: bool, headless: bool, offline: bool) -> Result<()> {
     let desktop = !browser && !headless;
-    // Before anything starts a thread: the display backend is chosen through the environment.
+    // Before anything starts a thread: the display backend is chosen through the environment,
+    // which may only be changed while the process is single-threaded.
     let backend = desktop.then(|| desktop::prepare_environment(&settings));
     net::set_offline(offline);
 
@@ -191,15 +197,23 @@ fn run(settings: config::Settings, browser: bool, headless: bool, offline: bool)
         println!("warframeproject is already running.");
         return Ok(());
     }
-    let server = server::bind(port).map_err(|e| {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("engine")
+        .build()
+        .context("the engine's runtime could not start")?;
+    let listener = runtime.block_on(tokio::net::TcpListener::bind(("127.0.0.1", port))).map_err(|e| {
         UserError::new(format!(
             "Port {port} is in use by another program ({e}). Change \"port\" in {} or pass --port.",
             config::settings_file().display()
         ))
     })?;
+    // The engine's background tasks are spawned onto the runtime from here on.
+    let _runtime = runtime.enter();
     let state = state::State::new(settings);
     state.start();
-    server::serve(server, Arc::clone(&state), 6);
+    let server = runtime.spawn(api::serve(listener, Arc::clone(&state), state.stop.clone()));
+    runtime.spawn(quit_on_signal(Arc::clone(&state)));
     #[cfg(windows)]
     {
         if let Err(e) = state.install_hotkeys() {
@@ -215,14 +229,8 @@ fn run(settings: config::Settings, browser: bool, headless: bool, offline: bool)
     let url = format!("http://127.0.0.1:{port}/");
     println!("warframeproject {} engine on {url}", env!("CARGO_PKG_VERSION"));
 
-    match backend {
-        Some(backend) => {
-            let res = desktop::run(Arc::clone(&state), &url, backend);
-            // Flush dirty caches and wait briefly for in-flight disk writes before ending background threads.
-            state.shutdown();
-            res?;
-            std::process::exit(0);
-        }
+    let result = match backend {
+        Some(backend) => desktop::run(Arc::clone(&state), &url, backend),
         None => {
             if browser {
                 #[cfg(unix)]
@@ -230,11 +238,45 @@ fn run(settings: config::Settings, browser: bool, headless: bool, offline: bool)
                 #[cfg(windows)]
                 desktop::open_url(&url);
             }
-            loop {
-                std::thread::park();
-            }
+            // Until `/api/quit`, Ctrl+C or SIGTERM.
+            runtime.block_on(state.stop.cancelled());
+            Ok(())
+        }
+    };
+    // The window is gone: stop the background work, let running requests finish, and write what
+    // is not on disk yet. Returning from `main` then ends whatever is left.
+    state.stop.cancel();
+    runtime.block_on(async {
+        if tokio::time::timeout(SHUTDOWN_GRACE, server).await.is_err() {
+            eprintln!("the server did not stop in time; quitting anyway");
+        }
+    });
+    state.shutdown();
+    drop(_runtime);
+    runtime.shutdown_timeout(Duration::from_secs(1));
+    result
+}
+
+/// Ctrl+C in the terminal, or SIGTERM from the system, quits like the window's Quit button.
+async fn quit_on_signal(state: Arc<state::State>) {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let (Ok(mut term), Ok(mut int)) = (signal(SignalKind::terminate()), signal(SignalKind::interrupt())) else {
+            return;
+        };
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = int.recv() => {}
+            _ = state.stop.cancelled() => return,
         }
     }
+    #[cfg(windows)]
+    tokio::select! {
+        r = tokio::signal::ctrl_c() => if r.is_err() { return },
+        _ = state.stop.cancelled() => return,
+    }
+    state.quit();
 }
 
 fn trigger(port: u16) -> Result<()> {

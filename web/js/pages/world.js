@@ -213,6 +213,7 @@ function render(w) {
 export default {
   id: "world",
   title: "World",
+  refreshOn: ["catalog"],
   icon: "world",
   async render(view, params, app) {
     const w = await api("world");

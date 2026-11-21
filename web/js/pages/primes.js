@@ -9,6 +9,8 @@ const SHOW = [["started", "In progress"], ["complete", "Complete"], ["missing", 
 export default {
   id: "primes",
   title: "Prime sets",
+  // Redrawn when the engine says the account's data or the game data changed.
+  refreshOn: ["inventory", "catalog"],
   icon: "primes",
   async render(view, params, app) {
     const data = await api("primes");

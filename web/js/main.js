@@ -1,6 +1,6 @@
-// The app shell: navigation, routing, state polling and keyboard shortcuts.
+// The app shell: navigation, routing, the engine's event stream and keyboard shortcuts.
 
-import { $, act, api, esc, hydrateIcons, icon, ago } from "./lib.js";
+import { $, act, api, debounce, esc, hydrateIcons, icon, ago } from "./lib.js";
 import * as drawer from "./drawer.js";
 import * as palette from "./palette.js";
 import { gimg, ICON, mrBadge } from "./game.js";
@@ -199,12 +199,24 @@ function showUpdate(u) {
 // A click beside the box closes it too.
 $("#update").addEventListener("click", (e) => { if (e.target.id === "update") closeUpdate(); });
 
+/** Fetches the summary now (after a change made on the page, which then shows at once). */
 async function poll() {
+  let S = null;
   try {
-    app.state = await api("state");
+    S = await api("state");
   } catch {
-    app.state = null;
+    S = null;
   }
+  applyState(S);
+}
+
+/** Shows a summary, from the event stream or from `poll`. */
+function applyState(S) {
+  // Back after the engine was gone (restarted, say): what the page shows may be old.
+  const recovered = S && !app.state;
+  app.state = S;
+  if (recovered && !current) go();
+  else if (recovered) refreshSoon();
   if (app.state?.update && !updateShown) {
     // The popup is a nicety: whatever goes wrong in it must not stop the page.
     try { showUpdate(app.state.update); } catch (e) { console.error("update popup:", e); }
@@ -213,6 +225,41 @@ async function poll() {
   renderBadges();
   const { page } = route();
   if (app.state && page === current && page.onState) page.onState(app.state);
+}
+
+// ------------------------------------------------------------------ the engine's event stream
+// The engine pushes what changed (`/api/events`): the summary itself whenever it changes, and a
+// topic for everything else. A page redraws for the topics it lists in `refreshOn`, or handles
+// them itself in `onEvent(topic, data)`.
+
+let downTimer = null;
+const refreshSoon = debounce(() => { if (current) app.refresh(); }, 300);
+
+function onTopic(topic, data) {
+  const { page } = route();
+  if (page !== current) return;
+  if (page.onEvent) page.onEvent(topic, data);
+  else if (page.refreshOn?.includes(topic)) refreshSoon();
+}
+
+function connect() {
+  const es = new EventSource("/api/events");
+  es.addEventListener("state", (e) => {
+    clearTimeout(downTimer);
+    downTimer = null;
+    applyState(JSON.parse(e.data));
+  });
+  // Another account is shown: everything on the page belongs to it.
+  es.addEventListener("account", async () => { await poll(); go(true); });
+  es.addEventListener("resync", async () => { await poll(); app.refresh(); });
+  for (const topic of ["inventory", "catalog", "tasks", "world", "prices", "history", "rewards", "riven", "settings"]) {
+    es.addEventListener(topic, (e) => onTopic(topic, JSON.parse(e.data || "{}")));
+  }
+  // The browser reconnects by itself; a few seconds without the engine are worth saying.
+  es.onerror = () => {
+    if (downTimer) return;
+    downTimer = setTimeout(() => { if (es.readyState !== EventSource.OPEN) applyState(null); }, 4000);
+  };
 }
 
 let current = null;
@@ -249,7 +296,7 @@ async function go(keepScroll = false) {
   if (version !== navVersion) return;
   if (!app.state) {
     view.innerHTML = `<div class="page"><div class="page-head"><div><h1>The engine isn't responding</h1>
-      <p>Retrying every few seconds. If it keeps failing, start the app again from a terminal and read its output.</p></div></div></div>`;
+      <p>Reconnecting by itself. If it keeps failing, start the app again from a terminal and read its output.</p></div></div></div>`;
     return;
   }
   if (!keepScroll || current !== page) {
@@ -329,5 +376,5 @@ window.addEventListener("wfp:poll", () => poll());
 // Another account is shown: everything on the page belongs to it.
 window.addEventListener("wfp:account", async () => { await poll(); go(true); });
 hydrateIcons(document.body);
-poll().then(() => go());
-setInterval(poll, 5000);
+// The stream's first event is the summary; the first page is drawn once it is there.
+connect();

@@ -16,6 +16,7 @@ use anyhow::Result;
 use tao::dpi::LogicalSize;
 use tao::event::{Event as TaoEvent, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy, EventLoopWindowTarget};
+use tao::platform::run_return::EventLoopExtRunReturn;
 use tao::platform::windows::{WindowBuilderExtWindows, WindowExtWindows};
 use tao::window::{Window, WindowBuilder};
 use windows_sys::Win32::Foundation::HWND;
@@ -379,9 +380,9 @@ mod tests {
     }
 }
 
-/// Runs the event loop until the main window closes; tao ends the process then.
+/// Runs the event loop until the main window closes or the app is told to quit.
 pub fn run(state: Arc<State>, url: &str, _backend: Backend) -> Result<()> {
-    let event_loop = EventLoopBuilder::<Event>::with_user_event().build();
+    let mut event_loop = EventLoopBuilder::<Event>::with_user_event().build();
     let proxy = event_loop.create_proxy();
 
     // The engine sends its events on a channel; a small thread hands them to the event loop.
@@ -428,7 +429,9 @@ pub fn run(state: Arc<State>, url: &str, _backend: Backend) -> Result<()> {
         state,
     };
 
-    event_loop.run(move |event, _, flow| {
+    // `run_return` hands control back to `main` when the loop ends, which then shuts the engine
+    // down properly; `run` would end the process from inside the loop.
+    event_loop.run_return(|event, _, flow| {
         // Owned by the loop, so they live as long as it runs.
         let _ = (&webview, &context);
         let show = |window: &Window, tray: &tray::Tray, visible: &mut bool| {
@@ -449,7 +452,6 @@ pub fn run(state: Arc<State>, url: &str, _backend: Backend) -> Result<()> {
                     hide(&window, &tray, &mut visible);
                 } else {
                     tray.set_enabled(false, false);
-                    overlays.state.shutdown();
                     *flow = ControlFlow::Exit;
                 }
             }
@@ -474,7 +476,6 @@ pub fn run(state: Arc<State>, url: &str, _backend: Backend) -> Result<()> {
                 }
                 UiEvent::Quit => {
                     tray.set_enabled(false, false);
-                    overlays.state.shutdown();
                     *flow = ControlFlow::Exit;
                 }
             },
@@ -488,5 +489,6 @@ pub fn run(state: Arc<State>, url: &str, _backend: Backend) -> Result<()> {
         if !matches!(*flow, ControlFlow::ExitWithCode(_)) {
             *flow = overlays.next_deadline().map_or(ControlFlow::Wait, ControlFlow::WaitUntil);
         }
-    })
+    });
+    Ok(())
 }

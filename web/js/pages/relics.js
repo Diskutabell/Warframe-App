@@ -10,6 +10,8 @@ const SORTS = [["ev", "Value"], ["need", "Needed drops"], ["name", "Name"]];
 export default {
   id: "relics",
   title: "Relics",
+  // Redrawn when the engine says the account's data or the game data changed.
+  refreshOn: ["inventory", "catalog"],
   icon: "relics",
   async render(view, params, app) {
     const [data, fis] = await Promise.all([api("relics" + (st.owned ? "?owned=1" : "")), api("fissures").catch(() => null)]);

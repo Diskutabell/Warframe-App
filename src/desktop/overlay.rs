@@ -487,7 +487,7 @@ impl Overlays {
         if let Some(icon) = self.icons.borrow().get(&(name, px)) {
             return Some(icon.clone());
         }
-        let file = crate::server::Web::get(&format!("icons/{name}.png"))?;
+        let file = crate::api::Web::get(&format!("icons/{name}.png"))?;
         let stream = gio::MemoryInputStream::from_bytes(&glib::Bytes::from_owned(file.data.into_owned()));
         let icon = gdk_pixbuf::Pixbuf::from_stream_at_scale(&stream, -1, px, true, gio::Cancellable::NONE).ok()?;
         self.icons.borrow_mut().insert((name, px), icon.clone());

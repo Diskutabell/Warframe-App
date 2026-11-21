@@ -130,6 +130,8 @@ function render(s) {
 export default {
   id: "standing",
   title: "Standing",
+  // Redrawn when the engine says the account's data or the game data changed.
+  refreshOn: ["inventory", "catalog"],
   icon: "standing",
   async render(view, params, app) {
     const s = await api("standing");

@@ -630,7 +630,10 @@ mod tests {
             profile: None,
             inv: inv.map(Arc::new),
             manual: Arc::new(manual),
-            market: Market::new(Arc::new(std::sync::RwLock::new(crate::config::Settings::default()))),
+            market: Market::new(
+                Arc::new(std::sync::RwLock::new(crate::config::Settings::default())),
+                crate::bus::Bus::new(),
+            ),
             foundry: HashSet::new(),
         }
     }

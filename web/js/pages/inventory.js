@@ -35,6 +35,8 @@ function tile(x) {
 export default {
   id: "inventory",
   title: "Inventory",
+  // Redrawn when the engine says the account's data or the game data changed.
+  refreshOn: ["inventory", "catalog"],
   icon: "inventory",
   async render(view, params, app) {
     const data = await api("inventory");

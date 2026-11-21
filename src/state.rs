@@ -18,7 +18,10 @@ use indexmap::IndexMap;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use tokio_util::sync::CancellationToken;
+
 use crate::accounts::{self, Account, Evidence};
+use crate::bus::{Bus, Topic};
 use crate::config::Settings;
 use crate::difflib::py_round;
 use crate::eelog::{self, LogEvent, LogStatus, LogWatcher};
@@ -357,6 +360,10 @@ enum Owner {
 }
 
 pub struct State {
+    /// What changed, for the UI's event stream.
+    pub bus: Bus,
+    /// Cancelled when the app quits: background work stops and the server shuts down.
+    pub stop: CancellationToken,
     pub settings: Arc<RwLock<Settings>>,
     /// Serializes read-patch-save-swap in `update_settings` so concurrent toggles cannot clobber each other.
     settings_update: Mutex<()>,
@@ -364,10 +371,10 @@ pub struct State {
     catalog_error: Mutex<Option<String>>,
     names: Mutex<Option<(Arc<Catalog>, Arc<Names>)>>,
     pub market: Arc<Market>,
-    data: Mutex<Data>,
+    data: Watched<Data>,
     rewards: Mutex<Option<Arc<RewardResult>>>,
     riven: Mutex<Option<Arc<RivenResult>>>,
-    memscan: Mutex<MemscanStatus>,
+    memscan: Watched<MemscanStatus>,
     /// One capture and OCR at a time, rewards and rivens alike.
     scan_lock: Mutex<()>,
     reward_scan: Mutex<RewardScan>,
@@ -386,6 +393,61 @@ pub struct State {
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// State the summary shows. Reading it changes nothing; every write marks the summary dirty, so
+/// the UI is sent a fresh one (`Bus::state_changed`). A read guard cannot be written through, so
+/// the compiler finds any write that would otherwise go unannounced.
+struct Watched<T> {
+    value: Mutex<T>,
+    bus: Bus,
+}
+
+impl<T> Watched<T> {
+    fn new(value: T, bus: &Bus) -> Watched<T> {
+        Watched { value: Mutex::new(value), bus: bus.clone() }
+    }
+
+    fn read(&self) -> Read<'_, T> {
+        Read(lock(&self.value))
+    }
+
+    fn write(&self) -> Write<'_, T> {
+        Write { guard: lock(&self.value), bus: &self.bus }
+    }
+}
+
+struct Read<'a, T>(MutexGuard<'a, T>);
+
+impl<T> std::ops::Deref for Read<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+struct Write<'a, T> {
+    guard: MutexGuard<'a, T>,
+    bus: &'a Bus,
+}
+
+impl<T> std::ops::Deref for Write<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.guard
+    }
+}
+
+impl<T> std::ops::DerefMut for Write<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.guard
+    }
+}
+
+impl<T> Drop for Write<'_, T> {
+    fn drop(&mut self) {
+        self.bus.state_changed();
+    }
 }
 
 fn same_name(a: &str, b: &str) -> bool {
@@ -467,17 +529,22 @@ impl State {
         for note in notes {
             data.push_event(note, "info");
         }
+        let bus = Bus::new();
         Arc::new(State {
-            market: Market::new(Arc::clone(&settings)),
+            market: Market::new(Arc::clone(&settings), bus.clone()),
+            stop: CancellationToken::new(),
             settings,
             settings_update: Mutex::new(()),
             catalog: RwLock::new(Arc::new(Catalog::default())),
             catalog_error: Mutex::new(None),
             names: Mutex::new(None),
-            data: Mutex::new(data),
+            data: Watched::new(data, &bus),
             rewards: Mutex::new(None),
             riven: Mutex::new(None),
-            memscan: Mutex::new(MemscanStatus { state: "idle", last_attempt: f64::NEG_INFINITY, ..Default::default() }),
+            memscan: Watched::new(
+                MemscanStatus { state: "idle", last_attempt: f64::NEG_INFINITY, ..Default::default() },
+                &bus,
+            ),
             scan_lock: Mutex::new(()),
             reward_scan: Mutex::new(RewardScan {
                 started: f64::NEG_INFINITY,
@@ -494,6 +561,7 @@ impl State {
             notifier: Mutex::new(Notifier::default()),
             update: Mutex::new(None),
             started: now(),
+            bus,
         })
     }
 
@@ -535,6 +603,12 @@ impl State {
         let me = Arc::clone(self);
         std::thread::Builder::new().name("gamedata".into()).spawn(move || me.load_static(false)).ok();
 
+        // The summary is pushed to the UI whenever it changed.
+        let me = Arc::clone(self);
+        tokio::spawn(self.bus.clone().run_summary(self.stop.clone(), move || me.summary()));
+        // A fresh worldstate is announced while a page listens; the pages showing it redraw.
+        tokio::spawn(Arc::clone(self).watch_world());
+
         let paths = Arc::clone(self);
         let events = Arc::clone(self);
         let status = LogWatcher::spawn(Box::new(move || paths.log_path()), Box::new(move |ev| events.on_log(ev)));
@@ -546,7 +620,10 @@ impl State {
         if !net::offline() {
             let me = Arc::clone(self);
             let check = move || match update::check() {
-                Ok(found) => *lock(&me.update) = found,
+                Ok(found) => {
+                    *lock(&me.update) = found;
+                    me.bus.state_changed();
+                }
                 Err(e) => eprintln!("could not check for a newer version: {e:#}"),
             };
             std::thread::Builder::new().name("update-check".into()).spawn(check).ok();
@@ -563,9 +640,11 @@ impl State {
             Ok(c) => {
                 *self.catalog.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(c);
                 *lock(&self.catalog_error) = None;
+                self.bus.signal(Topic::Catalog);
             }
             Err(e) => *lock(&self.catalog_error) = Some(format!("{e:#}")),
         }
+        self.bus.state_changed();
         self.market.load_items();
         match self.catalog_error() {
             None => self.event("Game data loaded", "info"),
@@ -587,7 +666,7 @@ impl State {
     }
 
     pub fn event(&self, text: &str, kind: &'static str) {
-        lock(&self.data).push_event(text.to_string(), kind);
+        self.data.write().push_event(text.to_string(), kind);
     }
 
     /// Whether an account's profile should be loaded again: never loaded, older than the refresh
@@ -618,7 +697,7 @@ impl State {
             // automatic refresh switched on, the account logged in.
             let auto = self.settings().profile_auto_refresh && self.game_active();
             let due = {
-                let d = lock(&self.data);
+                let d = self.data.read();
                 let key = if first {
                     d.active.clone()
                 } else if auto {
@@ -636,9 +715,38 @@ impl State {
         }
     }
 
+    /// Announces each new worldstate while a page listens: fissures, cycles and vendors redraw
+    /// without the page asking. The worldstate itself is fetched at most once a minute.
+    async fn watch_world(self: Arc<Self>) {
+        let mut last: Option<Arc<Value>> = None;
+        loop {
+            tokio::select! {
+                _ = self.stop.cancelled() => return,
+                _ = tokio::time::sleep(Duration::from_secs(60)) => {}
+            }
+            if !self.bus.has_listeners() {
+                continue;
+            }
+            let platform = self.settings().platform;
+            let Ok((raw, _)) = tokio::task::spawn_blocking(move || world::raw(platform)).await else { continue };
+            let fresh = match (&raw, &last) {
+                (Some(new), Some(old)) => !Arc::ptr_eq(new, old),
+                (Some(_), None) => true,
+                _ => false,
+            };
+            if fresh {
+                last = raw;
+                self.bus.signal(Topic::World);
+            }
+        }
+    }
+
     // ------------------------------------------------------------ the log
 
     fn on_log(self: &Arc<Self>, ev: LogEvent) {
+        // Every log event changes what the summary shows about the log (its last lines, whether
+        // the game is running), and most change an account as well.
+        self.bus.state_changed();
         match ev {
             LogEvent::Name(name, live) => self.on_login(&name, live),
             LogEvent::Replayed => {
@@ -649,7 +757,7 @@ impl State {
             }
             LogEvent::Account(id, name) => {
                 let key = {
-                    let mut d = lock(&self.data);
+                    let mut d = self.data.write();
                     match name {
                         Some(n) => Some(d.ensure(&n)),
                         None => d.game.clone(),
@@ -661,7 +769,7 @@ impl State {
             }
             LogEvent::Candidate(id, sure, line) => self.on_candidate(id, sure, line),
             LogEvent::Mastery(lo, hi) => {
-                let mut d = lock(&self.data);
+                let mut d = self.data.write();
                 let Some(game) = d.game.clone() else { return };
                 let changed = match d.get_mut(&game) {
                     Some(acc) if acc.badge != Some((lo, hi)) => {
@@ -675,7 +783,7 @@ impl State {
                 }
             }
             LogEvent::Duviri(offers) => {
-                let mut d = lock(&self.data);
+                let mut d = self.data.write();
                 let Some(game) = d.game.clone() else { return };
                 let Some(acc) = d.get_mut(&game) else { return };
                 // A log read back at startup may hold an older roll than the one kept.
@@ -720,7 +828,7 @@ impl State {
             return;
         }
         let (key, switched) = {
-            let mut d = lock(&self.data);
+            let mut d = self.data.write();
             let key = d.ensure(&name);
             let switched = d.game.as_deref() != Some(key.as_str());
             d.game = Some(key.clone());
@@ -734,7 +842,7 @@ impl State {
         };
         if live {
             self.follow_game(true);
-            let due = lock(&self.data).get(&key).is_some_and(|a| a.id.is_some() && self.profile_stale(a));
+            let due = self.data.read().get(&key).is_some_and(|a| a.id.is_some() && self.profile_stale(a));
             if switched && due {
                 self.request_profile(&key);
             }
@@ -755,7 +863,7 @@ impl State {
             .and_then(|m| m.modified().ok())
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|t| t.as_secs_f64());
-        let mut d = lock(&self.data);
+        let mut d = self.data.write();
         let Some(game) = d.game.clone() else { return };
         if d.active.as_deref() == Some(game.as_str()) || (!live && log_time.is_none_or(|t| t <= d.switched)) {
             return;
@@ -765,13 +873,15 @@ impl State {
         let name = d.name_of(&game);
         d.push_event(format!("Showing {name}, the account the game is logged in to"), "info");
         d.save();
+        drop(d);
+        self.bus.signal(Topic::Account);
     }
 
     /// Never queries DE: a sure line links the logged-in account, anything else is shown to the
     /// user. An id another account already has is left alone.
     fn on_candidate(self: &Arc<Self>, id: String, sure: bool, line: String) {
         let link = {
-            let mut d = lock(&self.data);
+            let mut d = self.data.write();
             let Some(game) = d.game.clone() else { return };
             if d.accounts.iter().any(|a| a.id.as_deref() == Some(id.as_str())) {
                 return;
@@ -797,7 +907,7 @@ impl State {
     /// older one elsewhere.
     fn confirm(self: &Arc<Self>, key: &str, id: &str, source: &str) {
         let changed = {
-            let mut d = lock(&self.data);
+            let mut d = self.data.write();
             let mut moved_from = None;
             for other in d.accounts.iter_mut().filter(|a| a.key != key && a.id.as_deref() == Some(id)) {
                 other.id = None;
@@ -833,13 +943,13 @@ impl State {
         if !self.settings().memory_scan_enabled || memscan::availability().is_err() {
             return;
         }
-        let denied = lock(&self.memscan).denied_pid;
+        let denied = self.memscan.read().denied_pid;
         if denied.is_some() && memscan::find_game_pid() == denied {
             return;
         }
         let due = now() + delay.as_secs_f64();
         {
-            let mut st = lock(&self.memscan);
+            let mut st = self.memscan.write();
             if st.next.is_some_and(|p| p <= due) {
                 return; // an earlier scan is already on its way
             }
@@ -851,7 +961,7 @@ impl State {
             let pid = loop {
                 let enabled = me.settings().memory_scan_enabled;
                 let pid = memscan::find_game_pid();
-                let mut st = lock(&me.memscan);
+                let mut st = me.memscan.write();
                 match st.start_scheduled(due, enabled, pid, now()) {
                     ScheduledScan::Superseded | ScheduledScan::Cancelled => return,
                     ScheduledScan::Start => break pid,
@@ -862,7 +972,7 @@ impl State {
             };
             me.memscan_now(pid, retries);
         }) {
-            let mut st = lock(&self.memscan);
+            let mut st = self.memscan.write();
             if st.next == Some(due) {
                 st.next = None;
             }
@@ -878,7 +988,7 @@ impl State {
         // A panic in the read (a bug) is caught here: the status would otherwise stay "scanning"
         // for good, and every scan scheduled after it would wait for that one forever.
         let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match pid {
-            Some(pid) => memscan::scan_inventory(pid, |p| lock(&self.memscan).progress = py_round(p, 3)),
+            Some(pid) => memscan::scan_inventory(pid, |p| self.memscan.write().progress = py_round(p, 3)),
             None => Err(ScanError::NotRunning),
         }));
         let result = match read {
@@ -888,7 +998,7 @@ impl State {
         let retry = match result {
             Ok((captures, info)) => self.apply_capture(captures, info.seconds),
             Err(e) => {
-                let mut st = lock(&self.memscan);
+                let mut st = self.memscan.write();
                 st.detail = Some(e.to_string());
                 if matches!(e, ScanError::Denied(_)) {
                     st.denied_pid = pid;
@@ -910,7 +1020,7 @@ impl State {
     /// Ends a read that applied nothing: the last good inventory still stands. True asks for a
     /// retry.
     fn capture_held_back(&self, detail: String) -> bool {
-        let mut st = lock(&self.memscan);
+        let mut st = self.memscan.write();
         st.state = if st.last.is_some() { "ok" } else { "idle" };
         st.detail = Some(detail);
         true
@@ -920,7 +1030,7 @@ impl State {
     /// memory can hold another account's inventory too (logged out and in without restarting the
     /// game): mastery XP tells them apart. True asks for a retry.
     fn apply_capture(&self, captures: Vec<Value>, seconds: f64) -> bool {
-        let game = lock(&self.data).game.clone();
+        let game = self.data.read().game.clone();
         let Some(game) = game else {
             return self.capture_held_back(
                 "Waiting for the game's \"Logged in\" line, which says whose inventory this is.".into(),
@@ -929,7 +1039,7 @@ impl State {
         let file = accounts::dir(&game).join("memscan_sections.json");
         let mut sections: memscan::Sections = crate::config::read_json(&file).unwrap_or_default();
         let (chosen, held_by, missing, game_name) = {
-            let d = lock(&self.data);
+            let d = self.data.read();
             let (chosen, held_by, missing) = choose_capture(&d, &game, &sections, captures);
             (chosen, held_by, missing, d.name_of(&game))
         };
@@ -951,9 +1061,9 @@ impl State {
         // The same sync, read again with nothing new in it: leave the inventory and the log alone.
         let keys = obj.as_object().map_or(0, |o| o.len());
         let sync = obj["LastInventorySync"].as_f64();
-        let current = lock(&self.data).get(&game).and_then(|a| a.inventory.as_ref().map(|i| (i.synced_at, i.sections)));
+        let current = self.data.read().get(&game).and_then(|a| a.inventory.as_ref().map(|i| (i.synced_at, i.sections)));
         if sync.is_some() && current.is_some_and(|(at, n)| at == sync && keys <= n) {
-            let mut st = lock(&self.memscan);
+            let mut st = self.memscan.write();
             st.state = "ok";
             st.detail = None;
             return false;
@@ -962,7 +1072,7 @@ impl State {
             inv.source = Some("memory scan".into());
             self.store_inventory(&game, inv)
         });
-        let mut st = lock(&self.memscan);
+        let mut st = self.memscan.write();
         match stored {
             Ok(inv) => {
                 sections.learn(&obj);
@@ -991,7 +1101,7 @@ impl State {
     /// worker serves every account, one request per cooldown.
     fn request_profile(self: &Arc<Self>, key: &str) {
         {
-            let mut d = lock(&self.data);
+            let mut d = self.data.write();
             if !d.profile_queue.iter().any(|k| k == key) {
                 d.profile_queue.push_back(key.to_string());
             }
@@ -1002,7 +1112,7 @@ impl State {
         }
         let me = Arc::clone(self);
         if let Err(e) = std::thread::Builder::new().name("profile".into()).spawn(move || me.profile_worker()) {
-            lock(&self.data).profile_worker = false;
+            self.data.write().profile_worker = false;
             eprintln!("could not start profile worker: {e}");
         }
     }
@@ -1014,14 +1124,14 @@ impl State {
         impl Drop for WorkerGuard {
             fn drop(&mut self) {
                 if let Some(state) = self.0.take() {
-                    lock(&state.data).profile_worker = false;
+                    state.data.write().profile_worker = false;
                 }
             }
         }
         let mut guard = WorkerGuard(Some(Arc::clone(&self)));
         loop {
             let (key, wait, paused) = {
-                let mut d = lock(&self.data);
+                let mut d = self.data.write();
                 let Some(key) = d.profile_queue.front().cloned() else {
                     d.profile_worker = false;
                     guard.0 = None;
@@ -1030,14 +1140,14 @@ impl State {
                 (key, d.profile_wait(), d.profile_paused())
             };
             if wait > 0.0 {
-                let name = lock(&self.data).name_of(&key);
+                let name = self.data.read().name_of(&key);
                 let why = if paused { "DE refused the last request" } else { "pausing for DE's rate limit" };
                 self.event(&format!("Loading {name}'s profile in {} min ({why})", (wait / 60.0) as i64 + 1), "info");
                 std::thread::sleep(Duration::from_secs_f64(wait + 1.0));
                 continue;
             }
             let due = {
-                let mut d = lock(&self.data);
+                let mut d = self.data.write();
                 d.profile_queue.pop_front();
                 d.get(&key).is_some_and(|a| a.id.is_some() && self.profile_stale(a))
             };
@@ -1051,7 +1161,7 @@ impl State {
     /// service is left alone after a refusal. The time is saved at once: a restart must not
     /// forget it.
     fn take_profile_slot(&self) -> Result<()> {
-        let mut d = lock(&self.data);
+        let mut d = self.data.write();
         let wait = d.profile_wait();
         if wait > 0.0 {
             let why = if d.profile_paused() {
@@ -1071,7 +1181,7 @@ impl State {
 
     /// Loads the profile of the account `key` (the one shown, from the window).
     pub fn refresh_profile(&self, key: &str, quiet: bool) -> Result<Option<Arc<Profile>>> {
-        let id = lock(&self.data).get(key).and_then(|a| a.id.clone());
+        let id = self.data.read().get(key).and_then(|a| a.id.clone());
         let Some(id) = id else {
             return Err(UserError::new(
                 "This account has no id yet. It is read from EE.log after a relic mission in a squad, or enter it in Settings.",
@@ -1084,7 +1194,7 @@ impl State {
             Err(e) => {
                 let msg = e.to_string();
                 {
-                    let mut d = lock(&self.data);
+                    let mut d = self.data.write();
                     if let Some(acc) = d.get_mut(key) {
                         acc.profile_error = Some(msg.clone());
                     }
@@ -1120,7 +1230,7 @@ impl State {
         prof.id = id.clone();
         let prof = Arc::new(prof);
         let shown = prof.name.as_deref().map(eelog::strip_glyphs).filter(|n| !n.is_empty());
-        let mut d = lock(&self.data);
+        let mut d = self.data.write();
         let mut target = key.to_string();
         if let Some(name) = &shown {
             if !d.get(key).is_some_and(|a| same_name(&a.name, name)) {
@@ -1168,6 +1278,8 @@ impl State {
         let name = d.name_of(&target);
         d.push_event(format!("Profile updated: {name}, {} items with mastery XP", prof.xp.len()), "info");
         d.save();
+        drop(d);
+        self.bus.signal(Topic::Inventory);
         prof
     }
 
@@ -1175,7 +1287,7 @@ impl State {
     pub fn import_profile(&self, data: &Value) -> Result<()> {
         let prof = sources::parse_profile(data)?;
         let key = {
-            let mut d = lock(&self.data);
+            let mut d = self.data.write();
             let named = prof.name.as_deref().and_then(|n| d.by_name(n)).map(|a| a.key.clone());
             named.unwrap_or_else(|| d.active_or_new())
         };
@@ -1187,7 +1299,7 @@ impl State {
 
     fn store_inventory(&self, key: &str, inv: Inventory) -> Arc<Inventory> {
         let inv = Arc::new(inv);
-        let mut d = lock(&self.data);
+        let mut d = self.data.write();
         let name = d.name_of(key);
         if let Some(acc) = d.get_mut(key) {
             if let Err(e) = acc.write("inventory.json", &*inv) {
@@ -1201,6 +1313,8 @@ impl State {
             format!("{name}'s inventory loaded from {source}: {} item stacks, {equipment} equipment", inv.counts.len()),
             "info",
         );
+        drop(d);
+        self.bus.signal(Topic::Inventory);
         inv
     }
 
@@ -1210,7 +1324,7 @@ impl State {
         let mut inv = sources::parse_inventory(data)?;
         inv.source = Some(label.to_string());
         let key = {
-            let mut d = lock(&self.data);
+            let mut d = self.data.write();
             let key = d.active_or_new();
             let name = d.name_of(&key);
             match owner(&d, &key, &inv.xp) {
@@ -1233,7 +1347,7 @@ impl State {
     }
 
     pub fn clear_inventory(&self) {
-        let mut d = lock(&self.data);
+        let mut d = self.data.write();
         let Some(key) = d.active.clone() else { return };
         if let Some(acc) = d.get_mut(&key) {
             acc.inventory = None;
@@ -1245,6 +1359,8 @@ impl State {
                 d.push_event(format!("Could not reset memory scan expectations: {e}"), "warn");
             }
         }
+        drop(d);
+        self.bus.signal(Topic::Inventory);
     }
 
     fn watch_inventory_file(&self) {
@@ -1254,7 +1370,7 @@ impl State {
         }
         let Ok(modified) = fs::metadata(&path).and_then(|m| m.modified()) else { return };
         {
-            let mut d = lock(&self.data);
+            let mut d = self.data.write();
             if d.inventory_watched.as_ref().is_some_and(|(p, m)| p == &path && modified <= *m) {
                 return;
             }
@@ -1275,12 +1391,16 @@ impl State {
 
     /// Changes the shown account's hand-set data and saves it.
     fn edit_manual(&self, change: impl FnOnce(&mut accounts::Manual)) -> Result<()> {
-        let mut d = lock(&self.data);
+        let mut d = self.data.write();
         let key = d.active_or_new();
         let acc = d.get_mut(&key).ok_or_else(|| UserError::new("No account to save this for."))?;
         change(&mut acc.manual);
         acc.write("manual.json", &acc.manual)?;
         d.save();
+        drop(d);
+        // Hand-set counts, pins and tasks all show on the pages and the farming board.
+        self.bus.signal(Topic::Inventory);
+        self.bus.signal(Topic::Tasks);
         Ok(())
     }
 
@@ -1377,7 +1497,7 @@ impl State {
             .into());
         }
         let key = {
-            let mut d = lock(&self.data);
+            let mut d = self.data.write();
             match key.filter(|k| d.get(k).is_some()) {
                 Some(k) => k.to_string(),
                 None => d.active_or_new(),
@@ -1391,7 +1511,7 @@ impl State {
     /// DE's rate limit). The next login in the game moves the window to that account again.
     pub fn switch_account(self: &Arc<Self>, key: &str) -> Result<()> {
         let due = {
-            let mut d = lock(&self.data);
+            let mut d = self.data.write();
             let Some(acc) = d.get(key) else {
                 return Err(UserError::new("There is no such account.").into());
             };
@@ -1403,6 +1523,7 @@ impl State {
             }
             due
         };
+        self.bus.signal(Topic::Account);
         if due {
             self.request_profile(key);
         }
@@ -1412,7 +1533,7 @@ impl State {
     /// Forgets an account and deletes its data. If the game logs in to it again, it comes back
     /// empty.
     pub fn forget_account(&self, key: &str) -> Result<()> {
-        let mut d = lock(&self.data);
+        let mut d = self.data.write();
         let Some(pos) = d.accounts.iter().position(|a| a.key == key) else {
             return Err(UserError::new("There is no such account.").into());
         };
@@ -1428,6 +1549,8 @@ impl State {
         accounts::delete(key);
         d.push_event(format!("Forgot {} and deleted its data", gone.name), "info");
         d.save();
+        drop(d);
+        self.bus.signal(Topic::Account);
         Ok(())
     }
 
@@ -1447,17 +1570,19 @@ impl State {
             let tray_changed =
                 (updated.minimize_to_tray != previous.minimize_to_tray).then_some(updated.minimize_to_tray);
             if updated.inventory_json_path != previous.inventory_json_path {
-                lock(&self.data).inventory_watched = None;
+                self.data.write().inventory_watched = None;
             }
             if scan_now {
                 // Switching it on reads right away, even after a refusal (the system may allow it now).
-                let mut st = lock(&self.memscan);
+                let mut st = self.memscan.write();
                 st.denied_pid = None;
                 st.last_attempt = f64::NEG_INFINITY;
             }
             *self.settings.write().unwrap_or_else(|e| e.into_inner()) = updated;
             (scan_now, tray_changed)
         };
+        self.bus.signal(Topic::Settings);
+        self.bus.state_changed();
         if let Some(enabled) = tray_changed {
             self.ui(UiEvent::TrayEnabled(enabled));
         }
@@ -1472,7 +1597,7 @@ impl State {
     /// An immutable picture of one account and everything the views read, so no lock is held
     /// while computing.
     fn view_of(&self, key: Option<&str>) -> View {
-        let d = lock(&self.data);
+        let d = self.data.read();
         let acc = key.and_then(|k| d.get(k));
         let inv = acc.and_then(|a| a.inventory.clone());
         let foundry =
@@ -1489,19 +1614,19 @@ impl State {
 
     /// The account shown.
     pub fn view(&self) -> View {
-        let key = lock(&self.data).active.clone();
+        let key = self.data.read().active.clone();
         self.view_of(key.as_deref())
     }
 
     /// The key of the account shown.
     pub fn active_key(&self) -> Option<String> {
-        lock(&self.data).active.clone()
+        self.data.read().active.clone()
     }
 
     /// The account playing, else the one shown: what a reward screen is judged against.
     fn game_view(&self) -> (Option<String>, View) {
         let key = {
-            let d = lock(&self.data);
+            let d = self.data.read();
             d.game.clone().or_else(|| d.active.clone())
         };
         let view = self.view_of(key.as_deref());
@@ -1519,7 +1644,7 @@ impl State {
     }
 
     fn memscan_status(&self) -> Value {
-        let mut st = serde_json::to_value(&*lock(&self.memscan)).unwrap_or_default();
+        let mut st = serde_json::to_value(&*self.memscan.read()).unwrap_or_default();
         if !self.settings().memory_scan_enabled {
             st["state"] = json!("off");
         } else if let Err(why) = memscan::availability() {
@@ -1546,7 +1671,7 @@ impl State {
             None => (Vec::new(), false),
         };
         let (active_key, account, accounts_json, mastery_rank, mastery_rank_max, profile_error, events) = {
-            let d = lock(&self.data);
+            let d = self.data.read();
             let acc = d.active();
             let playing = |key: &str| d.game.as_deref() == Some(key);
             let account = match acc {
@@ -1655,7 +1780,7 @@ impl State {
 
     /// The rank of the account shown, as far as it is known.
     fn active_rank(&self) -> Option<i64> {
-        lock(&self.data).active().and_then(Account::mastery_rank)
+        self.data.read().active().and_then(Account::mastery_rank)
     }
 
     pub fn world(&self) -> Value {
@@ -1667,7 +1792,7 @@ impl State {
         if w.is_object() {
             w["arbitration"] = arbitration::summary(&view.cat, now());
             // What Duviri offers the account shown, as the game last logged it.
-            let offers = lock(&self.data).active().and_then(|a| a.duviri.clone());
+            let offers = self.data.read().active().and_then(|a| a.duviri.clone());
             w["duviri"] = offers.map_or(Value::Null, |o| world::duviri_picks(&view, &o, world::spiral_began(platform)));
         }
         // Where the account shown stands in the running Nightwave season.
@@ -1685,7 +1810,7 @@ impl State {
     pub fn standing(&self) -> Value {
         let tag = world::nightwave_tag(self.settings().platform);
         let mut s = standing::summary(&self.view(), self.active_rank(), tag.as_deref());
-        s["account"] = json!(lock(&self.data).active().map(|a| a.name.clone()));
+        s["account"] = json!(self.data.read().active().map(|a| a.name.clone()));
         s
     }
 
@@ -1725,7 +1850,7 @@ impl State {
     }
 
     pub fn history(&self) -> Value {
-        let key = lock(&self.data).active.clone();
+        let key = self.data.read().active.clone();
         let (screens, best_value) = history::totals(self.started, key.as_deref());
         json!({"entries": history::recent(40, key.as_deref()),
                "session": {"since": self.started, "screens": screens, "bestValue": best_value}})
@@ -1737,7 +1862,7 @@ impl State {
         // Builds of every account; with more than one account in play, the name says whose.
         let builds: Vec<notifier::Build> = if s.notify_foundry {
             let cat = self.catalog();
-            let d = lock(&self.data);
+            let d = self.data.read();
             let several = d.accounts.iter().filter(|a| a.inventory.is_some()).count() > 1;
             d.accounts
                 .iter()
@@ -1879,6 +2004,7 @@ impl State {
             scan.result = Some(Arc::clone(&result));
             *lock(&self.rewards) = Some(Arc::clone(&result));
             self.ui(UiEvent::Rewards { result: Arc::clone(&result), fresh });
+            self.bus.publish(Topic::Rewards, &*result);
         }
         result
     }
@@ -2006,6 +2132,8 @@ impl State {
                 best: best.clone(),
                 account,
             });
+            self.bus.signal(Topic::History);
+            self.bus.state_changed();
         }
         if cancelled() {
             return None;
@@ -2183,6 +2311,7 @@ impl State {
         let r =
             Arc::new(RivenResult { t: now(), weapon, ocr: tail(text, 600), error: Some(error), ..Default::default() });
         *lock(&self.riven) = Some(Arc::clone(&r));
+        self.bus.publish(Topic::Riven, &*r);
         if self.settings().riven_overlay_enabled {
             self.ui(UiEvent::Riven { result: Arc::clone(&r), fresh: true });
         }
@@ -2239,6 +2368,7 @@ impl State {
             ..Default::default()
         });
         *lock(&self.riven) = Some(Arc::clone(&r));
+        self.bus.publish(Topic::Riven, &*r);
         if settings.riven_overlay_enabled {
             self.ui(UiEvent::Riven { result: Arc::clone(&r), fresh: true });
         }
@@ -2272,6 +2402,7 @@ impl State {
                 }
                 *current = Some(Arc::clone(&updated));
             }
+            state.bus.publish(Topic::Riven, &*updated);
             if state.settings().riven_overlay_enabled {
                 state.ui(UiEvent::Riven { result: updated, fresh: false });
             }
@@ -2293,15 +2424,13 @@ impl State {
         self.ui(UiEvent::ToggleWindow);
     }
 
-    /// Ends the app shortly after the request that asked for it has been answered.
+    /// Ends the app: the window closes (when there is one) and `main` shuts the engine down,
+    /// finishing what it was writing. The request that asked for it is still answered.
     pub fn quit(&self) {
         if self.has_ui() {
             self.ui(UiEvent::Quit);
         } else {
-            std::thread::spawn(|| {
-                std::thread::sleep(Duration::from_millis(200));
-                std::process::exit(0);
-            });
+            self.stop.cancel();
         }
     }
 

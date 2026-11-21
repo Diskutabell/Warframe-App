@@ -54,6 +54,7 @@ async function redraw() {
 export default {
   id: "farming",
   title: "Farming",
+  refreshOn: ["catalog"],
   icon: "tasks",
   /** The sidebar's count: the tasks that are done. */
   badge: (S) => S.tasks?.done || 0,

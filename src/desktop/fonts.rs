@@ -2,8 +2,8 @@
 
 use std::ffi::{CString, c_int, c_uchar, c_void};
 
+use crate::api::Web;
 use crate::config;
-use crate::server::Web;
 
 #[link(name = "fontconfig")]
 unsafe extern "C" {

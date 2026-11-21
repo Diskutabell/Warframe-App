@@ -22,6 +22,8 @@ function mine(f) {
 export default {
   id: "fissures",
   title: "Fissures",
+  // Redrawn when the engine says the account's data or the game data changed.
+  refreshOn: ["inventory", "catalog"],
   icon: "fissures",
   async render(view, params, app) {
     const [data, settings] = await Promise.all([api("fissures"), api("settings")]);

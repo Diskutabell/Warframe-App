@@ -122,6 +122,12 @@ fn worldstate(platform: Platform) -> (Option<Arc<Value>>, Option<String>) {
     CACHE.get(platform, |p| net::get_json(&API.replace("{platform}", p.as_str()), &[], Duration::from_secs(20)))
 }
 
+/// The worldstate as the cache holds it (fetched when older than a minute). The `Arc` changes
+/// with every fetch, which is how a fresh one is told from the same one.
+pub fn raw(platform: Platform) -> (Option<Arc<Value>>, Option<String>) {
+    worldstate(platform)
+}
+
 /// The syndicate tag of the running Nightwave season, as the profile names it: the API spaces it
 /// out ("Radio Legion Intermission16 Syndicate" for "RadioLegionIntermission16Syndicate").
 pub fn nightwave_tag(platform: Platform) -> Option<String> {
@@ -468,7 +474,10 @@ mod tests {
             profile: None,
             inv: None,
             manual: Arc::new(crate::accounts::Manual::default()),
-            market: crate::market::Market::new(Arc::new(RwLock::new(crate::config::Settings::default()))),
+            market: crate::market::Market::new(
+                Arc::new(RwLock::new(crate::config::Settings::default())),
+                crate::bus::Bus::new(),
+            ),
             foundry: HashSet::new(),
         };
         let pick = |uid: &str, category, owned| DuviriPick { uid: uid.into(), category, owned };

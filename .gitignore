@@ -13,3 +13,4 @@
 *.key
 *.ppm
 /frames/
+/target-win/

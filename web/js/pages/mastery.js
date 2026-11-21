@@ -23,6 +23,8 @@ function next(r) {
 export default {
   id: "mastery",
   title: "Mastery",
+  // Redrawn when the engine says the account's data or the game data changed.
+  refreshOn: ["inventory", "catalog"],
   icon: "mastery",
   async render(view, params, app) {
     const data = await api("mastery");

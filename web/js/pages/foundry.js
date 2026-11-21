@@ -11,6 +11,8 @@ const SHOW = [["buildable", "Requirements collected"], ["started", "Started"], [
 export default {
   id: "foundry",
   title: "Foundry",
+  // Redrawn when the engine says the account's data or the game data changed.
+  refreshOn: ["inventory", "catalog"],
   icon: "foundry",
   async render(view, params, app) {
     const d = await api("foundry");

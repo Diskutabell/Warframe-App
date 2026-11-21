@@ -53,6 +53,7 @@ function rivenCard(r) {
 export default {
   id: "market",
   title: "Market",
+  refreshOn: ["catalog"],
   icon: "market",
   async render(view, params, app) {
     const [d, riven] = await Promise.all([api("trade"), api("riven/result").catch(() => null)]);

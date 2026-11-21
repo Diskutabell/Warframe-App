@@ -10,6 +10,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::bus::{Bus, Topic};
 use crate::config::{self, Platform, Settings};
 use crate::{net, now};
 
@@ -121,6 +122,8 @@ struct PriceCache {
 
 pub struct Market {
     settings: Arc<RwLock<Settings>>,
+    /// Fresh prices are announced here, so the pages showing them can redraw.
+    bus: Bus,
     items: RwLock<Items>,
     prices: Mutex<PriceCache>,
     save_lock: Mutex<()>,
@@ -191,11 +194,12 @@ fn reserve_slot(next: &Mutex<Instant>, deadline: Option<Instant>) -> anyhow::Res
 }
 
 impl Market {
-    pub fn new(settings: Arc<RwLock<Settings>>) -> Arc<Market> {
+    pub fn new(settings: Arc<RwLock<Settings>>, bus: Bus) -> Arc<Market> {
         let platform = settings.read().unwrap_or_else(|e| e.into_inner()).platform;
         let entries = config::read_json(&prices_file(platform)).unwrap_or_default();
         let market = Arc::new(Market {
             settings,
+            bus,
             items: RwLock::new(Items::default()),
             prices: Mutex::new(PriceCache { platform, entries }),
             save_lock: Mutex::new(()),
@@ -271,7 +275,12 @@ impl Market {
     }
 
     fn set_error(&self, e: Option<String>) {
-        *self.error.lock().unwrap_or_else(|e| e.into_inner()) = e;
+        let mut error = self.error.lock().unwrap_or_else(|e| e.into_inner());
+        if *error != e {
+            *error = e;
+            // The summary shows the market's error.
+            self.bus.state_changed();
+        }
     }
 
     /// The item list (names, ducats, art, game references), refreshed once a day.
@@ -434,10 +443,17 @@ impl Market {
             },
         };
         self.set_error(None);
-        let mut cache = self.prices.lock().unwrap_or_else(|e| e.into_inner());
-        if cache.platform == platform {
-            cache.entries.insert(slug.to_string(), entry.clone());
-            self.dirty.store(true, Ordering::Relaxed);
+        let stored = {
+            let mut cache = self.prices.lock().unwrap_or_else(|e| e.into_inner());
+            let stored = cache.platform == platform;
+            if stored {
+                cache.entries.insert(slug.to_string(), entry.clone());
+                self.dirty.store(true, Ordering::Relaxed);
+            }
+            stored
+        };
+        if stored {
+            self.bus.publish(Topic::Prices, &json!({"slugs": [slug]}));
         }
         Some(entry)
     }

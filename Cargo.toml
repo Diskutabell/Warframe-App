@@ -20,8 +20,13 @@ regex = "1"
 rust-embed = "8"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
-tiny_http = "0.12"
 ureq = "3"
+# The engine: async runtime, the loopback HTTP server and its event stream.
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net", "fs", "io-util"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 
 # Linux: the window and overlays are GTK, the page runs in WebKitGTK.
 [target.'cfg(unix)'.dependencies]
@@ -62,3 +67,7 @@ bundled-tesseract = ["dep:zip"]
 [profile.release]
 lto = "thin"
 strip = true
+
+[dev-dependencies]
+# Paused clocks in tests of timed behaviour (the summary's coalescing).
+tokio = { version = "1.54", features = ["test-util"] }
