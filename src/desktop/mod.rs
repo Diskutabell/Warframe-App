@@ -159,7 +159,11 @@ pub fn run(state: Arc<App>, url: &str, backend: Backend) -> Result<()> {
 
     let overlays = Rc::new(overlay::Overlays::new(backend, Arc::clone(&state)));
     let (tx, rx) = async_channel::unbounded::<UiEvent>();
-    state.set_ui(tx);
+    if !state.set_ui(tx) {
+        // Told to quit while the window was being made.
+        tray.borrow_mut().set_enabled(false, false);
+        return Ok(());
+    }
     let event_tray = Rc::clone(&tray);
     glib::MainContext::default().spawn_local(async move {
         while let Ok(ev) = rx.recv().await {

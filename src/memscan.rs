@@ -1022,6 +1022,16 @@ fn scan_region(
                 Err(fatal) => return Err(fatal),
             };
         }
+        // A short read may only have stopped where one of the system's memory regions ends (a
+        // Windows read never crosses one), with the next one readable right after it: read on, or
+        // a marker lying across that border would never be whole in the buffer.
+        while got > 0 && got < request {
+            match read(off + got as u64, &mut scratch[got..request]) {
+                Ok(0) | Err(ReadError::Unreadable) => break,
+                Ok(more) => got += more,
+                Err(fatal) => return Err(fatal),
+            }
+        }
         let next_page = || remaining.min(4096 - (off % 4096)) as usize;
         let advance = if got == 0 {
             next_page()
@@ -1167,6 +1177,33 @@ mod tests {
             assert_eq!(hits, positions);
             assert_eq!(progress, bytes.len() as u64);
         }
+    }
+
+    #[test]
+    fn a_marker_across_the_border_of_two_regions_is_found() {
+        // Two readable regions side by side; a read stops at the border between them, as Windows'
+        // ReadProcessMemory does at the end of a VirtualQueryEx region.
+        let border = 4096 * 3;
+        let mut bytes = vec![b'x'; border * 2];
+        let at = border - 7;
+        bytes[at..at + MARKER.len()].copy_from_slice(MARKER);
+        let mut hits = Vec::new();
+        let mut scratch = vec![0u8; CHUNK + MARKER.len() - 1];
+        scan_region(
+            (0, bytes.len() as u64),
+            &mut scratch,
+            |addr, buf| {
+                let start = addr as usize;
+                let stop = if start < border { border } else { bytes.len() };
+                let n = buf.len().min(stop - start);
+                buf[..n].copy_from_slice(&bytes[start..start + n]);
+                Ok(n)
+            },
+            |addr| hits.push(addr as usize),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(hits, [at]);
     }
 
     #[test]

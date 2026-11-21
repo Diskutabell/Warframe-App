@@ -32,6 +32,16 @@ pub enum Unit {
 }
 
 impl Unit {
+    /// Half a step of the last digit the card prints: one decimal for percentages, metres and
+    /// seconds, whole counts, and two decimals of a multiplier ("x1.45", half a percentage point).
+    /// A printed value can be this far from the roll it shows.
+    pub fn rounding(self) -> f64 {
+        match self {
+            Unit::Percent | Unit::Metres | Unit::Seconds => 0.05,
+            Unit::Count | Unit::Multiplier => 0.5,
+        }
+    }
+
     pub fn suffix(self) -> &'static str {
         match self {
             Unit::Percent | Unit::Multiplier => "%",
@@ -58,6 +68,9 @@ pub struct Stat {
     pub sign: Sign,
     /// Only reachable through the Riven Splicer.
     pub spliced: bool,
+    /// Printed with the opposite sign: Recoil's good rolls are reductions ("-91.1% Weapon
+    /// Recoil"), its curse an increase (the wiki's Riven Mods tables).
+    pub inverted: bool,
 }
 
 /// Every riven attribute and its base value, from wiki.warframe.com's Riven Mods page ("Base
@@ -65,57 +78,57 @@ pub struct Stat {
 #[rustfmt::skip]
 pub static STATS: &[Stat] = &[
     // The 32 regular attributes.
-    Stat { name: "Damage", unit: Unit::Percent, base: [Some(165.0), Some(164.7), Some(219.6), Some(99.9), Some(164.7)], sign: Sign::PositiveOnly, spliced: false },
-    Stat { name: "Multishot", unit: Unit::Percent, base: [Some(90.0), Some(119.7), Some(119.7), Some(60.3), None], sign: Sign::Either, spliced: false },
-    Stat { name: "Critical Chance", unit: Unit::Percent, base: [Some(149.99), Some(90.0), Some(149.99), Some(99.9), Some(180.0)], sign: Sign::Either, spliced: false },
-    Stat { name: "Critical Damage", unit: Unit::Percent, base: [Some(119.997), Some(90.0), Some(90.0), Some(80.1), Some(90.0)], sign: Sign::Either, spliced: false },
-    Stat { name: "Fire Rate / Attack Speed", unit: Unit::Percent, base: [Some(60.03), Some(90.0), Some(74.7), Some(60.03), Some(54.9)], sign: Sign::Either, spliced: false },
-    Stat { name: "Status Chance", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(60.3), Some(90.0)], sign: Sign::Either, spliced: false },
-    Stat { name: "Status Duration", unit: Unit::Percent, base: [Some(99.99), Some(99.99), Some(99.99), Some(99.99), Some(99.99)], sign: Sign::Either, spliced: false },
-    Stat { name: "Magazine Capacity", unit: Unit::Percent, base: [Some(49.995), Some(49.995), Some(49.995), Some(60.3), None], sign: Sign::Either, spliced: false },
-    Stat { name: "Ammo Maximum", unit: Unit::Percent, base: [Some(49.95), Some(90.0), Some(90.0), Some(99.9), None], sign: Sign::Either, spliced: false },
-    Stat { name: "Reload Speed", unit: Unit::Percent, base: [Some(49.995), Some(49.995), Some(49.995), Some(99.9), None], sign: Sign::Either, spliced: false },
-    Stat { name: "Punch Through", unit: Unit::Metres, base: [Some(2.7), Some(2.7), Some(2.7), Some(2.7), None], sign: Sign::PositiveOnly, spliced: false },
-    Stat { name: "Projectile Speed", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), None, None], sign: Sign::Either, spliced: false },
-    Stat { name: "Recoil", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), None], sign: Sign::Either, spliced: false },
-    Stat { name: "Zoom", unit: Unit::Percent, base: [Some(59.99), Some(41.994), Some(80.1), Some(59.99), None], sign: Sign::Either, spliced: false },
-    Stat { name: "Heat Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(119.7), Some(90.0)], sign: Sign::PositiveOnly, spliced: false },
-    Stat { name: "Cold Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(119.7), Some(90.0)], sign: Sign::PositiveOnly, spliced: false },
-    Stat { name: "Electricity Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(119.7), Some(90.0)], sign: Sign::PositiveOnly, spliced: false },
-    Stat { name: "Toxin Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(119.7), Some(90.0)], sign: Sign::PositiveOnly, spliced: false },
-    Stat { name: "Impact Damage", unit: Unit::Percent, base: [Some(119.97), Some(119.97), Some(119.97), Some(90.0), Some(119.7)], sign: Sign::Either, spliced: false },
-    Stat { name: "Puncture Damage", unit: Unit::Percent, base: [Some(119.997), Some(119.997), Some(119.997), Some(90.0), Some(119.997)], sign: Sign::Either, spliced: false },
-    Stat { name: "Slash Damage", unit: Unit::Percent, base: [Some(119.97), Some(119.97), Some(119.97), Some(90.0), Some(119.7)], sign: Sign::Either, spliced: false },
-    Stat { name: "Damage to Grineer", unit: Unit::Multiplier, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), Some(45.0)], sign: Sign::Either, spliced: false },
-    Stat { name: "Damage to Corpus", unit: Unit::Multiplier, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), Some(45.0)], sign: Sign::Either, spliced: false },
-    Stat { name: "Damage to Infested", unit: Unit::Multiplier, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), Some(45.0)], sign: Sign::Either, spliced: false },
-    Stat { name: "Range", unit: Unit::Metres, base: [None, None, None, None, Some(1.94)], sign: Sign::Either, spliced: false },
-    Stat { name: "Combo Duration", unit: Unit::Seconds, base: [None, None, None, None, Some(8.1)], sign: Sign::Either, spliced: false },
-    Stat { name: "Finisher Damage", unit: Unit::Percent, base: [None, None, None, None, Some(119.7)], sign: Sign::Either, spliced: false },
-    Stat { name: "Heavy Attack Efficiency", unit: Unit::Percent, base: [None, None, None, None, Some(73.44)], sign: Sign::Either, spliced: false },
-    Stat { name: "Initial Combo", unit: Unit::Count, base: [None, None, None, None, Some(24.5)], sign: Sign::Either, spliced: false },
-    Stat { name: "Slide Critical Chance", unit: Unit::Percent, base: [None, None, None, None, Some(120.0)], sign: Sign::Either, spliced: false },
-    Stat { name: "Additional Combo Count Chance", unit: Unit::Percent, base: [None, None, None, None, Some(58.77)], sign: Sign::PositiveOnly, spliced: false },
-    Stat { name: "Chance to Gain Combo Count", unit: Unit::Percent, base: [None, None, None, None, Some(104.85)], sign: Sign::NegativeOnly, spliced: false },
+    Stat { name: "Damage", unit: Unit::Percent, base: [Some(165.0), Some(164.7), Some(219.6), Some(99.9), Some(164.7)], sign: Sign::PositiveOnly, spliced: false, inverted: false },
+    Stat { name: "Multishot", unit: Unit::Percent, base: [Some(90.0), Some(119.7), Some(119.7), Some(60.3), None], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Critical Chance", unit: Unit::Percent, base: [Some(149.99), Some(90.0), Some(149.99), Some(99.9), Some(180.0)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Critical Damage", unit: Unit::Percent, base: [Some(119.997), Some(90.0), Some(90.0), Some(80.1), Some(90.0)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Fire Rate / Attack Speed", unit: Unit::Percent, base: [Some(60.03), Some(90.0), Some(74.7), Some(60.03), Some(54.9)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Status Chance", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(60.3), Some(90.0)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Status Duration", unit: Unit::Percent, base: [Some(99.99), Some(99.99), Some(99.99), Some(99.99), Some(99.99)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Magazine Capacity", unit: Unit::Percent, base: [Some(49.995), Some(49.995), Some(49.995), Some(60.3), None], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Ammo Maximum", unit: Unit::Percent, base: [Some(49.95), Some(90.0), Some(90.0), Some(99.9), None], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Reload Speed", unit: Unit::Percent, base: [Some(49.995), Some(49.995), Some(49.995), Some(99.9), None], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Punch Through", unit: Unit::Metres, base: [Some(2.7), Some(2.7), Some(2.7), Some(2.7), None], sign: Sign::PositiveOnly, spliced: false, inverted: false },
+    Stat { name: "Projectile Speed", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), None, None], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Recoil", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), None], sign: Sign::Either, spliced: false, inverted: true },
+    Stat { name: "Zoom", unit: Unit::Percent, base: [Some(59.99), Some(41.994), Some(80.1), Some(59.99), None], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Heat Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(119.7), Some(90.0)], sign: Sign::PositiveOnly, spliced: false, inverted: false },
+    Stat { name: "Cold Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(119.7), Some(90.0)], sign: Sign::PositiveOnly, spliced: false, inverted: false },
+    Stat { name: "Electricity Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(119.7), Some(90.0)], sign: Sign::PositiveOnly, spliced: false, inverted: false },
+    Stat { name: "Toxin Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(119.7), Some(90.0)], sign: Sign::PositiveOnly, spliced: false, inverted: false },
+    Stat { name: "Impact Damage", unit: Unit::Percent, base: [Some(119.97), Some(119.97), Some(119.97), Some(90.0), Some(119.7)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Puncture Damage", unit: Unit::Percent, base: [Some(119.997), Some(119.997), Some(119.997), Some(90.0), Some(119.997)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Slash Damage", unit: Unit::Percent, base: [Some(119.97), Some(119.97), Some(119.97), Some(90.0), Some(119.7)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Damage to Grineer", unit: Unit::Multiplier, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), Some(45.0)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Damage to Corpus", unit: Unit::Multiplier, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), Some(45.0)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Damage to Infested", unit: Unit::Multiplier, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), Some(45.0)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Range", unit: Unit::Metres, base: [None, None, None, None, Some(1.94)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Combo Duration", unit: Unit::Seconds, base: [None, None, None, None, Some(8.1)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Finisher Damage", unit: Unit::Percent, base: [None, None, None, None, Some(119.7)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Heavy Attack Efficiency", unit: Unit::Percent, base: [None, None, None, None, Some(73.44)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Initial Combo", unit: Unit::Count, base: [None, None, None, None, Some(24.5)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Slide Critical Chance", unit: Unit::Percent, base: [None, None, None, None, Some(120.0)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Additional Combo Count Chance", unit: Unit::Percent, base: [None, None, None, None, Some(58.77)], sign: Sign::PositiveOnly, spliced: false, inverted: false },
+    Stat { name: "Chance to Gain Combo Count", unit: Unit::Percent, base: [None, None, None, None, Some(104.85)], sign: Sign::NegativeOnly, spliced: false, inverted: false },
     // The 18 spliced attributes (Riven Splicer).
-    Stat { name: "Ammo Efficiency", unit: Unit::Percent, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), None], sign: Sign::Either, spliced: true },
-    Stat { name: "Blast Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::PositiveOnly, spliced: true },
-    Stat { name: "Corrosive Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::PositiveOnly, spliced: true },
-    Stat { name: "Damage to Orokin", unit: Unit::Multiplier, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), Some(45.0)], sign: Sign::Either, spliced: true },
-    Stat { name: "Damage to Scaldra", unit: Unit::Multiplier, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), Some(45.0)], sign: Sign::Either, spliced: true },
-    Stat { name: "Damage to Techrot", unit: Unit::Multiplier, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), Some(45.0)], sign: Sign::Either, spliced: true },
-    Stat { name: "Gas Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::PositiveOnly, spliced: true },
-    Stat { name: "Heavy Attack Wind Up Speed", unit: Unit::Percent, base: [None, None, None, None, Some(119.7)], sign: Sign::PositiveOnly, spliced: true },
-    Stat { name: "Magnetic Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::PositiveOnly, spliced: true },
-    Stat { name: "Melee Damage On Heavy Attack", unit: Unit::Percent, base: [None, None, None, None, Some(119.7)], sign: Sign::PositiveOnly, spliced: true },
-    Stat { name: "Parry Angle", unit: Unit::Percent, base: [None, None, None, None, Some(81.0)], sign: Sign::Either, spliced: true },
-    Stat { name: "Radiation Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::PositiveOnly, spliced: true },
-    Stat { name: "Reload While Holstered", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), None, None], sign: Sign::Either, spliced: true },
-    Stat { name: "Slam Attack Damage", unit: Unit::Percent, base: [None, None, None, None, Some(119.7)], sign: Sign::PositiveOnly, spliced: true },
-    Stat { name: "Status Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::Either, spliced: true },
-    Stat { name: "Viral Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::PositiveOnly, spliced: true },
-    Stat { name: "Weakpoint Damage", unit: Unit::Percent, base: [Some(225.0), Some(225.0), Some(225.0), Some(225.0), None], sign: Sign::Either, spliced: true },
-    Stat { name: "Weakpoint Critical Chance", unit: Unit::Percent, base: [Some(247.5), Some(247.5), Some(247.5), Some(247.5), None], sign: Sign::Either, spliced: true },
+    Stat { name: "Ammo Efficiency", unit: Unit::Percent, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), None], sign: Sign::Either, spliced: true, inverted: false },
+    Stat { name: "Blast Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::PositiveOnly, spliced: true, inverted: false },
+    Stat { name: "Corrosive Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::PositiveOnly, spliced: true, inverted: false },
+    Stat { name: "Damage to Orokin", unit: Unit::Multiplier, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), Some(45.0)], sign: Sign::Either, spliced: true, inverted: false },
+    Stat { name: "Damage to Scaldra", unit: Unit::Multiplier, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), Some(45.0)], sign: Sign::Either, spliced: true, inverted: false },
+    Stat { name: "Damage to Techrot", unit: Unit::Multiplier, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), Some(45.0)], sign: Sign::Either, spliced: true, inverted: false },
+    Stat { name: "Gas Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::PositiveOnly, spliced: true, inverted: false },
+    Stat { name: "Heavy Attack Wind Up Speed", unit: Unit::Percent, base: [None, None, None, None, Some(119.7)], sign: Sign::PositiveOnly, spliced: true, inverted: false },
+    Stat { name: "Magnetic Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::PositiveOnly, spliced: true, inverted: false },
+    Stat { name: "Melee Damage On Heavy Attack", unit: Unit::Percent, base: [None, None, None, None, Some(119.7)], sign: Sign::PositiveOnly, spliced: true, inverted: false },
+    Stat { name: "Parry Angle", unit: Unit::Percent, base: [None, None, None, None, Some(81.0)], sign: Sign::Either, spliced: true, inverted: false },
+    Stat { name: "Radiation Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::PositiveOnly, spliced: true, inverted: false },
+    Stat { name: "Reload While Holstered", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), None, None], sign: Sign::Either, spliced: true, inverted: false },
+    Stat { name: "Slam Attack Damage", unit: Unit::Percent, base: [None, None, None, None, Some(119.7)], sign: Sign::PositiveOnly, spliced: true, inverted: false },
+    Stat { name: "Status Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::Either, spliced: true, inverted: false },
+    Stat { name: "Viral Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::PositiveOnly, spliced: true, inverted: false },
+    Stat { name: "Weakpoint Damage", unit: Unit::Percent, base: [Some(225.0), Some(225.0), Some(225.0), Some(225.0), None], sign: Sign::Either, spliced: true, inverted: false },
+    Stat { name: "Weakpoint Critical Chance", unit: Unit::Percent, base: [Some(247.5), Some(247.5), Some(247.5), Some(247.5), None], sign: Sign::Either, spliced: true, inverted: false },
 ];
 
 /// How the card words each stat, lower-case and letters only, as the OCR reader sees it. Several
@@ -306,6 +319,11 @@ pub struct Graded {
     pub deviation: f64,
     pub grade: &'static str,
     pub negative: bool,
+    /// The card prints this stat with the opposite sign (Recoil): show `-` for a good roll.
+    pub inverted: bool,
+    /// The value as the card prints it, sign and unit included ("+57.5%", "−91.1%", "+1.2m"):
+    /// what every view shows.
+    pub printed: String,
     /// A real roll always lands within +-10% of the centre. Outside that, the stat count or the
     /// weapon is wrong - worth saying so rather than printing a confident C-.
     #[serde(rename = "outOfRange")]
@@ -336,6 +354,11 @@ pub fn grade_roll(
     // A negative is better when it is smaller, so the sign of the deviation flips.
     let dev = if is_negative { (centre - mag) / centre } else { (mag - centre) / centre } * 100.0;
     let sign_conflict = matches!((s.sign, is_negative), (Sign::PositiveOnly, true) | (Sign::NegativeOnly, false));
+    // The card prints a rounded value: on a small stat (a metre of range) that rounding alone
+    // moves it several percent, so the window is widened by it.
+    let out_of_range = (mag - centre).abs() > centre * VARIANCE + s.unit.rounding() + 1e-9;
+    let minus = is_negative != s.inverted;
+    let printed = format!("{}{mag}{}", if minus { "\u{2212}" } else { "+" }, s.unit.suffix());
     Some(Graded {
         stat: s.name,
         value,
@@ -343,7 +366,9 @@ pub fn grade_roll(
         deviation: py_round(dev, 3),
         grade: grade_for(dev),
         negative: is_negative,
-        out_of_range: dev.abs() > VARIANCE * 100.0 + 0.01,
+        inverted: s.inverted,
+        printed,
+        out_of_range,
         sign_conflict,
     })
 }
@@ -364,16 +389,17 @@ pub fn infer_counts(item: &Item, stats: &[(&str, f64, bool)]) -> (u8, u8, u8) {
             grade_roll(item, stat, value, p, n, negative).is_some_and(|g| !g.out_of_range)
         })
     };
+    let unread = |p: u8, n: u8| (p + n).saturating_sub(stats.len() as u8);
     if fits(read) {
-        return (read.0, read.1, 0);
+        return (read.0, read.1, unread(read.0, read.1));
     }
     let options: Vec<(u8, u8)> = [(2, 0), (2, 1), (3, 0), (3, 1)]
         .into_iter()
         .filter(|&(p, n)| p as usize >= pos && n as usize >= neg && fits((p, n)))
         .collect();
     match options[..] {
-        [(p, n)] => (p, n, (p + n).saturating_sub(stats.len() as u8)),
-        _ => (read.0, read.1, 0),
+        [(p, n)] => (p, n, unread(p, n)),
+        _ => (read.0, read.1, unread(read.0, read.1)),
     }
 }
 
@@ -616,6 +642,28 @@ mod tests {
         assert!(grade_roll(&w, "Damage", 500.0, 2, 0, false).unwrap().out_of_range);
         assert!(grade_roll(&w, "Damage", -20.0, 2, 1, true).unwrap().sign_conflict);
         assert!(grade_roll(&w, "Multishot", 50.0, 2, 0, false).is_none(), "melee cannot roll multishot");
+    }
+
+    #[test]
+    fn rolls_shown_rounded_are_not_out_of_range() {
+        // Melee range, 2+1, a negative: centre 1.94 x 1.2 x 0.495 = 1.15236 m, window
+        // 1.037-1.268 m. A real -1.04 m roll is printed "-1.0m".
+        let w = weapon("melee", 1.2);
+        assert!(!grade_roll(&w, "Range", -1.0, 2, 1, true).unwrap().out_of_range);
+        // Faction damage, 2+1, a positive: centre 45 x 1.2 x 1.2375 = 66.825%, window up to
+        // 73.51%. A real 73.5% roll is printed to two places, "x1.74", and read as 74%.
+        assert!(!grade_roll(&weapon("rifle", 1.2), "Damage to Grineer", 74.0, 2, 1, false).unwrap().out_of_range);
+        // A genuinely wrong reading still is.
+        assert!(grade_roll(&w, "Range", -1.4, 2, 1, true).unwrap().out_of_range);
+    }
+
+    #[test]
+    fn stats_not_read_are_counted_when_the_read_count_fits() {
+        // One positive read off a 2+0 riven: the second line was lost.
+        let w = weapon("rifle", 1.2);
+        let centre = |stat: &str| stat_table(&w, 2, 0).into_iter().find(|r| r.stat == stat).unwrap().centre;
+        let read = [("Damage", centre("Damage"), false)];
+        assert_eq!(infer_counts(&w, &read), (2, 0, 1));
     }
 
     #[test]

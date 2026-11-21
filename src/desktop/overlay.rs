@@ -19,7 +19,7 @@ use crate::compositor::{self, Rect};
 use crate::config::PanelPosition;
 use crate::ocr::reward;
 use crate::ocr::riven as riven_card;
-use crate::rivens::{self, Graded};
+use crate::rivens::Graded;
 use crate::services::scans::{RewardItem, RewardResult, RivenResult};
 
 const CSS: &str = r#"
@@ -658,9 +658,7 @@ fn stat_row(g: &Graded, u: f64) -> gtk::Box {
     grade.style_context().add_class(grade_class(g.grade));
     grade.set_width_chars(2);
     line.add(&grade);
-    let sign = if g.negative { "−" } else { "+" };
-    let unit = rivens::stat(g.stat).map_or("", |s| s.unit.suffix());
-    let stat = markup(&format!("{sign}<b>{}{unit}</b> {}", g.value.abs(), escape(g.stat)), "wfp-stat");
+    let stat = markup(&format!("<b>{}</b> {}", escape(&g.printed), escape(g.stat)), "wfp-stat");
     stat.set_hexpand(true);
     stat.set_ellipsize(pango::EllipsizeMode::End);
     line.add(&stat);

@@ -214,10 +214,25 @@ pub fn save(
 /// The accounts with their data, and what happened while loading them (for the activity list).
 pub fn load() -> (Registry, Vec<String>) {
     let mut notes = Vec::new();
-    let mut registry = match config::read_json::<Registry>(&registry_file()) {
-        Some(r) => r,
-        None => {
+    let file = registry_file();
+    let mut registry = match read_file::<Registry>(&file) {
+        Read::Found(r) => r,
+        Read::Missing => {
             let r = migrate(&mut notes);
+            if let Err(e) = save(&r.active, r.switched, r.profile_requests, &r.accounts) {
+                notes.push(format!("Could not save the account list: {e:#}"));
+            }
+            r
+        }
+        // Never written over: it is set aside, and the list is made again from the accounts'
+        // folders, which hold everything but the list itself.
+        Read::Broken(why) => {
+            let kept = set_aside(&file);
+            notes.push(format!(
+                "The account list {why}; it was rebuilt from the accounts' folders{}.",
+                kept.map_or_else(String::new, |k| format!(" (the old one is kept as {})", k.display()))
+            ));
+            let r = rebuild();
             if let Err(e) = save(&r.active, r.switched, r.profile_requests, &r.accounts) {
                 notes.push(format!("Could not save the account list: {e:#}"));
             }
@@ -228,7 +243,22 @@ pub fn load() -> (Registry, Vec<String>) {
         let folder = dir(&acc.key);
         acc.profile = config::read_json::<Profile>(&folder.join("profile.json")).map(Arc::new);
         acc.inventory = config::read_json::<Inventory>(&folder.join("inventory.json")).map(Arc::new);
-        acc.manual = config::read_json(&folder.join("manual.json")).unwrap_or_default();
+        // Hand-set counts, pins and tasks exist nowhere else: a file that cannot be read is set
+        // aside, never replaced by the next edit.
+        let manual = folder.join("manual.json");
+        acc.manual = match read_file::<Manual>(&manual) {
+            Read::Found(m) => m,
+            Read::Missing => Manual::default(),
+            Read::Broken(why) => {
+                let kept = set_aside(&manual);
+                notes.push(format!(
+                    "{}'s hand-set counts and tasks {why}; they start empty{}.",
+                    acc.name,
+                    kept.map_or_else(String::new, |k| format!(" (the old file is kept as {})", k.display()))
+                ));
+                Manual::default()
+            }
+        };
         if acc.manual.adopt_goals() {
             if let Err(e) = acc.write("manual.json", &acc.manual) {
                 notes.push(format!("Could not save {}'s farming tasks: {e:#}", acc.name));
@@ -236,6 +266,61 @@ pub fn load() -> (Registry, Vec<String>) {
         }
     }
     (registry, notes)
+}
+
+/// What reading one of the app's own files found.
+enum Read<T> {
+    Missing,
+    Found(T),
+    /// There, but not readable: why.
+    Broken(String),
+}
+
+fn read_file<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> Read<T> {
+    match fs::read(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Read::Missing,
+        Err(e) => Read::Broken(format!("could not be read ({e})")),
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(v) => Read::Found(v),
+            Err(e) => Read::Broken(format!("is damaged ({e})")),
+        },
+    }
+}
+
+/// Moves a damaged file out of the way under a name of its own, so nothing overwrites it and it
+/// can be looked at or put back. Where it went, if it could be moved.
+fn set_aside(path: &std::path::Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    let kept = path.with_file_name(format!("{name}.broken-{}", crate::clock::stamp(crate::now())));
+    fs::rename(path, &kept).ok().map(|_| kept)
+}
+
+/// The account list made again from the accounts' folders: each folder is an account, named by
+/// its saved profile (else by the folder). When DE's profile service was last asked is lost
+/// with the list, so it counts as asked just now: no request goes out before the cooldown.
+fn rebuild() -> Registry {
+    let mut accounts: Vec<Account> = fs::read_dir(config::dirs().data.join("accounts"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter_map(|e| {
+            let key = e.file_name().to_str()?.to_string();
+            let profile: Option<Profile> = config::read_json(&e.path().join("profile.json"));
+            let name = profile.as_ref().and_then(|p| p.name.as_deref()).map(eelog::strip_glyphs);
+            let mut acc = Account::new(key.clone(), name.filter(|n| !n.is_empty()).unwrap_or(key));
+            acc.id = profile.and_then(|p| p.id);
+            acc.source = acc.id.as_ref().map(|_| "saved".to_string());
+            Some(acc)
+        })
+        .collect();
+    accounts.sort_by(|a, b| a.key.cmp(&b.key));
+    Registry {
+        active: accounts.first().map(|a| a.key.clone()),
+        switched: 0.0,
+        profile_requests: ProfileTimes { requested: crate::now(), paused_until: 0.0 },
+        accounts,
+    }
 }
 
 /// Removes an account's folder for good.

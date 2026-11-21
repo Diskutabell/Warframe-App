@@ -208,6 +208,47 @@ fn choose_capture(d: &Data, game: &str, sections: &memscan::Sections, captures: 
     CaptureChoice { chosen: None, held_by, missing }
 }
 
+/// Whose a fetched or imported profile is, by the name it carries.
+#[derive(Debug, PartialEq)]
+enum Target {
+    /// The account it was asked for (same name, or no name to go by).
+    Key,
+    /// The account it was asked for, renamed in the game since: it takes the new name.
+    Renamed(String),
+    /// Another account the app knows by that name.
+    Other(String),
+    /// An account the app has not seen yet.
+    New(String),
+}
+
+/// Files a profile asked for account `key` (with account id `id`, when one was asked for). Its
+/// display name decides. With no account of that name, `key` may have been renamed in the game -
+/// but only while it is not the one logged in (the game would say its name), and only when
+/// nothing says the profile is another account's: another id, or mastery XP that is not `key`'s.
+fn profile_target(d: &Data, key: &str, prof: &Profile, id: Option<&str>) -> Target {
+    let Some(name) = prof.name.as_deref().map(eelog::strip_glyphs).filter(|n| !n.is_empty()) else {
+        return Target::Key;
+    };
+    if d.get(key).is_some_and(|a| same_name(&a.name, &name)) {
+        return Target::Key;
+    }
+    if let Some(other) = d.by_name(&name) {
+        return Target::Other(other.key.clone());
+    }
+    let may_be_renamed = |acc: &Account| {
+        let same_id = match (acc.id.as_deref(), id.or(prof.id.as_deref())) {
+            (Some(mine), Some(theirs)) => mine == theirs,
+            _ => true,
+        };
+        same_id && acc.known_xp().into_iter().all(|known| accounts::same_owner(&prof.xp, known) != Some(false))
+    };
+    if d.game.as_deref() != Some(key) && d.get(key).is_some_and(may_be_renamed) {
+        Target::Renamed(name)
+    } else {
+        Target::New(name)
+    }
+}
+
 /// What the summary shows about the accounts.
 pub struct AccountsSummary {
     pub active: Option<String>,
@@ -660,7 +701,11 @@ impl AccountService {
             }
             let due = {
                 let mut d = self.data.write();
-                d.profile_queue.pop_front();
+                // Take out exactly this account: while the worker waited, it may have been
+                // forgotten, and then the front of the queue is another account still to do.
+                if let Some(at) = d.profile_queue.iter().position(|k| *k == key) {
+                    d.profile_queue.remove(at);
+                }
                 d.get(&key).is_some_and(|a| a.id.is_some() && self.profile_stale(a))
             };
             if due {
@@ -753,22 +798,18 @@ impl AccountService {
         let id = prof.id.clone().or_else(|| id.map(str::to_owned));
         prof.id = id.clone();
         let prof = Arc::new(prof);
-        let shown = prof.name.as_deref().map(eelog::strip_glyphs).filter(|n| !n.is_empty());
         let mut d = self.data.write();
-        let mut target = key.to_string();
-        if let Some(name) = &shown {
-            if !d.get(key).is_some_and(|a| same_name(&a.name, name)) {
-                match d.by_name(name).map(|a| a.key.clone()) {
-                    Some(other) => target = other,
-                    None if d.game.as_deref() != Some(key) && d.get(key).is_some() => {
-                        if let Some(acc) = d.get_mut(key) {
-                            acc.name = name.clone();
-                        }
-                    }
-                    None => target = d.ensure(name),
+        let target = match profile_target(&d, key, &prof, id.as_deref()) {
+            Target::Key => key.to_string(),
+            Target::Renamed(name) => {
+                if let Some(acc) = d.get_mut(key) {
+                    acc.name = name;
                 }
+                key.to_string()
             }
-        }
+            Target::Other(other) => other,
+            Target::New(name) => d.ensure(&name),
+        };
         if target != key {
             let owner = d.name_of(&target);
             let was = d.name_of(key);
@@ -1116,6 +1157,38 @@ mod tests {
         assert!(matches!(owner(&d, "gamma", &xp(&mine)), Owner::Other(n) if n == "ALPHA"));
         // Alpha's data says no and nobody claims it: some account the app has never seen.
         assert!(matches!(owner(&d, "alpha", &xp(&fresh)), Owner::Stranger));
+    }
+
+    #[test]
+    fn a_profile_renames_an_account_only_when_nothing_says_it_is_another_ones() {
+        let items: Vec<(String, i64)> = (0..12).map(|i| (format!("/I{i}"), 100 + i)).collect();
+        let mine: Vec<(&str, i64)> = items.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+        let theirs: Vec<(&str, i64)> = items.iter().map(|(k, v)| (k.as_str(), *v + 5000)).collect();
+        let named = |name: &str, xp: &[(&str, i64)], id: Option<&str>| Profile {
+            name: Some(name.into()),
+            id: id.map(str::to_owned),
+            xp: xp.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            ..Profile::default()
+        };
+        let mut alice = account("alice", &mine);
+        alice.id = Some("a1".into());
+        let d = Data { accounts: vec![alice], ..Data::default() };
+        // Alice's own XP under a new name: renamed in the game.
+        assert_eq!(
+            profile_target(&d, "alice", &named("Alicia", &mine, None), Some("a1")),
+            Target::Renamed("Alicia".into())
+        );
+        // Someone else's XP, or another account id: a new account, Alice stays as she is.
+        assert_eq!(profile_target(&d, "alice", &named("Bob", &theirs, None), None), Target::New("Bob".into()));
+        assert_eq!(profile_target(&d, "alice", &named("Bob", &[], Some("b2")), None), Target::New("Bob".into()));
+        // Her own name: hers.
+        assert_eq!(profile_target(&d, "alice", &named("ALICE", &mine, None), None), Target::Key);
+        // Logged in to the game under her old name: the game is right, the profile is another's.
+        let playing = Data { game: Some("alice".into()), ..d };
+        assert_eq!(
+            profile_target(&playing, "alice", &named("Alicia", &mine, None), None),
+            Target::New("Alicia".into())
+        );
     }
 
     #[test]

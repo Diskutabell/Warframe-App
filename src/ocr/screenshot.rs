@@ -57,16 +57,23 @@ pub fn cheap(setting: ScreenshotTool) -> bool {
 #[cfg(unix)]
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The order Auto tries the tools in, for the session the app runs in. grim works only on
+/// wlroots-style compositors (Hyprland, Sway and the like); KDE and GNOME have their own tools on
+/// Wayland; an X11 session has the classic ones (grim cannot capture there at all).
 #[cfg(unix)]
-/// Auto-detection order: wlroots-style compositors, KDE, GNOME, then X11 tools.
-const AUTO: [ScreenshotTool; 6] = [
-    ScreenshotTool::Grim,
-    ScreenshotTool::Spectacle,
-    ScreenshotTool::GnomeScreenshot,
-    ScreenshotTool::Maim,
-    ScreenshotTool::Scrot,
-    ScreenshotTool::Import,
-];
+fn auto_order(wayland: bool, desktop: &str) -> &'static [ScreenshotTool] {
+    use ScreenshotTool::*;
+    let desktop = desktop.to_ascii_lowercase();
+    if !wayland {
+        &[Maim, Scrot, Import, Spectacle, GnomeScreenshot]
+    } else if desktop.contains("kde") {
+        &[Spectacle, Grim, GnomeScreenshot]
+    } else if desktop.contains("gnome") {
+        &[GnomeScreenshot, Spectacle, Grim]
+    } else {
+        &[Grim, Spectacle, GnomeScreenshot, Maim, Scrot, Import]
+    }
+}
 
 #[cfg(unix)]
 pub fn program(tool: ScreenshotTool) -> &'static str {
@@ -84,7 +91,11 @@ pub fn program(tool: ScreenshotTool) -> &'static str {
 /// The tool a capture would use, if one is installed.
 pub fn resolve(setting: ScreenshotTool) -> Option<ScreenshotTool> {
     match setting {
-        ScreenshotTool::Auto => AUTO.into_iter().find(|t| which(program(*t)).is_some()),
+        ScreenshotTool::Auto => {
+            let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
+            let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+            auto_order(wayland, &desktop).iter().copied().find(|t| which(program(*t)).is_some())
+        }
         t => which(program(t)).map(|_| t),
     }
 }
@@ -148,4 +159,19 @@ pub fn decode(bytes: &[u8]) -> Result<Rgb> {
 
 pub fn load(path: &std::path::Path) -> Result<Rgb> {
     decode(&fs::read(path).with_context(|| format!("reading {}", path.display()))?)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_picks_a_tool_that_works_in_the_session() {
+        use ScreenshotTool::*;
+        assert_eq!(auto_order(true, "Hyprland")[0], Grim);
+        assert_eq!(auto_order(true, "sway")[0], Grim);
+        assert_eq!(auto_order(true, "KDE")[0], Spectacle);
+        assert_eq!(auto_order(true, "ubuntu:GNOME")[0], GnomeScreenshot);
+        assert!(!auto_order(false, "KDE").contains(&Grim), "grim cannot capture an X11 session");
+    }
 }

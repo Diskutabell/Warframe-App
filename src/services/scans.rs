@@ -183,6 +183,43 @@ impl RewardScan {
             self.done = true;
         }
     }
+
+    /// The log opened a new reward screen at `t`; its number. A scan that is reading it already
+    /// (the hotkey, pressed before the log line reached the disk) carries on and is joined, as is
+    /// one that just read its cards; anything else belongs to an older screen and is called off.
+    fn new_screen(&mut self, t: f64) -> u64 {
+        let read_cards = self.result.as_ref().is_some_and(|r| r.cards.is_some());
+        if !self.done || (t - self.started < COALESCE && read_cards) {
+            self.screen_generation = self.screen_generation.wrapping_add(1);
+        } else {
+            self.invalidate();
+        }
+        self.screen_generation
+    }
+
+    /// Whose turn it is: a scan still running (or just finished) for the same screen is shared,
+    /// prices included; otherwise this caller scans. `screen` is the log's screen the caller reads
+    /// (None for the hotkey); `joined` says it has waited for a running scan already.
+    fn turn(&mut self, screen: Option<u64>, joined: bool, may_wait: bool, t: f64) -> Turn {
+        if screen.is_some_and(|screen| screen != self.screen_generation) {
+            return Turn::Cancelled;
+        }
+        let recent = t - self.started < COALESCE;
+        if self.done && (joined || recent) {
+            // The log's screen wants the cards read; a hotkey caller takes whatever was read.
+            if let Some(r) = self.result.as_ref().filter(|r| screen.is_none() || r.cards.is_some()) {
+                return Turn::Share(Arc::clone(r));
+            }
+        }
+        if !self.done && may_wait {
+            return Turn::Wait;
+        }
+        self.started = t;
+        self.done = false;
+        self.generation = self.generation.wrapping_add(1);
+        self.result = None;
+        Turn::Scan(self.generation)
+    }
 }
 
 /// What a caller asking for a reward scan does: share a result, give up, wait, or scan.
@@ -291,15 +328,16 @@ impl ScanService {
     // ------------------------------------------------------------ the log's reward screen
 
     /// The log opened a reward screen: read it once its cards are up.
+    ///
+    /// The log reaches the disk late (up to seconds), so the hotkey may have read this very screen
+    /// already, or be reading it. Such a scan is not called off: the automatic one joins it and
+    /// shares its result when that found the cards, and reads the screen itself when not (the
+    /// hotkey was pressed before the cards turned over).
     pub fn on_reward_screen(self: &Arc<Self>) {
         if !self.settings.get().ocr_enabled {
             return;
         }
-        let screen = {
-            let mut scan = lock(&self.reward_scan);
-            scan.invalidate();
-            scan.screen_generation
-        };
+        let screen = lock(&self.reward_scan).new_screen(now());
         self.reward_done.send_modify(|n| *n = n.wrapping_add(1));
         let me = Arc::clone(self);
         tokio::spawn(async move {
@@ -355,24 +393,7 @@ impl ScanService {
     /// Whose turn it is: a scan still running (or just finished) for the same screen is shared,
     /// prices included; otherwise this caller scans.
     fn turn(&self, screen: Option<u64>, joined: bool, deadline: Instant) -> Turn {
-        let mut slot = lock(&self.reward_scan);
-        if screen.is_some_and(|screen| screen != slot.screen_generation) {
-            return Turn::Cancelled;
-        }
-        let recent = now() - slot.started < COALESCE;
-        if slot.done && (joined || recent) {
-            if let Some(r) = &slot.result {
-                return Turn::Share(Arc::clone(r));
-            }
-        }
-        if !slot.done && Instant::now() < deadline {
-            return Turn::Wait;
-        }
-        slot.started = now();
-        slot.done = false;
-        slot.generation = slot.generation.wrapping_add(1);
-        slot.result = None;
-        Turn::Scan(slot.generation)
+        lock(&self.reward_scan).turn(screen, joined, Instant::now() < deadline, now())
     }
 
     /// Reads the reward screen: `screen` is the log's reward screen this scan belongs to (None for
@@ -801,6 +822,47 @@ mod tests {
         assert!(scan.is_current(2));
         scan.finish(2);
         assert!(scan.done);
+    }
+
+    fn idle() -> RewardScan {
+        RewardScan { started: f64::NEG_INFINITY, done: true, generation: 0, screen_generation: 0, result: None }
+    }
+
+    fn found(cards: Option<usize>) -> Arc<RewardResult> {
+        Arc::new(RewardResult { cards, ..RewardResult::default() })
+    }
+
+    #[test]
+    fn the_logs_screen_joins_a_hotkey_scan_that_read_the_cards() {
+        let mut scan = idle();
+        // F9 at t=100, before the log's open line reached the disk.
+        let Turn::Scan(hotkey) = scan.turn(None, false, true, 100.0) else { panic!("the hotkey scans") };
+        // The open line arrives at t=101 while it reads: it is not called off.
+        let screen = scan.new_screen(101.0);
+        assert!(scan.is_current(hotkey));
+        assert!(matches!(scan.turn(Some(screen), false, true, 101.0), Turn::Wait));
+        // It finishes with the cards read: the log's scan shares it.
+        scan.result = Some(found(Some(4)));
+        scan.finish(hotkey);
+        assert!(matches!(scan.turn(Some(screen), true, true, 108.0), Turn::Share(r) if r.cards == Some(4)));
+    }
+
+    #[test]
+    fn a_hotkey_pressed_before_the_cards_does_not_stand_in_for_them() {
+        let mut scan = idle();
+        let Turn::Scan(hotkey) = scan.turn(None, false, true, 100.0) else { panic!("the hotkey scans") };
+        let screen = scan.new_screen(100.5);
+        // The hotkey looked before the cards turned over and found none.
+        scan.result = Some(found(None));
+        scan.finish(hotkey);
+        assert!(matches!(scan.turn(Some(screen), true, true, 102.0), Turn::Scan(_)), "the log's scan reads them");
+        // A screen opening long after a scan is a new screen: the old scan is called off.
+        let mut old = idle();
+        let Turn::Scan(g) = old.turn(None, false, true, 100.0) else { panic!() };
+        old.result = Some(found(Some(4)));
+        old.finish(g);
+        let screen = old.new_screen(400.0);
+        assert!(matches!(old.turn(Some(screen), false, true, 400.0), Turn::Scan(_)));
     }
 
     #[test]

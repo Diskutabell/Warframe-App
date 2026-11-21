@@ -566,14 +566,21 @@ fn unlzma_limit(bytes: &[u8], limit: usize) -> Result<String> {
 
 /// Fetches a content-hashed manifest file into `path`, tracking the manifest name alongside it so
 /// a new hash in the index invalidates the cache immediately without sending the old URL's ETag.
-async fn fetch_manifest_json(url: &str, manifest: &str, path: &Path, force: bool, fetch: &dyn Fetch) -> Result<Value> {
+async fn fetch_manifest_json(
+    url: &str,
+    manifest: &str,
+    path: &Path,
+    force: bool,
+    fetch: &dyn Fetch,
+    read: Reader<Value>,
+) -> Result<Value> {
     let manifest_path = path.with_extension("manifest");
     let cached_manifest = {
         let manifest_path = manifest_path.clone();
         blocking(move || fs::read_to_string(manifest_path).ok()).await?
     };
     let changed = cached_manifest.as_deref().map(str::trim) != Some(manifest);
-    let (value, downloaded) = fetch_cached(url, path, force || changed, fetch, json_reader()).await?;
+    let (value, downloaded) = fetch_cached(url, path, force || changed, fetch, read).await?;
     if downloaded {
         let manifest = manifest.to_string();
         let saved = blocking(move || config::write_atomic(&manifest_path, manifest.as_bytes())).await?;
@@ -601,12 +608,19 @@ async fn de_recipes(force: bool) -> Result<Vec<Value>> {
     {
         return Err(anyhow!("DE's export index named an invalid recipe file"));
     }
+    // Only a file with the recipe list counts as one: an error page that happens to be JSON
+    // must not replace the cached copy.
+    let recipes_only: Reader<Value> = Arc::new(|bytes: &[u8]| {
+        let v: Value = serde_json::from_slice(bytes).context("invalid JSON")?;
+        if v.get("ExportRecipes").is_some_and(Value::is_array) { Ok(v) } else { Err(anyhow!("no recipe list in it")) }
+    });
     let raw = fetch_manifest_json(
         &format!("{DE_FILES_URL}{file}"),
         file,
         &cache.join("de_ExportRecipes_en.json"),
         force,
         &Network,
+        recipes_only,
     )
     .await?;
     match raw.get("ExportRecipes") {
@@ -1371,13 +1385,22 @@ impl Catalog {
         if let Some(it) = self.items.get(uid) {
             return it.name.clone();
         }
-        if let Some(p) = self.parts.get(uid) {
+        // A part by either twin: a blueprint crafting in the foundry is the "Hildryn Chassis"
+        // the catalog files under its component, not an "Ironframe Chassis".
+        if let Some(p) = self.parts.get(self.part_alias.get(uid).map_or(uid, String::as_str)) {
             return p.name.clone();
         }
         if let Some((base, refinement)) = self.relic_uids.get(uid) {
             return format!("{base} {refinement}");
         }
-        self.names.get(uid).cloned().unwrap_or_else(|| camel_name(uid))
+        if let Some(name) = self.names.get(uid) {
+            return name.clone();
+        }
+        // The game's own export names what WFCD does not (medallions, syndicate offerings).
+        if let Some(name) = self.inventory.get(uid).and_then(|e| e.name.as_deref()).filter(|n| !n.is_empty()) {
+            return name.to_string();
+        }
+        camel_name(uid)
     }
 
     /// Names the OCR matcher looks for on the reward screen: everything a relic can drop.
@@ -1796,6 +1819,7 @@ mod tests {
             &path,
             false,
             &Mock(std::sync::Mutex::new(|_: &str, _: &[(&str, &str)], _| resp("{\"v\":1}", "\"etag-1\""))),
+            json_reader(),
         )
         .await
         .unwrap();
@@ -1808,6 +1832,7 @@ mod tests {
             &path,
             false,
             &Mock(std::sync::Mutex::new(|_: &str, _: &[(&str, &str)], _| panic!("same manifest should stay cached"))),
+            json_reader(),
         )
         .await
         .unwrap();
@@ -1824,6 +1849,7 @@ mod tests {
                 saw_etag = h.iter().any(|(k, _)| k.eq_ignore_ascii_case("if-none-match"));
                 resp("{\"v\":2}", "\"etag-2\"")
             })),
+            json_reader(),
         )
         .await
         .unwrap();
@@ -1837,6 +1863,7 @@ mod tests {
             &path,
             false,
             &Mock(std::sync::Mutex::new(|_: &str, _: &[(&str, &str)], _| Err(anyhow!("offline")))),
+            json_reader(),
         )
         .await
         .unwrap();
@@ -1847,11 +1874,29 @@ mod tests {
             &path,
             false,
             &Mock(std::sync::Mutex::new(|_: &str, _: &[(&str, &str)], _| resp("{\"v\":3}", "\"etag-3\""))),
+            json_reader(),
         )
         .await
         .unwrap();
         assert_eq!(v3["v"], 3);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_answer_the_reader_refuses_never_replaces_the_cached_copy() {
+        let cache = TestCache::new();
+        let path = cache.path();
+        fs::write(&path, r#"{"ExportRecipes": [{"uniqueName": "/R"}]}"#).unwrap();
+        let recipes_only: Reader<Value> = Arc::new(|bytes: &[u8]| {
+            let v: Value = serde_json::from_slice(bytes).context("invalid JSON")?;
+            if v.get("ExportRecipes").is_some_and(Value::is_array) { Ok(v) } else { Err(anyhow!("no recipe list")) }
+        });
+        let answer = |_: &str, _: &[(&str, &str)], _| Ok(response(200, r#"{"error": "unavailable"}"#, None));
+        let (v, downloaded) =
+            fetch_cached("test", &path, true, &Mock(std::sync::Mutex::new(answer)), recipes_only).await.unwrap();
+        assert!(!downloaded);
+        assert_eq!(v["ExportRecipes"][0]["uniqueName"], "/R", "the cached copy is kept");
+        assert!(fs::read_to_string(&path).unwrap().contains("/R"), "and stays on disk");
     }
 
     #[test]

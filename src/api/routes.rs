@@ -34,7 +34,6 @@ pub fn api(engine: Engine, stop: CancellationToken) -> Router<Engine> {
         .route("/api/task", get(task))
         .route("/api/item", get(item))
         .route("/api/history", get(|s: State<Engine>| view(s, |e| Ok(e.history()))))
-        .route("/api/hotkeys", get(|s: State<Engine>| view(s, |e| Ok(e.hotkeys()))))
         .route("/api/riven", get(riven_table))
         .route("/api/rivens", get(|State(e): State<Engine>| async move { answer(e.rivens().await) }))
         .route("/api/fissures", get(|State(e): State<Engine>| async move { answer(e.fissures().await) }))
@@ -49,6 +48,8 @@ pub fn api(engine: Engine, stop: CancellationToken) -> Router<Engine> {
         .route("/api/state", get(|s: State<Engine>| view(s, |e| Ok(e.summary()))))
         .route("/api/settings", get(|s: State<Engine>| view(s, |e| Ok(serde_json::to_value(e.settings())?))))
         .route("/api/world", get(|State(e): State<Engine>| async move { answer(e.world_view().await) }))
+        // Settings shows the hotkeys before the game data is there.
+        .route("/api/hotkeys", get(|s: State<Engine>| view(s, |e| Ok(e.hotkeys()))))
         .route("/api/rewards", get(|s: State<Engine>| view(s, |e| Ok(result_json(e.rewards())))))
         .route("/api/riven/result", get(|s: State<Engine>| view(s, |e| Ok(result_json(e.riven())))))
         .route("/api/art", get(super::art::serve))

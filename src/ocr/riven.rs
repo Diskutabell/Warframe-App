@@ -11,7 +11,10 @@ use crate::rivens::{self, Unit, WORDING};
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ParsedStat {
     pub stat: &'static str,
+    /// The value as the card prints it, sign included.
     pub value: f64,
+    /// Whether it is the riven's negative (its curse). For most stats that is the printed minus;
+    /// Recoil prints its good rolls with a minus (`rivens::Stat::inverted`).
     pub negative: bool,
 }
 
@@ -23,9 +26,10 @@ pub struct RivenRead {
 
 /// "+244.4% Damage", "-101.5% Impact", "+2.2 Punch Through", "+0.5s Combo Duration". What follows
 /// the number is examined separately (`stat_after`), because the card wraps long names and
-/// tesseract sprinkles junk between the words ("Magazine . ~ v & Capacity").
+/// tesseract sprinkles junk between the words ("Magazine . ~ v & Capacity"). A unit letter counts
+/// only written onto the number: "+90.5 slash" (the % lost) must keep its "s".
 static SIGNED: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"([+\-\u{2212}])\s*(\d+(?:[.,]\d+)?)\s*(%|s|m|x)?").unwrap());
+    LazyLock::new(|| Regex::new(r"([+\-\u{2212}])\s*(\d+(?:[.,]\d+)?)(?:\s*%|[smx]\b)?").unwrap());
 /// Faction damage can be printed as a multiplier: "x1.45 Damage to Corpus" (x0.55 for a negative).
 static MULTIPLIER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:^|\s)[xX\u{d7}]\s?(\d+(?:[.,]\d+)?)").unwrap());
 
@@ -112,8 +116,10 @@ fn behind_an_icon(word: &str) -> Option<&'static str> {
     })
 }
 
-fn window_after(blob: &str, end: usize) -> &str {
-    let rest = &blob[end..];
+/// The text after a number that may name its stat: up to the next number on the card (the next
+/// stat's), and at most 70 characters.
+fn window_after(blob: &str, end: usize, next: usize) -> &str {
+    let rest = &blob[end..next.max(end)];
     let cut = rest.char_indices().nth(70).map_or(rest.len(), |(i, _)| i);
     &rest[..cut]
 }
@@ -150,12 +156,19 @@ pub fn find_weapon(text: &str, weapons: &[String]) -> Option<String> {
     if let Some(w) = best {
         return Some(w.clone());
     }
+    // Each name against as many words as it has at the start of a line: the riven's own name
+    // follows on the same line and must not count against it ("Latr0n Critatis").
     let (mut best, mut score) = (None, 0.0);
     for line in text.lines() {
         let line = line.to_lowercase();
+        let tokens: Vec<&str> = line.trim_start_matches(|c: char| !c.is_alphanumeric()).split_whitespace().collect();
         for w in weapons {
-            let prefix: String = line.chars().take(w.chars().count() + 6).collect();
-            let r = SequenceMatcher::new(&w.to_lowercase(), &prefix).ratio();
+            let words = w.split_whitespace().count();
+            if tokens.len() < words {
+                continue;
+            }
+            let start = tokens[..words].join(" ");
+            let r = SequenceMatcher::new(&w.to_lowercase(), &start).ratio();
             if r > score {
                 (best, score) = (Some(w), r);
             }
@@ -205,17 +218,28 @@ pub fn parse(text: &str, weapons: &[String]) -> RivenRead {
     // Long stat names wrap ("+57.5% Magazine" / "Capacity"), so match across the whole text, not
     // per line: the window stops mattering at the next stat anyway.
     let blob = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Where every number starts: a stat's name is looked for only up to the next one.
+    let mut starts: Vec<usize> = SIGNED
+        .find_iter(&blob)
+        .chain(MULTIPLIER.find_iter(&blob))
+        .map(|m| m.start())
+        .chain(std::iter::once(blob.len()))
+        .collect();
+    starts.sort_unstable();
+    let next_after = |end: usize| starts.iter().copied().find(|&s| s >= end).unwrap_or(blob.len());
     let mut found: Vec<(usize, ParsedStat)> = Vec::new();
     for m in SIGNED.captures_iter(&blob) {
         let whole = m.get(0).expect("match");
-        let Some(stat) = stat_after(window_after(&blob, whole.end())) else { continue };
+        let Some(stat) = stat_after(window_after(&blob, whole.end(), next_after(whole.end()))) else { continue };
         let Some(val) = number(&m[2]) else { continue };
-        let negative = &m[1] != "+";
-        found.push((whole.start(), ParsedStat { stat, value: if negative { -val } else { val }, negative }));
+        let shown_negative = &m[1] != "+";
+        // Recoil is printed the other way round: a good roll is a reduction ("-91.1%").
+        let negative = shown_negative != rivens::stat(stat).is_some_and(|s| s.inverted);
+        found.push((whole.start(), ParsedStat { stat, value: if shown_negative { -val } else { val }, negative }));
     }
     for m in MULTIPLIER.captures_iter(&blob) {
         let whole = m.get(0).expect("match");
-        let Some(stat) = stat_after(window_after(&blob, whole.end())) else { continue };
+        let Some(stat) = stat_after(window_after(&blob, whole.end(), next_after(whole.end()))) else { continue };
         if rivens::stat(stat).is_none_or(|s| s.unit != Unit::Multiplier) {
             continue; // "(x2 for Heavy Attacks)" and the like are descriptions, not rolls
         }
@@ -249,6 +273,66 @@ mod tests {
         assert_eq!(r.weapon.as_deref(), Some("Latron"));
         let got: Vec<(&str, f64)> = r.stats.iter().map(|s| (s.stat, s.value)).collect();
         assert_eq!(got, [("Ammo Maximum", 56.9), ("Critical Chance", 167.4), ("Magazine Capacity", 57.5)]);
+    }
+
+    /// What each reading of `text` says: (stat, value, curse?).
+    fn stats_of(text: &str) -> Vec<(&'static str, f64, bool)> {
+        parse(text, &[]).stats.iter().map(|s| (s.stat, s.value, s.negative)).collect()
+    }
+
+    #[test]
+    fn a_stat_never_takes_the_next_stats_name() {
+        // "Capacity" lost from a stat that is not the last one.
+        assert_eq!(
+            stats_of("+57.5% Magazine\n+167.4% Critical Chance\n+56.9% Ammo Maximum"),
+            [("Magazine Capacity", 57.5, false), ("Critical Chance", 167.4, false), ("Ammo Maximum", 56.9, false)]
+        );
+        // An icon glued onto "Impact", with another stat after it.
+        assert_eq!(
+            stats_of("-105% AMlmpact\n+65% Fire Rate"),
+            [("Impact Damage", -105.0, true), ("Fire Rate / Attack Speed", 65.0, false)]
+        );
+        // Junk before "Damage", and faction damage after it.
+        assert_eq!(
+            stats_of("+120% o Damage\n+45% Damage to Grineer"),
+            [("Damage", 120.0, false), ("Damage to Grineer", 45.0, false)]
+        );
+    }
+
+    #[test]
+    fn a_lost_percent_sign_does_not_eat_the_stats_first_letter() {
+        assert_eq!(
+            stats_of("+90.5 slash\n+112.0 status chance\n+57.5 magazine capacity"),
+            [("Slash Damage", 90.5, false), ("Status Chance", 112.0, false), ("Magazine Capacity", 57.5, false)]
+        );
+        // Units written on the number still parse.
+        assert_eq!(
+            stats_of("+0.5s Combo Duration +2.2m Punch Through"),
+            [("Combo Duration", 0.5, false), ("Punch Through", 2.2, false)]
+        );
+    }
+
+    #[test]
+    fn recoil_is_printed_the_other_way_round() {
+        // On the card a good recoil roll is a reduction ("-91.1%"), a curse an increase ("+72.9%").
+        assert_eq!(stats_of("+163% Damage -91.1% Weapon Recoil"), [("Damage", 163.0, false), ("Recoil", -91.1, false)]);
+        assert_eq!(
+            stats_of("+155% Damage +140% Critical Chance +84% Multishot +72.9% Weapon Recoil"),
+            [
+                ("Damage", 155.0, false),
+                ("Critical Chance", 140.0, false),
+                ("Multishot", 84.0, false),
+                ("Recoil", 72.9, true)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_weapon_name_with_an_ocr_slip_is_still_found() {
+        let w = weapons();
+        assert_eq!(find_weapon("Latr0n Critatis\n+120% Damage", &w).as_deref(), Some("Latron"));
+        assert_eq!(find_weapon("Kuva Brama Acri-tox\n+12% Damage", &w).as_deref(), Some("Kuva Bramma"));
+        assert_eq!(find_weapon("+120% Damage\n+45% Critical Chance", &w), None);
     }
 
     #[test]

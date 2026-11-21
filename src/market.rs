@@ -611,7 +611,10 @@ impl Market {
             .riven_weapon_slug(uid, name)
             .await
             .ok_or_else(|| anyhow::anyhow!("warframe.market lists no rivens for {name}"))?;
-        if !valid_slug(&weapon) || !positives.iter().all(|s| valid_slug(s)) {
+        // Attribute slugs are warframe.market's own and may hold a "/" ("base_damage_/_melee_damage"):
+        // each must be one of the stat table's.
+        let known = |slug: &str| crate::rivens::STATS.iter().any(|s| crate::rivens::market_slug(s.name) == Some(slug));
+        if !valid_slug(&weapon) || !positives.iter().all(|s| known(s)) {
             anyhow::bail!("warframe.market riven query contained an invalid slug");
         }
         let stats = positives.join(",");

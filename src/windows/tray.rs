@@ -74,9 +74,14 @@ impl Tray {
         };
         match rx.recv_timeout(Duration::from_secs(3)) {
             Ok(hwnd) if hwnd != 0 => self.running = Some(RunningTray { hwnd, thread }),
-            _ => {
+            // It could not make its window and has ended.
+            Ok(_) => {
                 let _ = thread.join();
             }
+            // The shell is slow to take the icon (Explorer restarting): not waited for here, on
+            // the window's thread. Once the thread finds nobody waiting it removes its icon and
+            // ends by itself; dropping the handle lets it.
+            Err(_) => drop(thread),
         }
     }
 
@@ -186,12 +191,15 @@ fn run_tray_thread(state: Arc<App>, visible: Arc<AtomicBool>, ready: std::sync::
         nid.szTip[..n].copy_from_slice(&tip[..n]);
 
         Shell_NotifyIconW(NIM_ADD, &nid);
-        let _ = ready.send(hwnd as usize);
-
-        let mut msg: MSG = std::mem::zeroed();
-        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+        if ready.send(hwnd as usize).is_ok() {
+            let mut msg: MSG = std::mem::zeroed();
+            while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        } else {
+            // Nobody waits for this tray any more (the window gave up on a slow start): undo it.
+            DestroyWindow(hwnd);
         }
 
         Shell_NotifyIconW(NIM_DELETE, &nid);

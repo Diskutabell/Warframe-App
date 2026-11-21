@@ -352,10 +352,29 @@ pub struct Inventory {
     pub source: Option<String>,
 }
 
+/// Ducats are an item stack (`MiscItems`), not a currency field of their own.
+pub const DUCATS: &str = "/Lotus/Types/Items/MiscItems/PrimeBucks";
+
 impl Inventory {
     /// When the game last synced it, or when it was read if the payload does not say.
     pub fn as_of(&self) -> f64 {
         self.synced_at.filter(|t| *t > 0.0).unwrap_or(self.imported)
+    }
+
+    /// The currencies, Ducats from their stack (inventories saved before this was fixed took
+    /// another field for them).
+    pub fn currencies(&self) -> Currencies {
+        Currencies { ducats: self.counts.get(DUCATS).copied(), ..self.currencies.clone() }
+    }
+
+    /// How many copies of each uid are held: the stacks, plus mods and arcanes held one by one
+    /// with a rank (`upgrades`), which are no stack.
+    pub fn held(&self) -> IndexMap<String, i64> {
+        let mut held = self.counts.clone();
+        for (uid, ranks) in self.upgrades.iter().flatten() {
+            *held.entry(uid.clone()).or_insert(0) += ranks.len() as i64;
+        }
+        held
     }
 }
 
@@ -447,17 +466,18 @@ pub fn parse_inventory(data: &Value) -> Result<Inventory> {
         }
         ranks
     });
+    let currencies = Currencies {
+        platinum: data["PremiumCredits"].as_i64(),
+        credits: data["RegularCredits"].as_i64(),
+        endo: data["FusionPoints"].as_i64(),
+        ducats: counts.get(DUCATS).copied(),
+    };
     Ok(Inventory {
         counts,
         equipment,
         xp,
         foundry,
-        currencies: Currencies {
-            platinum: data["PremiumCredits"].as_i64(),
-            credits: data["RegularCredits"].as_i64(),
-            endo: data["FusionPoints"].as_i64(),
-            ducats: data["PrimeTokens"].as_i64(),
-        },
+        currencies,
         mods,
         upgrades,
         mastery_rank: data["PlayerLevel"].as_i64(),
@@ -556,6 +576,25 @@ mod tests {
         assert_eq!(inv.synced_at, Some(0x5f1e2d3c as f64));
         assert_eq!(inv.upgrades, None, "no Upgrades in the payload: ranked copies are unknown, not none");
         assert!(parse_inventory(&json!({"Foo": 1})).is_err());
+    }
+
+    #[test]
+    fn ducats_are_their_stack_and_ranked_copies_are_held() {
+        let inv = parse_inventory(&json!({
+            "MiscItems": [{"ItemType": DUCATS, "ItemCount": 721}],
+            "RawUpgrades": [{"ItemType": "/Mods/Fiber", "ItemCount": 3}],
+            "Upgrades": [{"ItemType": "/Mods/Fiber", "UpgradeFingerprint": "{\"lvl\":10}"},
+                         {"ItemType": "/Arcanes/Energize", "UpgradeFingerprint": "{\"lvl\":5}"}],
+            "PrimeTokens": 4
+        }))
+        .unwrap();
+        assert_eq!(inv.currencies().ducats, Some(721), "not PrimeTokens");
+        let held = inv.held();
+        assert_eq!((held["/Mods/Fiber"], held["/Arcanes/Energize"]), (4, 1), "three unranked and one ranked");
+        // An inventory saved by an older build, with Ducats taken from elsewhere.
+        let mut old = inv.clone();
+        old.currencies.ducats = None;
+        assert_eq!(old.currencies().ducats, Some(721));
     }
 
     #[test]

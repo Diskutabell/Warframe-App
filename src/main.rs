@@ -170,8 +170,11 @@ fn local(port: u16, path: &str, post: bool, timeout: Duration) -> Result<Value> 
     net::local::call(port, path, post, timeout)
 }
 
+/// Whether this app (not some other program on the port) answers there: its settings carry keys
+/// nothing else would.
 fn running(port: u16) -> bool {
-    local(port, "settings", false, Duration::from_secs(2)).is_ok_and(|v| v.is_object())
+    local(port, "settings", false, Duration::from_secs(2))
+        .is_ok_and(|v| v.get("hotkey_rewards").is_some() && v.get("ee_log_path").is_some())
 }
 
 /// How long the engine gets, once the window is closed, to finish requests and background work
@@ -203,10 +206,12 @@ fn run(settings: config::Settings, browser: bool, headless: bool, offline: bool)
             config::settings_file().display()
         ))
     })?;
+    // `--port 0` binds any free port: from here on the port is the one bound.
+    let port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
     // The engine's background tasks are spawned onto the runtime from here on, also from the
     // desktop shell's callbacks on this thread.
     let _runtime = runtime.enter();
-    let state = app::App::new(settings);
+    let state = app::App::new(settings, port);
     state.start();
     let server = runtime.spawn(api::serve(listener, Arc::clone(&state), state.stop.clone()));
     runtime.spawn(quit_on_signal(Arc::clone(&state)));
@@ -216,10 +221,9 @@ fn run(settings: config::Settings, browser: bool, headless: bool, offline: bool)
             state.accounts.event(&format!("Hotkeys not registered: {e}"), "warn");
         }
         let me = Arc::clone(&state);
-        std::thread::Builder::new().name("unpack-ocr".into()).spawn(move || {
-            if let Err(e) = compositor::unpack_tesseract() {
-                me.accounts.event(&format!("The built-in OCR could not be unpacked: {e:#}"), "warn");
-            }
+        std::thread::Builder::new().name("unpack-ocr".into()).spawn(move || match compositor::unpack_tesseract() {
+            Ok(()) => me.tools_changed(),
+            Err(e) => me.accounts.event(&format!("The built-in OCR could not be unpacked: {e:#}"), "warn"),
         })?;
     }
     let url = format!("http://127.0.0.1:{port}/");
@@ -308,10 +312,9 @@ fn riven(port: u16) -> Result<()> {
         res["positives"]
     );
     for g in res["stats"].as_array().into_iter().flatten() {
-        let sign = if g["negative"].as_bool().unwrap_or(false) { "-" } else { "+" };
         println!(
-            "  {sign}{:<8} {:<26} {:<3} ({:+.2}%)",
-            g["value"].as_f64().unwrap_or(0.0).abs(),
+            "  {:<9} {:<26} {:<3} ({:+.2}%)",
+            g["printed"].as_str().unwrap_or("").replace('\u{2212}', "-"),
             g["stat"].as_str().unwrap_or(""),
             g["grade"].as_str().unwrap_or(""),
             g["deviation"].as_f64().unwrap_or(0.0)
@@ -385,7 +388,8 @@ fn replay_riven(catalog: &gamedata::Catalog, frame: &std::path::Path, scales: &[
         let graded =
             item.zip(counts).and_then(|(it, (p, n, _))| rivens::grade_roll(it, s.stat, s.value, p, n, s.negative));
         let grade = graded.map_or(String::new(), |g| format!("  {} ({:+.2}%)", g.grade, g.deviation));
-        println!("  {}{} {}{grade}", if s.negative { "-" } else { "+" }, s.value.abs(), s.stat);
+        // As the card prints it: the value keeps the card's sign (Recoil's good rolls are "-").
+        println!("  {}{} {}{grade}", if s.value < 0.0 { "-" } else { "+" }, s.value.abs(), s.stat);
     }
     eprintln!("--- text\n{text}");
     eprintln!("--- read in {:.2} s", started.elapsed().as_secs_f64());

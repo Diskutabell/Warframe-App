@@ -1,8 +1,9 @@
 //! Windows: where the game is, taking its screenshot, and the scan hotkeys.
 //!
 //! This stands in for `compositor.rs` on Windows (see `main.rs`). There is no compositor to ask:
-//! the game's window is found through its process, the screen is copied with GDI, and the
-//! hotkeys are registered by the app itself while it runs.
+//! the game's window is found among the desktop's windows by its class and title (never by
+//! looking at the game's process), the screen is copied with GDI, and the hotkeys are registered
+//! by the app itself while it runs.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -12,16 +13,16 @@ use anyhow::{Result, bail};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, ClientToScreen, CreateCompatibleDC, CreateDIBSection,
-    DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
     MonitorFromPoint, MonitorFromWindow, ReleaseDC, SRCCOPY, SelectObject,
 };
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
-use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey, UnregisterHotKey,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetClientRect, GetMessageW, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible, MSG,
+    EnumWindows, GetClassNameW, GetClientRect, GetMessageW, GetWindowRect, GetWindowTextW, IsWindowVisible, MSG,
     PostThreadMessageW, WM_HOTKEY, WM_QUIT,
 };
 use windows_sys::core::BOOL;
@@ -102,36 +103,59 @@ pub fn unpack_tesseract() -> Result<()> {
 
 // ------------------------------------------------------------------ the game's window
 
-/// The largest visible window of the game process, if it runs.
+/// A top-level window as the search for the game sees it.
+struct Candidate {
+    class: String,
+    title: String,
+    area: i64,
+}
+
+/// Which of the visible top-level windows is the game: one whose class is the game's own
+/// (DE's engine names it "Warframe..."), else one titled exactly "Warframe" (the launcher is
+/// called that too, but it is smaller and gone once the game runs); the largest of them.
+fn pick_game(windows: &[Candidate]) -> Option<usize> {
+    let largest = |accept: &dyn Fn(&Candidate) -> bool| {
+        windows.iter().enumerate().filter(|(_, w)| w.area > 0 && accept(w)).max_by_key(|(_, w)| w.area).map(|(i, _)| i)
+    };
+    largest(&|w| w.class.starts_with("Warframe")).or_else(|| largest(&|w| w.title == "Warframe"))
+}
+
+/// The game's window, if it runs: found by class and title alone, so finding it needs no access to
+/// the game's process.
 fn game_window() -> Option<HWND> {
-    let pid = crate::memscan::find_game_pid()?;
     struct Search {
-        pid: u32,
-        best: Option<(HWND, i64)>,
+        handles: Vec<HWND>,
+        found: Vec<Candidate>,
     }
     unsafe extern "system" fn visit(hwnd: HWND, data: LPARAM) -> BOOL {
         // SAFETY: `data` is the `Search` passed to EnumWindows below, alive for the whole call.
         let search = unsafe { &mut *(data as *mut Search) };
-        let mut owner = 0u32;
         let mut r: RECT = unsafe { std::mem::zeroed() };
-        // SAFETY: plain queries about a window handle Windows just gave us.
+        let mut class = [0u16; 128];
+        let mut title = [0u16; 128];
+        // SAFETY: plain queries about a window handle Windows just gave us, into buffers of the
+        // lengths passed.
         unsafe {
-            GetWindowThreadProcessId(hwnd, &mut owner);
-            if owner == search.pid && IsWindowVisible(hwnd) != 0 && GetWindowRect(hwnd, &mut r) != 0 {
-                let area = (r.right - r.left) as i64 * (r.bottom - r.top) as i64;
-                if area > search.best.map_or(0, |(_, a)| a) {
-                    search.best = Some((hwnd, area));
-                }
+            if IsWindowVisible(hwnd) == 0 || GetWindowRect(hwnd, &mut r) == 0 {
+                return 1;
             }
+            let class_len = GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32).max(0) as usize;
+            let title_len = GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32).max(0) as usize;
+            search.handles.push(hwnd);
+            search.found.push(Candidate {
+                class: String::from_utf16_lossy(&class[..class_len.min(class.len())]),
+                title: String::from_utf16_lossy(&title[..title_len.min(title.len())]),
+                area: (r.right - r.left) as i64 * (r.bottom - r.top) as i64,
+            });
         }
         1 // keep going
     }
-    let mut search = Search { pid, best: None };
+    let mut search = Search { handles: Vec::new(), found: Vec::new() };
     // SAFETY: the callback only runs during this call, while `search` is alive.
     unsafe {
         EnumWindows(Some(visit), &mut search as *mut Search as LPARAM);
     }
-    search.best.map(|(h, _)| h)
+    pick_game(&search.found).map(|i| search.handles[i])
 }
 
 /// Warframe's client area in screen pixels, without window borders.
@@ -147,22 +171,32 @@ pub fn game_rect() -> Option<Rect> {
     (width > 0 && height > 0).then_some(Rect { x: origin.x, y: origin.y, width, height })
 }
 
+/// The monitor the game is on, or the primary one without a game.
+fn monitor() -> HMONITOR {
+    // SAFETY: MonitorFromWindow/Point never fail with a DEFAULTTO flag.
+    unsafe {
+        match game_window() {
+            Some(h) => MonitorFromWindow(h, MONITOR_DEFAULTTOPRIMARY),
+            None => MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY),
+        }
+    }
+}
+
 /// The display scale of the game's monitor (1.0 at 100%, 1.5 at 150%), so overlays drawn in
-/// CSS pixels come out the same size they do on a 100% screen.
+/// CSS pixels come out the same size they do on a 100% screen. The monitor's own scale: the
+/// game's window may not be DPI aware, and then Windows reports 100% for it whatever the screen.
 pub fn game_scale() -> f64 {
-    let dpi = game_window().map_or(0, |h| unsafe { GetDpiForWindow(h) });
-    if dpi == 0 { 1.0 } else { dpi as f64 / 96.0 }
+    let (mut x, mut y) = (0u32, 0u32);
+    // SAFETY: a monitor handle Windows gave us and two out-parameters.
+    let ok = unsafe { GetDpiForMonitor(monitor(), MDT_EFFECTIVE_DPI, &mut x, &mut y) } == 0;
+    if ok && x > 0 { x as f64 / 96.0 } else { 1.0 }
 }
 
 /// The monitor the game is on (the primary one without a game), in screen pixels.
 pub fn game_monitor() -> Rect {
-    // SAFETY: MonitorFromWindow/Point never fail with a DEFAULTTO flag; GetMonitorInfoW fills a
-    // struct whose size we set.
+    // SAFETY: GetMonitorInfoW fills a struct whose size we set.
     unsafe {
-        let monitor = match game_window() {
-            Some(h) => MonitorFromWindow(h, MONITOR_DEFAULTTOPRIMARY),
-            None => MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY),
-        };
+        let monitor = monitor();
         let mut info: MONITORINFO = std::mem::zeroed();
         info.cbSize = size_of::<MONITORINFO>() as u32;
         if GetMonitorInfoW(monitor, &mut info) == 0 {
@@ -407,6 +441,19 @@ pub fn register_hotkeys(port: u16, keys: &[(&str, &str)]) -> Result<Vec<String>>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_game_is_found_by_its_window_alone() {
+        let w = |class: &str, title: &str, area| Candidate { class: class.into(), title: title.into(), area };
+        let windows = [
+            w("Chrome_WidgetWin_1", "Warframe - wiki - Browser", 2_000_000),
+            w("LauncherWindow", "Warframe", 400_000),
+            w("WarframePublicEvolutionGfxD3D12", "Warframe", 3_686_400),
+        ];
+        assert_eq!(pick_game(&windows), Some(2), "the game's own class wins");
+        assert_eq!(pick_game(&windows[..2]), Some(1), "else a window titled exactly Warframe");
+        assert_eq!(pick_game(&windows[..1]), None);
+    }
 
     #[test]
     fn key_names() {

@@ -54,11 +54,16 @@ pub fn duviri_picks(view: &View, offers: &DuviriOffers, spiral_began: Option<f64
 
 /// The fissures open right now, normal ones first, then by tier and expiry.
 pub fn fissures(raw: Option<&Value>) -> Vec<Value> {
+    let t = now();
     let mut data: Vec<Value> = raw
         .and_then(|r| r["fissures"].as_array())
         .into_iter()
         .flatten()
-        .filter(|f| f["expired"] != Value::Bool(true))
+        // The API's own flag, and the time: a copy kept while the API is unreachable (or answered
+        // while a fresh one is fetched) still lists fissures that have closed since.
+        .filter(|f| {
+            f["expired"] != Value::Bool(true) && f["expiry"].as_str().and_then(clock::parse_iso).is_none_or(|e| e > t)
+        })
         .map(|f| {
             json!({"id": f["id"], "tier": f["tier"], "mission": f["missionType"], "node": f["node"],
                    "enemy": f["enemy"], "activation": f["activation"], "expiry": f["expiry"],
@@ -419,6 +424,18 @@ mod tests {
         assert_eq!(watch_key(&f(false, false)), "Axi|Capture|normal");
         assert_eq!(watch_key(&f(false, true)), "Axi|Capture|steel");
         assert_eq!(watch_key(&f(true, false)), "Axi|Capture|storm");
+    }
+
+    #[test]
+    fn closed_fissures_are_gone_even_from_an_old_copy() {
+        let raw = json!({"fissures": [
+            {"id": "a", "tier": "Lith", "missionType": "Capture", "expiry": clock::iso(now() - 5.0)},
+            {"id": "b", "tier": "Meso", "missionType": "Survival", "expiry": clock::iso(now() + 600.0)},
+            {"id": "c", "tier": "Neo", "missionType": "Defense", "expiry": clock::iso(now() + 600.0), "expired": true},
+        ]});
+        let open = fissures(Some(&raw));
+        let ids: Vec<&str> = open.iter().filter_map(|f| f["id"].as_str()).collect();
+        assert_eq!(ids, ["b"]);
     }
 
     #[test]

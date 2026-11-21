@@ -389,7 +389,10 @@ pub fn run(state: Arc<App>, url: &str, _backend: Backend) -> Result<()> {
 
     // The engine sends its events on a channel; a small thread hands them to the event loop.
     let (tx, rx) = async_channel::unbounded::<UiEvent>();
-    state.set_ui(tx);
+    if !state.set_ui(tx) {
+        // Told to quit before the window was made.
+        return Ok(());
+    }
     let forward = proxy.clone();
     std::thread::Builder::new().name("ui-events".into()).spawn(move || {
         while let Ok(ev) = rx.recv_blocking() {

@@ -3,6 +3,8 @@
 
 use std::sync::{Arc, Mutex};
 
+use tokio_util::sync::CancellationToken;
+
 use super::lock;
 use super::scans::{RewardResult, RivenResult};
 
@@ -36,9 +38,28 @@ pub struct Shell {
 }
 
 impl Shell {
-    /// The shell is up: from now on its inbox is `tx`.
-    pub fn attach(&self, tx: async_channel::Sender<UiEvent>) {
-        *lock(&self.tx) = Some(tx);
+    /// The shell is up: from now on its inbox is `tx`. False when the app is quitting already
+    /// (a quit that came while the window was still being made): then the shell must not start.
+    pub fn attach(&self, tx: async_channel::Sender<UiEvent>, stop: &CancellationToken) -> bool {
+        let mut slot = lock(&self.tx);
+        if stop.is_cancelled() {
+            return false;
+        }
+        *slot = Some(tx);
+        true
+    }
+
+    /// Quits: through the shell when there is one (it closes its window, then the engine stops),
+    /// else by stopping the engine. Under the same lock as `attach`, so a quit never falls
+    /// between the two and leaves a window without an engine.
+    pub fn quit(&self, stop: &CancellationToken) {
+        let slot = lock(&self.tx);
+        match slot.as_ref() {
+            Some(tx) => {
+                let _ = tx.try_send(UiEvent::Quit);
+            }
+            None => stop.cancel(),
+        }
     }
 
     /// Whether a desktop shell is running.
@@ -51,5 +72,26 @@ impl Shell {
         if let Some(tx) = lock(&self.tx).as_ref() {
             let _ = tx.try_send(ev);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_quit_before_the_window_is_up_keeps_the_window_from_starting() {
+        let (shell, stop) = (Shell::default(), CancellationToken::new());
+        shell.quit(&stop);
+        assert!(stop.is_cancelled(), "no window yet: the engine stops");
+        let (tx, _rx) = async_channel::unbounded();
+        assert!(!shell.attach(tx, &stop), "and the window does not start");
+        // With the window up, a quit goes to it.
+        let (shell, stop) = (Shell::default(), CancellationToken::new());
+        let (tx, rx) = async_channel::unbounded();
+        assert!(shell.attach(tx, &stop));
+        shell.quit(&stop);
+        assert!(!stop.is_cancelled());
+        assert!(matches!(rx.try_recv(), Ok(UiEvent::Quit)));
     }
 }

@@ -36,7 +36,6 @@ use crate::services::world::WorldService;
 use crate::watch::Wakeups;
 use crate::{UserError, arbitration, compositor, history, net, now, ocr, standing, tasks, update, world};
 
-const DUCAT_UID: &str = "/Lotus/Types/Items/MiscItems/PrimeBucks";
 /// What the summary says about the helper programs is looked up again after this long.
 const TOOLS_MAX_AGE: f64 = 30.0;
 /// A watched inventory file is also looked at this often, in case a change notification is lost.
@@ -67,6 +66,8 @@ pub struct App {
     inventory_watch: Mutex<Option<CancellationToken>>,
     /// When this run of the app started: the reward session counts from here.
     started: f64,
+    /// The port the API listens on in this run (a changed setting takes effect at the next start).
+    port: u16,
 }
 
 /// Runs blocking work on the blocking pool; a panic in it (a bug) becomes an error.
@@ -77,7 +78,7 @@ async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) 
 impl App {
     /// The engine with its saved data loaded. Must be called inside the runtime; nothing runs
     /// until `start`.
-    pub fn new(settings: Settings) -> Arc<App> {
+    pub fn new(settings: Settings, port: u16) -> Arc<App> {
         let bus = Bus::new();
         let stop = CancellationToken::new();
         let settings = Arc::new(SettingsStore::new(settings, &bus));
@@ -119,6 +120,7 @@ impl App {
             tools: Mutex::new((f64::NEG_INFINITY, Value::Null)),
             inventory_watch: Mutex::new(None),
             started: now(),
+            port,
         })
     }
 
@@ -315,6 +317,9 @@ impl App {
         if after.inventory_json_path != before.inventory_json_path {
             self.watch_inventory_file(Duration::ZERO);
         }
+        if after.screenshot_tool != before.screenshot_tool {
+            self.tools_changed();
+        }
         if after.platform != before.platform {
             // Another platform's world and prices: fetch the world now; prices follow per page.
             let world = Arc::clone(&self.world);
@@ -324,6 +329,13 @@ impl App {
     }
 
     // ------------------------------------------------------------ the summary
+
+    /// The helper programs may have changed (the bundled OCR unpacked, another screenshot tool
+    /// chosen): look again for the next summary.
+    pub fn tools_changed(&self) {
+        lock(&self.tools).0 = f64::NEG_INFINITY;
+        self.bus.state_changed();
+    }
 
     fn tools(&self) -> Value {
         let mut cache = lock(&self.tools);
@@ -341,10 +353,7 @@ impl App {
         let v = self.accounts.view();
         let (mastered, total) = v.mastered_count();
         let inv = v.inv.as_deref();
-        let mut currencies = inv.map_or(json!({}), |i| serde_json::to_value(&i.currencies).unwrap_or_default());
-        if let Some(i) = inv {
-            currencies["ducats"] = json!(i.counts.get(DUCAT_UID));
-        }
+        let currencies = inv.map_or(json!({}), |i| serde_json::to_value(i.currencies()).unwrap_or_default());
         let log = self.log.path();
         let recent = self.log.recent(8);
         let active = self.log.game_active();
@@ -601,10 +610,13 @@ impl App {
 
     // ------------------------------------------------------------ the window and the tray
 
-    /// The desktop shell is up: from now on it gets the engine's requests.
-    pub fn set_ui(&self, tx: async_channel::Sender<UiEvent>) {
-        self.shell.attach(tx);
+    /// The desktop shell is up: from now on it gets the engine's requests. False when the app is
+    /// quitting already; the shell then closes at once.
+    #[must_use]
+    pub fn set_ui(&self, tx: async_channel::Sender<UiEvent>) -> bool {
+        let attached = self.shell.attach(tx, &self.stop);
         self.bus.state_changed();
+        attached
     }
 
     pub fn show_window(&self) {
@@ -622,11 +634,7 @@ impl App {
     /// Ends the app: the window closes (when there is one) and `main` shuts the engine down,
     /// finishing what it was writing. The request that asked for it is still answered.
     pub fn quit(&self) {
-        if self.shell.present() {
-            self.shell.send(UiEvent::Quit);
-        } else {
-            self.stop.cancel();
-        }
+        self.shell.quit(&self.stop);
     }
 
     pub fn test_overlay(&self) -> Result<()> {
@@ -651,12 +659,13 @@ impl App {
 
     // ------------------------------------------------------------ hotkeys
 
+    /// The port hotkeys call and the keys. The compositor's binds are kept in its config and
+    /// outlive this run, so they call the port of the settings (which the next start binds); the
+    /// keys Windows lends the app last only this run, so they call the port bound now.
     fn hotkey_keys(&self) -> (u16, [(String, &'static str); 3]) {
         let s = self.settings.get();
-        (
-            s.port,
-            [(s.hotkey_rewards, "rewards/scan"), (s.hotkey_riven, "riven/scan"), (s.hotkey_window, "window/toggle")],
-        )
+        let port = if cfg!(windows) { self.port } else { s.port };
+        (port, [(s.hotkey_rewards, "rewards/scan"), (s.hotkey_riven, "riven/scan"), (s.hotkey_window, "window/toggle")])
     }
 
     pub fn hotkeys(&self) -> Value {

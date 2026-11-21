@@ -205,22 +205,42 @@ impl View {
         gamedata::image_url(self.cat.art.get(&gamedata::art_key(name)).map(String::as_str))
     }
 
-    /// Owned count for any uid. Prime parts combine the blueprint and the crafted component, and a
-    /// hand-set count wins over the inventory only if it is newer than the inventory.
+    /// Owned count for any uid. A part counts its blueprint and its crafted component together.
+    /// A count set by hand is for the part as a whole (the page shows and steps the total): when
+    /// it is newer than the inventory it replaces what the inventory says for both twins, the
+    /// newest one should both have one.
     pub fn count(&self, uid: &str) -> i64 {
-        let mut uids = vec![uid];
-        if let Some(alt) = self.cat.parts.get(uid).and_then(|p| p.alt.as_deref()) {
-            uids.push(alt);
+        let twins = self.twins(uid);
+        let hand = twins.iter().filter_map(|u| self.hand_set(u)).max_by(|a, b| a.1.total_cmp(&b.1));
+        match hand {
+            Some((n, _)) => n,
+            None => twins.iter().map(|u| self.held_stack(u)).sum(),
         }
-        uids.iter().map(|u| self.hand_count(u).unwrap_or_else(|| self.held_stack(u))).sum()
     }
 
-    /// The count set by hand for exactly this uid, when it is newer than the inventory (or there
-    /// is no inventory): then it replaces what the inventory says.
-    pub fn hand_count(&self, uid: &str) -> Option<i64> {
+    /// A part's uid and its twin (blueprint and crafted component), the part's own first; any
+    /// other uid alone.
+    pub fn twins<'a>(&'a self, uid: &'a str) -> Vec<&'a str> {
+        let canon = self.cat.part_alias.get(uid).map_or(uid, String::as_str);
+        std::iter::once(canon).chain(self.cat.parts.get(canon).and_then(|p| p.alt.as_deref())).collect()
+    }
+
+    /// The count set by hand for exactly this uid and when it was set, if it is newer than the
+    /// inventory (or there is no inventory): then it replaces what the inventory says.
+    fn hand_set(&self, uid: &str) -> Option<(i64, f64)> {
         let (n, t) = self.manual.counts.get(uid)?;
         let inv_t = self.inv.as_deref().map_or(0.0, |i| i.synced_at.filter(|t| *t != 0.0).unwrap_or(i.imported));
-        (self.inv.is_none() || *t > inv_t).then_some(*n)
+        (self.inv.is_none() || *t > inv_t).then_some((*n, *t))
+    }
+
+    /// The count set by hand for exactly this uid, when it is newer than the inventory.
+    pub fn hand_count(&self, uid: &str) -> Option<i64> {
+        self.hand_set(uid).map(|(n, _)| n)
+    }
+
+    /// Whether the part (either twin) has a count set by hand that is newer than the inventory.
+    pub fn hand_counted(&self, uid: &str) -> bool {
+        self.twins(uid).iter().any(|u| self.hand_set(u).is_some())
     }
 
     /// The inventory's stack of exactly this uid, without hand-set counts or the part's twin.
@@ -301,12 +321,13 @@ impl View {
         for (uid, e) in &inv.equipment {
             row(uid, e.count);
         }
-        for (uid, count) in inv.counts.iter().filter(|(_, c)| **c > 0) {
+        // Stacks, and ranked mods and arcanes (held one by one, not as a stack).
+        for (uid, count) in inv.held().iter().filter(|(_, c)| **c > 0) {
             if !inv.equipment.contains_key(uid) {
                 row(uid, *count);
             }
         }
-        json!({"items": rows, "source": inv.source, "imported": inv.imported, "currencies": inv.currencies})
+        json!({"items": rows, "source": inv.source, "imported": inv.imported, "currencies": inv.currencies()})
     }
 
     /// (name, kind, picture) for anything an inventory holds: the catalog's names for equipment,
@@ -1009,7 +1030,12 @@ impl View {
                     "status": self.item_status(it).status})).collect::<Vec<_>>(),
             }));
         }
-        let base = key.trim_end_matches(" Relic");
+        // A relic by name ("Lith A1", "Lith A1 Relic"), or by the game's id of one of its
+        // refinements, as the Inventory page lists relics.
+        let base = match self.cat.relic_uids.get(key) {
+            Some((base, _)) => base.as_str(),
+            None => key.trim_end_matches(" Relic"),
+        };
         let rel = self.cat.relics.get(base)?;
         let row = self.relic_row(base, rel, &needed);
         let mut v = row.value;
@@ -1099,6 +1125,8 @@ mod tests {
         assert_eq!(held["parts"][0]["recipe"]["ingredients"][0]["have"], 250);
         assert_eq!(held["parts"][0]["recipe"]["ingredients"][0]["count"], 400);
         let relic = view.detail("Lith A1", &HashSet::new()).unwrap();
+        // The Inventory page asks by the relic's id.
+        assert_eq!(view.detail("/LithA1", &HashSet::new()).unwrap()["name"], relic["name"]);
         assert_eq!(relic["drops"][0]["chance"], 5.0);
         let hits = view.find("vitality");
         assert_eq!(hits.as_array().unwrap().iter().filter(|hit| hit["name"] == "Vitality").count(), 1);

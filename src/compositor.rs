@@ -2,7 +2,7 @@
 //! hotkeys.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -76,43 +76,53 @@ pub struct Rect {
 }
 
 /// Warframe's window in compositor (layout) coordinates.
+/// The game's window among Hyprland's clients: a mapped window of some size. Proton also keeps
+/// unmapped 0x0 helper windows of the same class (on monitor -1), which must not be taken for it.
+fn hypr_game(clients: &Value) -> Option<&Value> {
+    clients.as_array()?.iter().find(|c| {
+        let size = |i: usize| c["size"][i].as_i64().unwrap_or(0);
+        c["mapped"].as_bool() != Some(false)
+            && size(0) > 0
+            && size(1) > 0
+            && is_game(c["class"].as_str().unwrap_or(""), c["title"].as_str().unwrap_or(""))
+    })
+}
+
+/// The game's window in Sway's tree, with the output it is on. Only windows count (tiled or
+/// floating): a workspace may be called "Warframe" too.
+fn sway_game<'a>(n: &'a Value, output: Option<&'a str>) -> Option<(&'a Value, Option<&'a str>)> {
+    let output = if n["type"] == "output" { n["name"].as_str() } else { output };
+    if matches!(n["type"].as_str(), Some("con" | "floating_con")) {
+        let class = n["app_id"].as_str().or_else(|| n["window_properties"]["class"].as_str()).unwrap_or("");
+        let sized = n["rect"]["width"].as_i64().unwrap_or(0) > 0 && n["rect"]["height"].as_i64().unwrap_or(0) > 0;
+        if sized && is_game(class, n["name"].as_str().unwrap_or("")) {
+            return Some((n, output));
+        }
+    }
+    n["nodes"].as_array().into_iter().chain(n["floating_nodes"].as_array()).flatten().find_map(|c| sway_game(c, output))
+}
+
 pub fn game_rect() -> Option<Rect> {
+    let at = |v: &Value, i: usize| v[i].as_i64().unwrap_or(0) as i32;
     if running()? == Running::Hyprland {
         let clients = query_json("hyprctl", &["clients", "-j"])?;
-        for c in clients.as_array().into_iter().flatten() {
-            if is_game(c["class"].as_str().unwrap_or(""), c["title"].as_str().unwrap_or("")) {
-                let at = |v: &Value, i| v[i].as_i64().unwrap_or(0) as i32;
-                let r = Rect {
-                    x: at(&c["at"], 0),
-                    y: at(&c["at"], 1),
-                    width: at(&c["size"], 0),
-                    height: at(&c["size"], 1),
-                };
-                if r.width > 0 && r.height > 0 {
-                    return Some(r);
-                }
-            }
-        }
-        return None;
+        let c = hypr_game(&clients)?;
+        return Some(Rect {
+            x: at(&c["at"], 0),
+            y: at(&c["at"], 1),
+            width: at(&c["size"], 0),
+            height: at(&c["size"], 1),
+        });
     }
     let tree = query_json("swaymsg", &["-t", "get_tree"])?;
-    fn walk(n: &Value) -> Option<Rect> {
-        let class = n["app_id"].as_str().or_else(|| n["window_properties"]["class"].as_str()).unwrap_or("");
-        if is_game(class, n["name"].as_str().unwrap_or("")) {
-            let g = &n["rect"];
-            let r = Rect {
-                x: g["x"].as_i64()? as i32,
-                y: g["y"].as_i64()? as i32,
-                width: g["width"].as_i64()? as i32,
-                height: g["height"].as_i64()? as i32,
-            };
-            if r.width > 0 && r.height > 0 {
-                return Some(r);
-            }
-        }
-        n["nodes"].as_array().into_iter().chain(n["floating_nodes"].as_array()).flatten().find_map(walk)
-    }
-    walk(&tree)
+    let (n, _) = sway_game(&tree, None)?;
+    let g = &n["rect"];
+    Some(Rect {
+        x: g["x"].as_i64()? as i32,
+        y: g["y"].as_i64()? as i32,
+        width: g["width"].as_i64()? as i32,
+        height: g["height"].as_i64()? as i32,
+    })
 }
 
 /// The output (monitor) Warframe is on, by name, e.g. "DP-1".
@@ -122,11 +132,7 @@ pub fn game_rect() -> Option<Rect> {
 pub fn game_output() -> Option<String> {
     if running()? == Running::Hyprland {
         let clients = query_json("hyprctl", &["clients", "-j"])?;
-        let hit = clients
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|c| is_game(c["class"].as_str().unwrap_or(""), c["title"].as_str().unwrap_or("")))?;
+        let hit = hypr_game(&clients)?;
         let monitors = query_json("hyprctl", &["monitors", "-j"])?;
         return monitors
             .as_array()
@@ -136,16 +142,7 @@ pub fn game_output() -> Option<String> {
             .and_then(|m| m["name"].as_str().map(str::to_owned));
     }
     let tree = query_json("swaymsg", &["-t", "get_tree"])?;
-    fn walk(n: &Value, output: Option<&str>) -> Option<String> {
-        let output = if n["type"] == "output" { n["name"].as_str() } else { output };
-        let class = n["app_id"].as_str().or_else(|| n["window_properties"]["class"].as_str()).unwrap_or("");
-        let title = if n["type"] == "con" { n["name"].as_str().unwrap_or("") } else { "" };
-        if is_game(class, title) {
-            return output.map(str::to_owned);
-        }
-        n["nodes"].as_array().into_iter().chain(n["floating_nodes"].as_array()).flatten().find_map(|c| walk(c, output))
-    }
-    walk(&tree, None)
+    sway_game(&tree, None).and_then(|(_, output)| output.map(str::to_owned))
 }
 
 /// A monitor in compositor (logical) coordinates.
@@ -416,6 +413,26 @@ fn reload(cmd: &str) -> Result<()> {
 
 /// Writes the binds to the compositor config and reloads it. Nothing of the user's own config is
 /// changed beyond one managed block (Lua) or one include line (hyprland.conf, sway).
+/// Replaces a compositor config file. A config that is a symlink (Home Manager, a dotfiles
+/// repository) is written through, so the link stays a link; one that cannot be written (it links
+/// into the read-only Nix store, say) is left alone, with what to do instead.
+fn write_config(path: &Path, text: &str) -> Result<()> {
+    let real = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    crate::config::write_atomic(&real, text.as_bytes()).map_err(|e| {
+        if real == path {
+            e
+        } else {
+            UserError::new(format!(
+                "{} links to {}, which cannot be changed from here ({e:#}). Add the hotkey lines shown in Settings to your \
+                 compositor's config yourself.",
+                path.display(),
+                real.display()
+            ))
+            .into()
+        }
+    })
+}
+
 pub fn install_hotkeys(flavour: Option<Flavour>, lines: &[String]) -> Result<Installed> {
     if lines.is_empty() {
         return Err(UserError::new("Set at least one key first.").into());
@@ -432,7 +449,7 @@ pub fn install_hotkeys(flavour: Option<Flavour>, lines: &[String]) -> Result<Ins
                 (Some(a), Some(b)) if a < b => (format!("{}{block}{}", &text[..a], &text[b + tail.len()..]), false),
                 _ => (format!("{}\n\n{block}\n", text.trim_end_matches('\n')), true),
             };
-            crate::config::write_atomic(&target, text.as_bytes())?;
+            write_config(&target, &text)?;
             reload("hyprctl")?;
             Ok(Installed { file: target, sourced: added })
         }
@@ -447,10 +464,7 @@ pub fn install_hotkeys(flavour: Option<Flavour>, lines: &[String]) -> Result<Ins
                 return Err(UserError::new(format!("Could not find {}.", main.display())).into());
             }
             let target = if dir.join(sub).is_dir() { dir.join(sub) } else { dir.clone() }.join("warframeproject.conf");
-            crate::config::write_atomic(
-                &target,
-                format!("# Written by warframeproject. Safe to delete.\n{}\n", lines.join("\n")).as_bytes(),
-            )?;
+            write_config(&target, &format!("# Written by warframeproject. Safe to delete.\n{}\n", lines.join("\n")))?;
             let include = if f == Flavour::Hyprland {
                 format!("source = {}", target.display())
             } else {
@@ -459,9 +473,9 @@ pub fn install_hotkeys(flavour: Option<Flavour>, lines: &[String]) -> Result<Ins
             let text = fs::read_to_string(&main)?;
             let added = !text.contains(&target.display().to_string());
             if added {
-                crate::config::write_atomic(
+                write_config(
                     &main,
-                    format!("{}\n\n# warframeproject hotkeys\n{include}\n", text.trim_end_matches('\n')).as_bytes(),
+                    &format!("{}\n\n# warframeproject hotkeys\n{include}\n", text.trim_end_matches('\n')),
                 )?;
             }
             reload(reload_cmd)?;
@@ -474,6 +488,48 @@ pub fn install_hotkeys(flavour: Option<Flavour>, lines: &[String]) -> Result<Ins
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_game_window_is_a_mapped_window_of_some_size() {
+        use serde_json::json;
+        let clients = json!([
+            {"class": "steam_app_230410", "title": "", "mapped": false, "size": [0, 0], "at": [0, 0], "monitor": -1},
+            {"class": "steam_app_230410", "title": "Warframe", "mapped": true, "size": [2560, 1440], "at": [1920, 0], "monitor": 1},
+        ]);
+        assert_eq!(hypr_game(&clients).unwrap()["monitor"], 1);
+        let tree = json!({"type": "root", "nodes": [{"type": "output", "name": "DP-3", "nodes": [
+            {"type": "workspace", "name": "Warframe", "rect": {"x": 0, "y": 0, "width": 2560, "height": 1440}, "nodes": [],
+             "floating_nodes": [{"type": "floating_con", "name": "Warframe", "app_id": null,
+                                 "window_properties": {"class": "steam_app_230410"},
+                                 "rect": {"x": 10, "y": 20, "width": 1920, "height": 1080}}]}
+        ]}]});
+        let (window, output) = sway_game(&tree, None).unwrap();
+        assert_eq!(
+            (window["rect"]["x"].as_i64(), output),
+            (Some(10), Some("DP-3")),
+            "the floating window, not the workspace"
+        );
+        let empty = json!({"type": "root", "nodes": [{"type": "output", "name": "DP-3", "nodes": [
+            {"type": "workspace", "name": "Warframe", "rect": {"x": 0, "y": 0, "width": 2560, "height": 1440}, "nodes": []}
+        ]}]});
+        assert!(sway_game(&empty, None).is_none(), "a workspace named Warframe is not the game");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_config_stays_a_link() {
+        let dir = std::env::temp_dir().join(format!("wfp-hotkeys-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("real.lua");
+        let link = dir.join("keybindings.lua");
+        fs::write(&real, "-- mine\n").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        write_config(&link, "-- mine\n-- added\n").unwrap();
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "still a link");
+        assert_eq!(fs::read_to_string(&real).unwrap(), "-- mine\n-- added\n", "written through it");
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn keys_cannot_smuggle_config() {

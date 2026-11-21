@@ -238,7 +238,7 @@ fn plan(view: &View, it: &Item) -> Plan {
         // Only the inventory tells crafted parts from blueprints; a count set by hand does not,
         // so then every part is taken to need crafting.
         let crafted = |result: &str| {
-            let held = if view.hand_count(&c.uid).is_some() { 0 } else { view.held_stack(result) };
+            let held = if view.hand_counted(&c.uid) { 0 } else { view.held_stack(result) };
             held + crafting
         };
         let mut builds = 0;
@@ -654,6 +654,25 @@ mod tests {
         let cat = catalog();
         assert_eq!(cat.resources.keys().collect::<Vec<_>>(), [CELL, RUBEDO], "sorted by name; parts are not resources");
         assert_eq!(cat.part_alias.get(CHASSIS_BP).map(String::as_str), Some(CHASSIS));
+    }
+
+    #[test]
+    fn a_count_set_by_hand_is_the_whole_part() {
+        // Two chassis blueprints held (the component's twin): the page shows 2, and the user
+        // steps the part down to 1 (a newer hand-set count on the part's own uid).
+        let mut v = view(Some(inventory(&[(CHASSIS_BP, 2)])), &[]);
+        assert_eq!(v.count(CHASSIS), 2);
+        let mut manual = Manual::default();
+        manual.counts.insert(CHASSIS.into(), (1, 20.0));
+        v.manual = Arc::new(manual);
+        assert_eq!(v.count(CHASSIS), 1, "it replaces both twins, not just one");
+        assert_eq!(v.count(CHASSIS_BP), 1, "whichever twin asks");
+        assert!(v.hand_counted(CHASSIS_BP));
+        // An inventory read after it wins again.
+        let mut fresh = inventory(&[(CHASSIS_BP, 2)]);
+        fresh.imported = 30.0;
+        v.inv = Some(Arc::new(fresh));
+        assert_eq!(v.count(CHASSIS), 2);
     }
 
     #[test]

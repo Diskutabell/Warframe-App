@@ -96,7 +96,6 @@
   }
 
   const gradeClass = (g) => (g?.[0] === "A" ? "a" : g?.[0] === "B" ? "b" : "c");
-  const UNITS = { "Punch Through": "m", "Combo Duration": "s", "Initial Combo": "" };
 
   function riven(r) {
     const p = r.positives, n = r.negatives;
@@ -109,7 +108,7 @@
     const rows = r.stats.map((g) => {
       const c = gradeClass(g.grade), at = Math.max(0, Math.min(100, (g.deviation + 10) * 5));
       return `<div class="rule"><div class="line"><span class="grade ${c}">${esc(g.grade)}</span>
-        <span class="stat">${g.negative ? "−" : "+"}<b>${Math.abs(g.value)}${UNITS[g.stat] ?? "%"}</b> ${esc(g.stat)}</span>
+        <span class="stat"><b>${esc(g.printed)}</b> ${esc(g.stat)}</span>
         <span class="dev">${g.deviation > 0 ? "+" : ""}${g.deviation.toFixed(1)}%</span></div>
         <div class="roll ${c}"><i style="width:${at}%"></i><b></b></div></div>`;
     }).join("");
