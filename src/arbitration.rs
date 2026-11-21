@@ -9,7 +9,8 @@
 use std::collections::HashMap;
 
 use anyhow::anyhow;
-use serde_json::{Value, json};
+use serde::Serialize;
+use ts_rs::TS;
 
 use crate::gamedata::{self, Catalog};
 use crate::{config, now};
@@ -121,28 +122,62 @@ impl Schedule {
 }
 
 /// One hour of the schedule as the page shows it.
-fn slot(cat: &Catalog, start: i64, tag: &str) -> Value {
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct Slot {
+    pub start: i64,
+    pub end: i64,
+    pub tag: String,
+    pub node: String,
+    pub planet: String,
+    pub mission: String,
+    pub faction: String,
+    /// A Dark Sector's extra resources, in percent.
+    pub bonus: Option<i64>,
+    /// "S" to "F"; None when the tier list could not be loaded.
+    pub tier: Option<String>,
+}
+
+/// The World page's arbitration panel.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct Arbitrations {
+    pub current: Option<Slot>,
+    pub upcoming: Vec<Slot>,
+    /// When each of the S, A and B tiers comes up next.
+    pub next: Vec<Slot>,
+    /// Whether tiers are known.
+    pub tiers: bool,
+}
+
+fn slot(cat: &Catalog, start: i64, tag: &str) -> Slot {
     let node = cat.nodes.get(tag).cloned().unwrap_or_default();
     // A node the star chart export does not know (yet) keeps its tag as its name.
     let name = if node.name.is_empty() { tag.to_string() } else { node.name };
-    json!({
-        "start": start, "end": start + HOUR, "tag": tag, "node": name, "planet": node.planet,
-        "mission": node.mission, "faction": node.faction, "bonus": node.resource_bonus,
-        "tier": cat.arbitrations.tier(tag),
-    })
+    Slot {
+        start,
+        end: start + HOUR,
+        tag: tag.to_string(),
+        node: name,
+        planet: node.planet,
+        mission: node.mission,
+        faction: node.faction,
+        bonus: node.resource_bonus,
+        tier: cat.arbitrations.tier(tag).map(str::to_owned),
+    }
 }
 
 /// What the World page shows at time `t`: the arbitration running now, the next `AHEAD` hours,
 /// and when each of the S, A and B tiers comes up next (after the one running).
-pub fn summary(cat: &Catalog, t: f64) -> Value {
+pub fn summary(cat: &Catalog, t: f64) -> Arbitrations {
     let s = &cat.arbitrations;
     let t = t as i64;
     let Some(now) = s.running(t) else {
-        return json!({"current": null, "upcoming": [], "next": [], "tiers": !s.tiers.is_empty()});
+        return Arbitrations { current: None, upcoming: Vec::new(), next: Vec::new(), tiers: !s.tiers.is_empty() };
     };
     let row = |i: usize| slot(cat, s.slots[i].0, &s.slots[i].1);
     let later = now + 1..s.slots.len();
-    let upcoming: Vec<Value> = later.clone().take(AHEAD).map(row).collect();
+    let upcoming: Vec<Slot> = later.clone().take(AHEAD).map(row).collect();
     let mut next = Vec::new();
     if !s.tiers.is_empty() {
         for tier in ["S", "A", "B"] {
@@ -151,12 +186,18 @@ pub fn summary(cat: &Catalog, t: f64) -> Value {
             }
         }
     }
-    json!({"current": row(now), "upcoming": upcoming, "next": next, "tiers": !s.tiers.is_empty()})
+    Arbitrations { current: Some(row(now)), upcoming, next, tiers: !s.tiers.is_empty() }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Value, json};
+
+    /// The answer as the page receives it.
+    fn summary(cat: &Catalog, t: f64) -> Value {
+        serde_json::to_value(super::summary(cat, t)).unwrap()
+    }
     use crate::gamedata::Node;
 
     #[test]

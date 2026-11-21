@@ -14,7 +14,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use indexmap::IndexMap;
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -41,7 +41,8 @@ pub const PROFILE_PAUSE: f64 = 3600.0;
 const EVENTS_KEPT: usize = 60;
 
 /// One line of the activity list.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ts_rs::TS)]
+#[ts(export)]
 pub struct Event {
     pub t: f64,
     pub text: String,
@@ -250,11 +251,52 @@ fn profile_target(d: &Data, key: &str, prof: &Profile, id: Option<&str>) -> Targ
     }
 }
 
+/// The account shown, for the sidebar. All empty but `logName` before any account is known.
+#[derive(Serialize, ts_rs::TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct ShownAccount {
+    pub key: Option<String>,
+    pub id: Option<String>,
+    pub name: Option<String>,
+    /// Where the id came from.
+    pub source: Option<String>,
+    /// The game is logged in to it.
+    pub playing: bool,
+    /// The name the game is logged in with.
+    pub log_name: Option<String>,
+    /// Log lines that may hold its id, for the user to confirm.
+    pub evidence: Vec<crate::accounts::Evidence>,
+    pub profile_error: Option<String>,
+}
+
+/// One account of the account switcher.
+#[derive(Serialize, ts_rs::TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountRow {
+    pub key: String,
+    pub name: String,
+    pub id: Option<String>,
+    pub source: Option<String>,
+    pub active: bool,
+    pub playing: bool,
+    pub mastery_rank: Option<i64>,
+    pub mastery_rank_max: Option<i64>,
+    /// When its profile was fetched.
+    pub profile: Option<f64>,
+    pub profile_error: Option<String>,
+    /// When its inventory was read.
+    pub inventory: Option<f64>,
+    pub seen: Option<f64>,
+    pub evidence: Vec<crate::accounts::Evidence>,
+}
+
 /// What the summary shows about the accounts.
 pub struct AccountsSummary {
     pub active: Option<String>,
-    pub account: Value,
-    pub accounts: Vec<Value>,
+    pub account: ShownAccount,
+    pub accounts: Vec<AccountRow>,
     pub mastery_rank: Option<i64>,
     pub mastery_rank_max: Option<i64>,
     pub profile_error: Option<String>,
@@ -413,28 +455,46 @@ impl AccountService {
         let d = self.data.read();
         let acc = d.active();
         let playing = |key: &str| d.game.as_deref() == Some(key);
+        let log_name = d.game().map(|g| g.name.clone());
         let account = match acc {
-            Some(a) => {
-                json!({"key": a.key, "id": a.id, "name": a.name, "source": a.source, "playing": playing(&a.key),
-                       "logName": d.game().map(|g| g.name.clone()), "evidence": a.evidence,
-                       "profileError": a.profile_error})
-            }
-            None => {
-                json!({"key": null, "id": null, "name": null, "logName": d.game().map(|g| g.name.clone()), "evidence": []})
-            }
+            Some(a) => ShownAccount {
+                key: Some(a.key.clone()),
+                id: a.id.clone(),
+                name: Some(a.name.clone()),
+                source: a.source.clone(),
+                playing: playing(&a.key),
+                log_name,
+                evidence: a.evidence.clone(),
+                profile_error: a.profile_error.clone(),
+            },
+            None => ShownAccount {
+                key: None,
+                id: None,
+                name: None,
+                source: None,
+                playing: false,
+                log_name,
+                evidence: Vec::new(),
+                profile_error: None,
+            },
         };
         let accounts = d
             .accounts
             .iter()
-            .map(|a| {
-                json!({
-                    "key": a.key, "name": a.name, "id": a.id, "source": a.source,
-                    "active": d.active.as_deref() == Some(a.key.as_str()), "playing": playing(&a.key),
-                    "masteryRank": a.mastery_rank(), "masteryRankMax": a.mastery_rank_max(),
-                    "profile": a.profile.as_ref().map(|p| p.fetched), "profileError": a.profile_error,
-                    "inventory": a.inventory.as_ref().map(|i| i.as_of()), "seen": a.seen,
-                    "evidence": a.evidence,
-                })
+            .map(|a| AccountRow {
+                key: a.key.clone(),
+                name: a.name.clone(),
+                id: a.id.clone(),
+                source: a.source.clone(),
+                active: d.active.as_deref() == Some(a.key.as_str()),
+                playing: playing(&a.key),
+                mastery_rank: a.mastery_rank(),
+                mastery_rank_max: a.mastery_rank_max(),
+                profile: a.profile.as_ref().map(|p| p.fetched),
+                profile_error: a.profile_error.clone(),
+                inventory: a.inventory.as_ref().map(|i| i.as_of()),
+                seen: a.seen,
+                evidence: a.evidence.clone(),
             })
             .collect();
         AccountsSummary {
@@ -1251,6 +1311,7 @@ impl AccountService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn a_complete_capture_is_preferred_over_a_newer_fragment() {

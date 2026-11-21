@@ -313,7 +313,8 @@ pub struct FoundryEntry {
     pub done: Option<f64>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
 pub struct Currencies {
     pub platinum: Option<i64>,
     pub credits: Option<i64>,

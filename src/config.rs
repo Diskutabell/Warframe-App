@@ -70,7 +70,8 @@ pub fn settings_file() -> PathBuf {
     dirs().config.join("settings.json")
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
 #[serde(rename_all = "lowercase")]
 pub enum Platform {
     #[default]
@@ -93,7 +94,8 @@ impl Platform {
 
 /// Which program takes screenshots. A fixed list on purpose: the old free-form command setting
 /// could be changed through the local API and was then run as a program.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
 #[serde(rename_all = "kebab-case")]
 pub enum ScreenshotTool {
     #[default]
@@ -107,7 +109,8 @@ pub enum ScreenshotTool {
 }
 
 /// How the overlays stay above the game.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
 #[serde(rename_all = "kebab-case")]
 pub enum OverlayBackend {
     /// Layer shell where the compositor has it (Hyprland, Sway, KDE), X11 otherwise.
@@ -118,7 +121,8 @@ pub enum OverlayBackend {
 }
 
 /// Where the price panels sit on the reward screen.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
 #[serde(rename_all = "kebab-case")]
 pub enum PanelPosition {
     /// Under the cards, over the row of player names.
@@ -128,7 +132,8 @@ pub enum PanelPosition {
     Above,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
 #[serde(default)]
 pub struct Settings {
     pub port: u16,

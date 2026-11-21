@@ -159,11 +159,7 @@ impl WorldService {
     /// Railjack's.
     pub async fn open_eras(self: &Arc<Self>) -> std::collections::HashSet<String> {
         let (raw, _) = self.get().await;
-        world::fissures(raw.as_deref())
-            .iter()
-            .filter(|f| f["storm"] != true)
-            .filter_map(|f| f["tier"].as_str().map(str::to_owned))
-            .collect()
+        world::fissures(raw.as_deref()).iter().filter(|f| !f.storm).filter_map(|f| f.tier.clone()).collect()
     }
 }
 

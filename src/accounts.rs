@@ -73,7 +73,8 @@ impl Manual {
 }
 
 /// A log line that may hold the account's id, for the user to confirm.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ts_rs::TS)]
+#[ts(export)]
 pub struct Evidence {
     pub id: String,
     pub line: String,

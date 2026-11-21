@@ -58,7 +58,7 @@ impl Notifications {
                 }
                 if s.notify_baro {
                     if let Some(raw) = raw.as_deref() {
-                        n.baro(&world::baro(raw));
+                        n.baro(&world::baro(raw, &crate::gamedata::Catalog::default()));
                     }
                 }
                 if s.notify_foundry {

@@ -57,7 +57,8 @@ const CARDS_CHECK: Duration = Duration::from_millis(400);
 /// How long prices are waited for once the names are read: the choice timer is 15 s.
 const PRICES_WAIT: Duration = Duration::from_secs(6);
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ts_rs::TS)]
+#[ts(export)]
 pub struct RewardItem {
     pub name: String,
     pub uid: String,
@@ -72,7 +73,8 @@ pub struct RewardItem {
     pub slot: Option<usize>,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, ts_rs::TS)]
+#[ts(export)]
 pub struct RewardResult {
     pub t: f64,
     pub items: Vec<RewardItem>,
@@ -116,7 +118,8 @@ impl RewardResult {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, ts_rs::TS)]
+#[ts(export)]
 pub struct RivenResult {
     pub t: f64,
     pub weapon: Option<String>,
@@ -131,7 +134,7 @@ pub struct RivenResult {
     pub overall: Option<&'static str>,
     /// What this weapon's rivens sold for lately (api.warframestat.us: `unrolled` and `rerolled`,
     /// each with `median`, `min`, `max`, `pop`).
-    pub traded: Option<Value>,
+    pub traded: Option<rivens::Traded>,
     /// Rivens with the same positives listed on warframe.market; filled in after the grades are
     /// shown, since it is one more request.
     pub market: Option<crate::market::RivenListings>,

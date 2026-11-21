@@ -161,9 +161,10 @@ impl Bus {
     /// Pushes the summary whenever it was marked dirty (coalesced), and once a minute regardless,
     /// until `stop` is cancelled. `compute` builds the summary; it runs on a blocking thread
     /// because it walks the whole catalog.
-    pub async fn run_summary<F>(self, stop: CancellationToken, compute: F)
+    pub async fn run_summary<F, T>(self, stop: CancellationToken, compute: F)
     where
-        F: Fn() -> serde_json::Value + Send + Sync + 'static,
+        F: Fn() -> T + Send + Sync + 'static,
+        T: Serialize + Send + 'static,
     {
         let compute = Arc::new(compute);
         loop {

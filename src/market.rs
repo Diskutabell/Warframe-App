@@ -32,7 +32,8 @@ const RIVEN_WEAPONS_MAX_AGE: f64 = 7.0 * 86400.0;
 
 /// What warframe.market lists for rivens like one that was read: the same weapon with at least
 /// the same positive stats, for a fixed price.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ts_rs::TS)]
+#[ts(export)]
 pub struct RivenListings {
     pub count: usize,
     pub lowest: Option<i64>,

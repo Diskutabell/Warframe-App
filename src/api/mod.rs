@@ -20,9 +20,12 @@ use axum::http::{HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use rust_embed::RustEmbed;
-use serde_json::{Value, json};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use tower_http::catch_panic::CatchPanicLayer;
+use ts_rs::TS;
 
 use crate::UserError;
 use crate::app::App;
@@ -54,7 +57,7 @@ pub fn router(engine: Engine, stop: CancellationToken) -> Router {
         // A panic in a request (a bug) answers 500 instead of dropping the connection; the panic
         // itself is printed to the log.
         .layer(CatchPanicLayer::custom(|_: Box<dyn std::any::Any + Send>| {
-            json_response(StatusCode::INTERNAL_SERVER_ERROR, &json!({"error": BUG}))
+            json_response(StatusCode::INTERNAL_SERVER_ERROR, &ErrorAnswer::new(BUG))
         }))
         .with_state(engine)
 }
@@ -93,10 +96,10 @@ pub(crate) fn valid_origin(origin: Option<&str>, host: Option<&str>) -> bool {
 async fn guard(req: Request, next: Next) -> Response {
     let host = header(req.headers(), HOST);
     if !valid_host(host.unwrap_or("")) {
-        return json_response(StatusCode::FORBIDDEN, &json!({"error": "forbidden host"}));
+        return json_response(StatusCode::FORBIDDEN, &ErrorAnswer::new("forbidden host"));
     }
     if req.method() == Method::POST && !valid_origin(header(req.headers(), ORIGIN), host) {
-        return json_response(StatusCode::FORBIDDEN, &json!({"error": "cross-origin request refused"}));
+        return json_response(StatusCode::FORBIDDEN, &ErrorAnswer::new("cross-origin request refused"));
     }
     let mut resp = next.run(req).await;
     resp.headers_mut().entry(CACHE_CONTROL).or_insert(HeaderValue::from_static("no-store"));
@@ -168,9 +171,9 @@ impl<S: Send + Sync, const MAX: usize> FromRequest<S> for JsonBody<MAX> {
     async fn from_request(req: Request, _: &S) -> Result<Self, Self::Rejection> {
         let raw = axum::body::to_bytes(req.into_body(), MAX)
             .await
-            .map_err(|_| json_response(StatusCode::BAD_REQUEST, &json!({"error": "Upload too large"})))?;
+            .map_err(|_| json_response(StatusCode::BAD_REQUEST, &ErrorAnswer::new("Upload too large")))?;
         if raw.iter().all(u8::is_ascii_whitespace) {
-            return Ok(JsonBody(json!({})));
+            return Ok(JsonBody(Value::Object(serde_json::Map::new())));
         }
         let large = raw.len() > 64 * 1024;
         let parse = move || serde_json::from_slice::<Value>(&raw);
@@ -178,19 +181,47 @@ impl<S: Send + Sync, const MAX: usize> FromRequest<S> for JsonBody<MAX> {
         let parsed = if large {
             tokio::task::spawn_blocking(parse)
                 .await
-                .map_err(|_| json_response(StatusCode::INTERNAL_SERVER_ERROR, &json!({"error": BUG})))?
+                .map_err(|_| json_response(StatusCode::INTERNAL_SERVER_ERROR, &ErrorAnswer::new(BUG)))?
         } else {
             parse()
         };
         parsed
             .map(JsonBody)
-            .map_err(|e| json_response(StatusCode::BAD_REQUEST, &json!({"error": format!("Not JSON: {e}")})))
+            .map_err(|e| json_response(StatusCode::BAD_REQUEST, &ErrorAnswer::new(format!("Not JSON: {e}"))))
+    }
+}
+
+/// A JSON body of a known shape, at most `MAX_BODY` bytes. A field of the wrong type, or a
+/// required one missing, is the caller's mistake (400), and the answer says which.
+pub struct Typed<T>(pub T);
+
+impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for Typed<T> {
+    type Rejection = Response;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let JsonBody(value) = JsonBody::<MAX_BODY>::from_request(req, state).await?;
+        serde_json::from_value(value)
+            .map(Typed)
+            .map_err(|e| json_response(StatusCode::BAD_REQUEST, &ErrorAnswer::new(format!("Bad request: {e}"))))
     }
 }
 
 // ------------------------------------------------------------------ answers
 
-pub fn json_response(code: StatusCode, body: &Value) -> Response {
+/// A failed request's answer (HTTP 4xx or 5xx).
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct ErrorAnswer {
+    pub error: String,
+}
+
+impl ErrorAnswer {
+    pub fn new(error: impl Into<String>) -> ErrorAnswer {
+        ErrorAnswer { error: error.into() }
+    }
+}
+
+pub fn json_response<T: serde::Serialize + ?Sized>(code: StatusCode, body: &T) -> Response {
     let bytes = serde_json::to_vec(body).unwrap_or_default();
     (code, [(CONTENT_TYPE, HeaderValue::from_static("application/json"))], bytes).into_response()
 }
@@ -218,7 +249,7 @@ pub fn status_for(e: &anyhow::Error) -> StatusCode {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        json_response(status_for(&self.0), &json!({"error": self.0.to_string()}))
+        json_response(status_for(&self.0), &ErrorAnswer::new(self.0.to_string()))
     }
 }
 
@@ -241,7 +272,7 @@ pub async fn blocking<T: Send + 'static>(
 }
 
 /// Answers with `value` as JSON (200).
-pub fn ok_json(value: &Value) -> Response {
+pub fn ok_json<T: serde::Serialize + ?Sized>(value: &T) -> Response {
     json_response(StatusCode::OK, value)
 }
 
@@ -262,7 +293,7 @@ fn content_type(name: &str) -> &'static str {
 /// The web UI's files; anything else is a 404. Only GET and HEAD.
 async fn static_file(method: Method, uri: axum::http::Uri) -> Response {
     if method != Method::GET && method != Method::HEAD {
-        return json_response(StatusCode::METHOD_NOT_ALLOWED, &json!({"error": "method not allowed"}));
+        return json_response(StatusCode::METHOD_NOT_ALLOWED, &ErrorAnswer::new("method not allowed"));
     }
     let name = match uri.path().trim_start_matches('/') {
         "" => "index.html",
@@ -273,13 +304,14 @@ async fn static_file(method: Method, uri: axum::http::Uri) -> Response {
             ([(CONTENT_TYPE, HeaderValue::from_static(content_type(name)))], Body::from(file.data.into_owned()))
                 .into_response()
         }
-        None => json_response(StatusCode::NOT_FOUND, &json!({"error": "not found"})),
+        None => json_response(StatusCode::NOT_FOUND, &ErrorAnswer::new("not found")),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn query_strings_decode_like_parse_qs() {

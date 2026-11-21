@@ -14,7 +14,8 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use indexmap::IndexMap;
-use serde_json::{Value, json};
+use serde::Serialize;
+use ts_rs::TS;
 
 use crate::accounts::Task;
 use crate::gamedata::{self, ComponentKind, Item, PartRecipe};
@@ -448,93 +449,229 @@ fn count_progress(kind: Kind, held: &Held, target: i64) -> Progress {
 }
 
 /// A task as the board shows it.
-pub fn row(view: &View, task: &Task) -> Value {
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct TaskRow {
+    pub uid: String,
+    /// "item", "mod", "arcane", "resource", or "unknown" for what the loaded data does not know.
+    pub kind: &'static str,
+    pub name: String,
+    pub image: Option<String>,
+    pub sub: String,
+    /// "done" (green), "resources" (yellow) or "missing" (red).
+    pub state: &'static str,
+    pub note: String,
+    pub have: i64,
+    pub need: i64,
+}
+
+pub fn row(view: &View, task: &Task) -> TaskRow {
     let Some(t) = thing(view, &task.uid) else {
-        return json!({"uid": task.uid, "kind": "unknown", "name": view.cat.name_of(&task.uid), "image": null,
-                      "sub": "Unknown", "state": "missing", "note": "Not in the loaded game data", "have": 0, "need": 1});
+        return TaskRow {
+            uid: task.uid.clone(),
+            kind: "unknown",
+            name: view.cat.name_of(&task.uid),
+            image: None,
+            sub: "Unknown".into(),
+            state: "missing",
+            note: "Not in the loaded game data".into(),
+            have: 0,
+            need: 1,
+        };
     };
     let p = match (t.kind, view.cat.items.get(&task.uid)) {
         (Kind::Item, Some(it)) => item_progress(view, it, &plan(view, it)),
         _ => count_progress(t.kind, &held(view, &task.uid, t.kind), task.target.unwrap_or_else(|| default_target(&t))),
     };
-    json!({"uid": task.uid, "kind": t.kind.name(), "name": t.name, "image": t.image, "sub": t.sub,
-           "state": p.state, "note": p.note, "have": p.have, "need": p.need})
+    TaskRow {
+        uid: task.uid.clone(),
+        kind: t.kind.name(),
+        name: t.name,
+        image: t.image,
+        sub: t.sub,
+        state: p.state,
+        note: p.note,
+        have: p.have,
+        need: p.need,
+    }
 }
 
-fn signature(rows: &[Value]) -> String {
+fn signature(rows: &[TaskRow]) -> String {
     let mut h = DefaultHasher::new();
     for r in rows {
-        r.to_string().hash(&mut h);
+        serde_json::to_string(r).unwrap_or_default().hash(&mut h);
     }
     format!("{:016x}", h.finish())
 }
 
-/// The board of the account shown, in the order the tasks were added. `sig` changes whenever
-/// a card would.
-pub fn board(view: &View) -> Value {
-    let rows: Vec<Value> = view.manual.tasks.iter().map(|t| row(view, t)).collect();
-    let done = rows.iter().filter(|r| r["state"] == "done").count();
-    json!({"tasks": rows, "done": done, "sig": signature(&rows), "inventoryKnown": view.inv.is_some(),
-           "ranksKnown": view.inv.as_ref().is_some_and(|i| i.upgrades.is_some())})
+#[derive(Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct Board {
+    pub tasks: Vec<TaskRow>,
+    pub done: usize,
+    /// Changes whenever a card would.
+    pub sig: String,
+    pub inventory_known: bool,
+    /// Ranked mod and arcane copies are known (inventories before 0.8.0 lack them).
+    pub ranks_known: bool,
+}
+
+/// The board of the account shown, in the order the tasks were added.
+pub fn board(view: &View) -> Board {
+    let rows: Vec<TaskRow> = view.manual.tasks.iter().map(|t| row(view, t)).collect();
+    let done = rows.iter().filter(|r| r.state == "done").count();
+    Board {
+        done,
+        sig: signature(&rows),
+        tasks: rows,
+        inventory_known: view.inv.is_some(),
+        ranks_known: view.inv.as_ref().is_some_and(|i| i.upgrades.is_some()),
+    }
 }
 
 /// For the sidebar: how many tasks there are and how many are done, and the board's `sig`.
-pub fn summary(view: &View) -> Value {
-    let rows: Vec<Value> = view.manual.tasks.iter().map(|t| row(view, t)).collect();
-    let done = rows.iter().filter(|r| r["state"] == "done").count();
-    json!({"total": rows.len(), "done": done, "sig": signature(&rows)})
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct TaskCount {
+    pub total: usize,
+    pub done: usize,
+    pub sig: String,
+}
+
+pub fn summary(view: &View) -> TaskCount {
+    let rows: Vec<TaskRow> = view.manual.tasks.iter().map(|t| row(view, t)).collect();
+    let done = rows.iter().filter(|r| r.state == "done").count();
+    TaskCount { total: rows.len(), done, sig: signature(&rows) }
 }
 
 /// The uids of the tasks that are done.
 pub fn done(view: &View) -> HashSet<String> {
-    view.manual.tasks.iter().filter(|t| row(view, t)["state"] == "done").map(|t| t.uid.clone()).collect()
+    view.manual.tasks.iter().filter(|t| row(view, t).state == "done").map(|t| t.uid.clone()).collect()
 }
 
-/// Everything the details panel shows for a task, on the board or not. `open_eras` as for
-/// `View::detail`.
-pub fn detail(view: &View, uid: &str, open_eras: &HashSet<String>) -> Option<Value> {
+/// Everything the details panel shows for a task, on the board or not: for equipment what the
+/// builds still take, for the rest what is held against the target.
+#[derive(Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskDetail {
+    #[serde(flatten)]
+    pub row: TaskRow,
+    pub on_board: bool,
+    pub inventory_known: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub item: Option<crate::views::Detail>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub materials: Option<Vec<crate::views::Ingredient>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub credits: Option<Credits>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub held: Option<HeldView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub target: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub target_default: Option<i64>,
+    /// A mod's or arcane's top rank (null for a resource).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub top_rank: Option<Option<i64>>,
+    /// An arcane's rank the copies held make.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub rank: Option<Option<i64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub drops: Option<Vec<crate::drops::Drop>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub drop_coverage: Option<crate::views::DropCoverage>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct Credits {
+    pub need: i64,
+    pub have: Option<i64>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct HeldView {
+    pub count: i64,
+    pub ranks: Option<Vec<i64>>,
+    pub by_hand: bool,
+}
+
+pub fn detail(view: &View, uid: &str, open_eras: &HashSet<String>) -> Option<TaskDetail> {
     let t = thing(view, uid)?;
     let on_board = view.manual.tasks.iter().find(|x| x.uid == uid).cloned();
     let task = on_board.clone().unwrap_or_else(|| Task { uid: uid.to_string(), ..Task::default() });
-    let mut v = row(view, &task);
-    v["onBoard"] = json!(on_board.is_some());
-    v["inventoryKnown"] = json!(view.inv.is_some());
+    let mut v = TaskDetail {
+        row: row(view, &task),
+        on_board: on_board.is_some(),
+        inventory_known: view.inv.is_some(),
+        item: None,
+        materials: None,
+        credits: None,
+        held: None,
+        target: None,
+        target_default: None,
+        top_rank: None,
+        rank: None,
+        drops: None,
+        drop_coverage: None,
+    };
     if let (Kind::Item, Some(it)) = (t.kind, view.cat.items.get(uid)) {
         let plan = plan(view, it);
         let mut item = view.detail(uid, open_eras)?;
-        for p in item["parts"].as_array_mut().into_iter().flatten() {
-            if let Some(pp) = plan.parts.iter().find(|pp| p["uid"] == pp.uid.as_str()) {
-                p["have"] = json!(pp.have);
-                p["crafting"] = json!(pp.crafting);
-                p["builds"] = json!(pp.builds);
-                p["recipeUnknown"] = json!(pp.recipe_unknown);
+        if let crate::views::Detail::Item(item) = &mut item {
+            for p in &mut item.parts {
+                if let Some(pp) = plan.parts.iter().find(|pp| p.uid == pp.uid) {
+                    p.have = pp.have;
+                    p.crafting = Some(pp.crafting);
+                    p.builds = Some(pp.builds);
+                    p.recipe_unknown = Some(pp.recipe_unknown);
+                }
             }
         }
-        v["item"] = item;
+        v.item = Some(item);
         let known = |uid: &str| view.inv.is_some() || view.manual.counts.contains_key(uid);
-        v["materials"] = plan
-            .materials
-            .iter()
-            .map(|(uid, (name, count))| {
-                json!({"uid": uid, "name": name, "count": count,
-                       "have": if known(uid) { Some(view.count(uid)) } else { None },
-                       "image": view.icon_of(uid, name), "drops": view.cat.drops.for_name(name, false)})
-            })
-            .collect();
-        v["credits"] = json!({"need": plan.credits, "have": credits_held(view)});
+        v.materials = Some(
+            plan.materials
+                .iter()
+                .map(|(uid, (name, count))| crate::views::Ingredient {
+                    uid: uid.clone(),
+                    name: name.clone(),
+                    count: *count,
+                    have: known(uid).then(|| view.count(uid)),
+                    image: view.icon_of(uid, name),
+                    drops: view.cat.drops.for_name(name, false).into_iter().cloned().collect(),
+                })
+                .collect(),
+        );
+        v.credits = Some(Credits { need: plan.credits, have: credits_held(view) });
         return Some(v);
     }
     let held = held(view, uid, t.kind);
     let target = task.target.unwrap_or_else(|| default_target(&t));
-    v["held"] = json!({"count": held.count, "ranks": held.ranks, "byHand": held.by_hand});
-    v["target"] = json!(target);
-    v["targetDefault"] = json!(default_target(&t));
-    v["topRank"] = json!(t.top_rank);
+    v.target = Some(target);
+    v.target_default = Some(default_target(&t));
+    v.top_rank = Some(t.top_rank);
     if t.kind == Kind::Arcane {
-        v["rank"] = json!(arcane_rank(held.count, t.top_rank.unwrap_or(0)));
+        v.rank = Some(arcane_rank(held.count, t.top_rank.unwrap_or(0)));
     }
-    v["drops"] = json!(view.cat.drops.for_name(&t.name, false));
-    v["dropCoverage"] = json!({"available": view.cat.drops.available, "total": view.cat.drops.total});
+    v.held = Some(HeldView { count: held.count, ranks: held.ranks, by_hand: held.by_hand });
+    v.drops = Some(view.cat.drops.for_name(&t.name, false).into_iter().cloned().collect());
+    v.drop_coverage =
+        Some(crate::views::DropCoverage { available: view.cat.drops.available, total: view.cat.drops.total });
     Some(v)
 }
 
@@ -566,10 +703,23 @@ pub fn uid_by_name(view: &View, name: &str) -> Option<String> {
 
 /// Equipment, mods, arcanes and resources matching `q`, best matches first, for adding to the
 /// board. A mod or arcane name the game uses more than once is offered once.
-pub fn find(view: &View, q: &str) -> Value {
+/// Something that could go on the board, as the add-search lists it.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct TaskHit {
+    pub key: String,
+    pub kind: &'static str,
+    pub name: String,
+    pub sub: String,
+    pub image: Option<String>,
+    /// Already on the board.
+    pub added: bool,
+}
+
+pub fn find(view: &View, q: &str) -> Vec<TaskHit> {
     let q = q.trim().to_lowercase();
     if q.chars().count() < 2 {
-        return json!([]);
+        return Vec::new();
     }
     let tokens: Vec<&str> = q.split_whitespace().collect();
     let cat = &view.cat;
@@ -605,28 +755,56 @@ pub fn find(view: &View, q: &str) -> Value {
     // A resource could also be a mod; each uid once.
     let mut seen = HashSet::new();
     found.retain(|(_, uid)| seen.insert(*uid));
-    let mut hits: Vec<(u8, Value)> = found
+    let mut hits: Vec<(u8, TaskHit)> = found
         .into_iter()
         .filter_map(|(rank, uid)| {
             let t = thing(view, uid)?;
             Some((
                 rank,
-                json!({"key": uid, "kind": t.kind.name(), "name": t.name, "sub": t.sub, "image": t.image,
-                               "added": view.manual.has_task(uid)}),
+                TaskHit {
+                    key: uid.to_string(),
+                    kind: t.kind.name(),
+                    name: t.name,
+                    sub: t.sub,
+                    image: t.image,
+                    added: view.manual.has_task(uid),
+                },
             ))
         })
         .collect();
-    let name_of = |v: &Value| v["name"].as_str().unwrap_or("").to_string();
-    hits.sort_by(|a, b| {
-        let (na, nb) = (name_of(&a.1), name_of(&b.1));
-        (a.0, na.len(), &na).cmp(&(b.0, nb.len(), &nb))
-    });
-    Value::Array(hits.into_iter().take(30).map(|(_, v)| v).collect())
+    hits.sort_by(|a, b| (a.0, a.1.name.len(), &a.1.name).cmp(&(b.0, b.1.name.len(), &b.1.name)));
+    hits.into_iter().take(30).map(|(_, v)| v).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Value, json};
+
+    /// An answer as the page receives it.
+    fn json<T: serde::Serialize>(v: T) -> Value {
+        serde_json::to_value(v).unwrap()
+    }
+
+    fn row(view: &View, task: &Task) -> Value {
+        json(super::row(view, task))
+    }
+
+    fn board(view: &View) -> Value {
+        json(super::board(view))
+    }
+
+    fn summary(view: &View) -> Value {
+        json(super::summary(view))
+    }
+
+    fn detail(view: &View, uid: &str, open_eras: &HashSet<String>) -> Option<Value> {
+        super::detail(view, uid, open_eras).map(json)
+    }
+
+    fn find(view: &View, q: &str) -> Value {
+        json(super::find(view, q))
+    }
     use std::sync::Arc;
 
     use crate::accounts::Manual;

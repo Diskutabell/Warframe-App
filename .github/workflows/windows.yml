@@ -25,6 +25,13 @@ jobs:
       - name: Test
         run: cargo test
 
+      # `cargo test` writes the API's TypeScript types; the committed ones must be the same.
+      - name: Check the UI's API types
+        shell: bash
+        run: |
+          changed=$(git status --porcelain -- web/src/types)
+          if [ -n "$changed" ]; then echo "$changed"; echo "web/src/types is out of date: run cargo test and commit it"; exit 1; fi
+
       # A build without the memory scan must not be able to open or read another process: none of
       # those calls may be among the exe's imports.
       - uses: ilammy/msvc-dev-cmd@v1

@@ -1,0 +1,5 @@
+# Where `cargo test` writes the API's TypeScript types (ts-rs), and how it spells 64-bit
+# integers: JSON numbers, as the UI reads them (every count and time fits in a double).
+[env]
+TS_RS_EXPORT_DIR = { value = "web/src/types", relative = true }
+TS_RS_LARGE_INT = "number"

@@ -112,7 +112,8 @@ pub struct Db {
 }
 
 /// A point of an item's price history: when, the lowest sell order and the highest buy order.
-#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
 pub struct PricePoint {
     pub t: f64,
     pub sell: Option<i64>,

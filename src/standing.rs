@@ -9,7 +9,9 @@
 //! it is capped.
 
 use indexmap::IndexMap;
-use serde_json::{Value, json};
+use serde::Serialize;
+use serde_json::Value;
+use ts_rs::TS;
 
 use crate::gamedata;
 use crate::sources::{Affiliation, Standing};
@@ -331,7 +333,134 @@ fn left_today(read: i64, read_at: f64, cap: Option<i64>) -> (Option<i64>, bool) 
 }
 
 /// The Standing page and the Overview card: every syndicate, the daily pools, and the medallions.
-pub fn summary(view: &View, mastery_rank: Option<i64>, nightwave: Option<&str>) -> Value {
+#[derive(Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct StandingView {
+    pub syndicates: Vec<SyndicateRow>,
+    pub pools: Vec<Pool>,
+    pub focus: Allowance,
+    pub mastery_rank: Option<i64>,
+    /// The daily standing cap of every pool.
+    pub cap: Option<i64>,
+    /// The next daily reset, ISO.
+    pub reset: String,
+    pub as_of: Option<f64>,
+    /// What the standing was read from: "profile" or "inventory".
+    pub source: Option<&'static str>,
+    /// Universal medallions held.
+    pub universal: i64,
+    pub loaded: bool,
+    /// The account shown (`/api/standing` only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub account: Option<String>,
+}
+
+/// One daily standing pool, named after the syndicates in it.
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct Pool {
+    pub key: String,
+    pub name: String,
+    pub left: Option<i64>,
+    pub cap: Option<i64>,
+    /// Read today (else the whole allowance is assumed back).
+    pub read: bool,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct Allowance {
+    pub left: Option<i64>,
+    pub cap: Option<i64>,
+    pub read: bool,
+}
+
+/// A syndicate as the Standing page lists it.
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct SyndicateRow {
+    #[serde(flatten)]
+    pub core: SyndicateCore,
+    /// How many offerings it has.
+    pub offers: usize,
+}
+
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct SyndicateCore {
+    pub tag: String,
+    pub name: String,
+    pub icon: Option<String>,
+    pub colour: Option<String>,
+    /// "faction", "nightwave" or "other".
+    pub kind: &'static str,
+    /// The account's standing there has been read.
+    pub known: bool,
+    /// Ranked in steps (Kahl's Garrison, Nightcap): no standing bar.
+    pub steps: bool,
+    pub standing: i64,
+    pub title: i64,
+    pub rank_name: String,
+    pub rank_icon: Option<String>,
+    pub top_rank: Option<i64>,
+    pub progress: i64,
+    pub size: i64,
+    pub at_cap: bool,
+    pub full: bool,
+    pub next: Option<NextRank>,
+    pub pool: Option<String>,
+    pub medallions: Medallions,
+    pub allies: Vec<Ally>,
+}
+
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct NextRank {
+    pub level: i64,
+    pub name: String,
+    pub credits: i64,
+    pub items: Vec<RankCost>,
+}
+
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct RankCost {
+    pub name: String,
+    pub count: i64,
+    pub have: i64,
+    pub image: Option<String>,
+}
+
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct Medallions {
+    /// The standing the held medallions are worth.
+    pub standing: i64,
+    pub items: Vec<Medallion>,
+    pub capped: bool,
+}
+
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct Medallion {
+    pub name: String,
+    pub count: i64,
+    pub each: i64,
+    pub image: Option<String>,
+}
+
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct Ally {
+    pub tag: String,
+    pub share: f64,
+    pub name: String,
+}
+
+pub fn summary(view: &View, mastery_rank: Option<i64>, nightwave: Option<&str>) -> StandingView {
     let cat = &view.cat;
     let mut readings = Vec::new();
     if let Some(st) = view.profile.as_ref().and_then(|p| p.standing.as_ref().map(|s| (s, p.fetched))) {
@@ -367,7 +496,7 @@ pub fn summary(view: &View, mastery_rank: Option<i64>, nightwave: Option<&str>) 
             pools.entry(pool.clone()).or_default().push(s.name.clone());
         }
     }
-    let pool_rows: Vec<Value> = pools
+    let pool_rows: Vec<Pool> = pools
         .iter()
         .map(|(pool, names)| {
             let read = merged.daily.as_ref().and_then(|(d, t)| d.get(pool).map(|v| (*v, *t)));
@@ -375,37 +504,46 @@ pub fn summary(view: &View, mastery_rank: Option<i64>, nightwave: Option<&str>) 
                 Some((v, t)) => left_today(v, t, cap),
                 None => (cap, false),
             };
-            let label = if pool == "DailyAffiliation" { "Faction syndicates".to_string() } else { names.join(", ") };
-            json!({"key": pool, "name": label, "left": left, "cap": cap.map(|c| c.max(left.unwrap_or(0))), "read": fresh})
+            let name = if pool == "DailyAffiliation" { "Faction syndicates".to_string() } else { names.join(", ") };
+            Pool { key: pool.clone(), name, left, cap: cap.map(|c| c.max(left.unwrap_or(0))), read: fresh }
         })
         .collect();
     let focus_cap = mastery_rank.map(daily_focus_cap);
     let focus = merged.focus.map_or((focus_cap, false), |(v, t)| left_today(v, t, focus_cap));
-    json!({
-        "syndicates": rows,
-        "pools": pool_rows,
-        "focus": {"left": focus.0, "cap": focus_cap.map(|c| c.max(focus.0.unwrap_or(0))), "read": focus.1},
-        "masteryRank": mastery_rank, "cap": cap,
-        "reset": clock::iso(clock::next_daily_reset(now())),
-        "asOf": merged.as_of.map(|(t, _)| t), "source": merged.as_of.map(|(_, s)| s),
-        "universal": held(UNIVERSAL_MEDALLION),
-        "loaded": !cat.syndicates.list.is_empty(),
-    })
+    StandingView {
+        syndicates: rows,
+        pools: pool_rows,
+        focus: Allowance { left: focus.0, cap: focus_cap.map(|c| c.max(focus.0.unwrap_or(0))), read: focus.1 },
+        mastery_rank,
+        cap,
+        reset: clock::iso(clock::next_daily_reset(now())),
+        as_of: merged.as_of.map(|(t, _)| t),
+        source: merged.as_of.map(|(_, s)| s),
+        universal: held(UNIVERSAL_MEDALLION),
+        loaded: !cat.syndicates.list.is_empty(),
+        account: None,
+    }
 }
 
-fn syndicate_row(view: &View, s: &Syndicate, mine: Option<Affiliation>, held: &dyn Fn(&str) -> i64) -> Value {
+fn syndicate_row(view: &View, s: &Syndicate, mine: Option<Affiliation>, held: &dyn Fn(&str) -> i64) -> SyndicateRow {
     let cat = &view.cat;
     let a = mine.unwrap_or_default();
     let p = progress(s, a);
     let rank = s.rank(a.title);
-    let next = s.rank(a.title + 1).filter(|_| a.title >= 0).map(|r| {
-        json!({"level": r.level, "name": r.name, "credits": r.credits,
-               "items": r.items.iter().map(|(uid, n)| {
-                   let name = cat.name_of(uid);
-                   json!({"name": name, "count": n, "have": held(uid), "image": cat.art_by_name(&name)})
-               }).collect::<Vec<_>>()})
+    let next = s.rank(a.title + 1).filter(|_| a.title >= 0).map(|r| NextRank {
+        level: r.level,
+        name: r.name.clone(),
+        credits: r.credits,
+        items: r
+            .items
+            .iter()
+            .map(|(uid, n)| {
+                let name = cat.name_of(uid);
+                RankCost { image: cat.art_by_name(&name), name, count: *n, have: held(uid) }
+            })
+            .collect(),
     });
-    let medal_items: Vec<Value> = s
+    let medal_items: Vec<Medallion> = s
         .medallions
         .iter()
         .filter(|(uid, _)| uid != UNIVERSAL_MEDALLION)
@@ -413,39 +551,102 @@ fn syndicate_row(view: &View, s: &Syndicate, mine: Option<Affiliation>, held: &d
             let n = held(uid);
             (n > 0).then(|| {
                 let name = cat.name_of(uid);
-                json!({"name": name, "count": n, "each": each, "image": cat.art_by_name(&name)})
+                Medallion { image: cat.art_by_name(&name), name, count: n, each: *each }
             })
         })
         .collect();
-    let medal_standing: i64 =
-        medal_items.iter().map(|m| m["count"].as_i64().unwrap_or(0) * m["each"].as_i64().unwrap_or(0)).sum();
+    let medal_standing: i64 = medal_items.iter().map(|m| m.count * m.each).sum();
     let names = &cat.syndicates.list;
-    json!({
-        "tag": s.tag, "name": s.name, "icon": s.icon, "colour": s.colour,
-        "kind": match s.kind { Kind::Faction => "faction", Kind::Nightwave => "nightwave", Kind::Other => "other" },
-        "known": mine.is_some(), "steps": s.counts_steps(),
-        "standing": a.standing, "title": a.title,
-        "rankName": rank.map_or_else(|| if a.title == 0 { "Neutral".to_string() } else { format!("Rank {}", a.title) }, |r| r.name.clone()),
-        "rankIcon": rank.and_then(|r| r.icon.clone()),
-        "topRank": s.ranks.iter().map(|r| r.level).max(),
-        "progress": p.value, "size": p.size, "atCap": p.at_cap, "full": p.full,
-        "next": next, "pool": s.pool,
-        "medallions": {"standing": medal_standing, "items": medal_items, "capped": s.medallions_capped},
-        "allies": s.allies.iter().map(|(tag, share)| json!({"tag": tag, "share": share,
-            "name": names.get(tag).map_or(tag.as_str(), |o| o.name.as_str())})).collect::<Vec<_>>(),
-        "offers": s.offers.len(),
-    })
+    SyndicateRow {
+        core: SyndicateCore {
+            tag: s.tag.clone(),
+            name: s.name.clone(),
+            icon: s.icon.clone(),
+            colour: s.colour.clone(),
+            kind: match s.kind {
+                Kind::Faction => "faction",
+                Kind::Nightwave => "nightwave",
+                Kind::Other => "other",
+            },
+            known: mine.is_some(),
+            steps: s.counts_steps(),
+            standing: a.standing,
+            title: a.title,
+            rank_name: rank.map_or_else(
+                || if a.title == 0 { "Neutral".to_string() } else { format!("Rank {}", a.title) },
+                |r| r.name.clone(),
+            ),
+            rank_icon: rank.and_then(|r| r.icon.clone()),
+            top_rank: s.ranks.iter().map(|r| r.level).max(),
+            progress: p.value,
+            size: p.size,
+            at_cap: p.at_cap,
+            full: p.full,
+            next,
+            pool: s.pool.clone(),
+            medallions: Medallions { standing: medal_standing, items: medal_items, capped: s.medallions_capped },
+            allies: s
+                .allies
+                .iter()
+                .map(|(tag, share)| Ally {
+                    tag: tag.clone(),
+                    share: *share,
+                    name: names.get(tag).map_or(tag.as_str(), |o| o.name.as_str()).to_string(),
+                })
+                .collect(),
+        },
+        offers: s.offers.len(),
+    }
 }
 
 /// One syndicate with its offerings, the ones the account can buy priced in platinum per 1,000
 /// standing. Prices of those are asked for; the page polls while they arrive.
-pub fn detail(view: &View, tag: &str, mastery_rank: Option<i64>) -> Option<Value> {
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct SyndicateDetail {
+    #[serde(flatten)]
+    pub core: SyndicateCore,
+    pub offers: Vec<OfferRow>,
+    /// Prices still being fetched.
+    pub pricing: usize,
+    pub ranks: Vec<RankRow>,
+    pub pools: Vec<Pool>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct OfferRow {
+    pub uid: String,
+    pub name: String,
+    pub image: Option<String>,
+    pub standing: i64,
+    pub level: i64,
+    /// The account's rank allows it.
+    pub available: bool,
+    pub slug: Option<String>,
+    pub price: Option<i64>,
+    /// Platinum per 1,000 standing.
+    pub per_k: Option<f64>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct RankRow {
+    pub level: i64,
+    pub name: String,
+    pub icon: Option<String>,
+    pub min: i64,
+    pub max: i64,
+}
+
+pub fn detail(view: &View, tag: &str, mastery_rank: Option<i64>) -> Option<SyndicateDetail> {
     let s = view.cat.syndicates.list.get(tag)?;
     let summary = summary(view, mastery_rank, Some(tag));
-    let mut row = summary["syndicates"].as_array()?.iter().find(|r| r["tag"] == tag)?.clone();
-    let title = row["title"].as_i64().unwrap_or(0);
+    let row = summary.syndicates.into_iter().find(|r| r.core.tag == tag)?;
+    let title = row.core.title;
     let mut waiting = 0;
-    let mut offers: Vec<(f64, Value)> = s
+    let mut offers: Vec<(f64, OfferRow)> = s
         .offers
         .iter()
         .map(|o| {
@@ -466,27 +667,38 @@ pub fn detail(view: &View, tag: &str, mastery_rank: Option<i64>) -> Option<Value
             let key = per_k.unwrap_or(-1.0) + if available { 1e9 } else { 0.0 };
             (
                 key,
-                json!({"uid": o.uid, "name": name, "image": image, "standing": o.standing, "level": o.level,
-                       "available": available, "slug": slug, "price": price,
-                       "perK": per_k.map(|v| crate::difflib::py_round(v, 2))}),
+                OfferRow {
+                    uid: o.uid.clone(),
+                    name,
+                    image,
+                    standing: o.standing,
+                    level: o.level,
+                    available,
+                    slug,
+                    price,
+                    per_k: per_k.map(|v| crate::difflib::py_round(v, 2)),
+                },
             )
         })
         .collect();
     offers.sort_by(|a, b| b.0.total_cmp(&a.0));
-    row["offers"] = Value::Array(offers.into_iter().map(|(_, v)| v).collect());
-    row["pricing"] = json!(waiting);
-    row["ranks"] = s
-        .ranks
-        .iter()
-        .map(|r| json!({"level": r.level, "name": r.name, "icon": r.icon, "min": r.min, "max": r.max}))
-        .collect();
-    row["pools"] = summary["pools"].clone();
-    Some(row)
+    Some(SyndicateDetail {
+        core: row.core,
+        offers: offers.into_iter().map(|(_, v)| v).collect(),
+        pricing: waiting,
+        ranks: s
+            .ranks
+            .iter()
+            .map(|r| RankRow { level: r.level, name: r.name.clone(), icon: r.icon.clone(), min: r.min, max: r.max })
+            .collect(),
+        pools: summary.pools,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     /// A syndicate as the export describes Steel Meridian, shortened.
     fn export() -> Value {

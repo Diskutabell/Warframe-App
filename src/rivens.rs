@@ -268,7 +268,8 @@ fn class_index(item: &Item) -> usize {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ts_rs::TS)]
+#[ts(export)]
 pub struct StatRow {
     pub stat: &'static str,
     pub unit: &'static str,
@@ -277,10 +278,13 @@ pub struct StatRow {
     pub max: f64,
     pub spliced: bool,
     #[serde(rename = "negMin", skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub neg_min: Option<f64>,
     #[serde(rename = "negCentre", skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub neg_centre: Option<f64>,
     #[serde(rename = "negMax", skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub neg_max: Option<f64>,
 }
 
@@ -311,7 +315,8 @@ pub fn stat_table(item: &Item, positives: u8, negatives: u8) -> Vec<StatRow> {
         .collect()
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ts_rs::TS)]
+#[ts(export)]
 pub struct Graded {
     pub stat: &'static str,
     pub value: f64,
@@ -502,7 +507,38 @@ pub async fn market(platform: Platform) -> (std::sync::Arc<serde_json::Map<Strin
 
 /// What `weapon`'s rivens sold for lately, from the cached prices (whatever their age; a stale
 /// copy is refreshed in the background, so a riven read never waits for it).
-pub fn traded(weapon: &str, platform: Platform) -> Option<Value> {
+/// What rivens for a weapon sold for lately (api.warframestat.us), unrolled and rerolled.
+#[derive(Clone, Debug, PartialEq, Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct Traded {
+    pub unrolled: Option<RivenPrices>,
+    pub rerolled: Option<RivenPrices>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct RivenPrices {
+    #[ts(type = "number | null")]
+    pub median: Option<serde_json::Number>,
+    #[ts(type = "number | null")]
+    pub avg: Option<serde_json::Number>,
+    #[ts(type = "number | null")]
+    pub min: Option<serde_json::Number>,
+    #[ts(type = "number | null")]
+    pub max: Option<serde_json::Number>,
+    /// How many sold.
+    #[ts(type = "number | null")]
+    pub pop: Option<serde_json::Number>,
+}
+
+/// The prices of one kind (`unrolled`, `rerolled`) from warframestat's entry, if it has any.
+fn riven_prices(v: &Value) -> Option<RivenPrices> {
+    let o = v.as_object().filter(|o| !o.is_empty())?;
+    let n = |k: &str| o.get(k).and_then(Value::as_number).cloned();
+    Some(RivenPrices { median: n("median"), avg: n("avg"), min: n("min"), max: n("max"), pop: n("pop") })
+}
+
+pub fn traded(weapon: &str, platform: Platform) -> Option<Traded> {
     let cached = load_cached(platform);
     let stale = cached.as_ref().is_none_or(|c| now() - c.fetched >= MARKET_MAX_AGE);
     if stale && !net::offline() {
@@ -531,20 +567,28 @@ pub fn traded(weapon: &str, platform: Platform) -> Option<Value> {
         }
     }
     let p = cached?.data.get(weapon)?.clone();
-    let pick = |v: &Value| v.as_object().filter(|o| !o.is_empty()).map(|_| v.clone());
-    let (unrolled, rerolled) = (pick(&p["unrolled"]), pick(&p["rerolled"]));
-    (unrolled.is_some() || rerolled.is_some()).then(|| json!({"unrolled": unrolled, "rerolled": rerolled}))
+    let (unrolled, rerolled) = (riven_prices(&p["unrolled"]), riven_prices(&p["rerolled"]));
+    (unrolled.is_some() || rerolled.is_some()).then_some(Traded { unrolled, rerolled })
+}
+
+/// A weapon that takes a riven, with what its rivens sold for.
+#[derive(Serialize, ts_rs::TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct RivenRow {
+    pub name: String,
+    pub category: String,
+    pub image: Option<String>,
+    pub disposition: f64,
+    pub dots: Option<i64>,
+    pub dot_str: &'static str,
+    pub unrolled: Option<RivenPrices>,
+    pub rerolled: Option<RivenPrices>,
 }
 
 /// Every weapon that takes a riven, with its traded riven prices (`market`).
-pub fn rows(catalog: &Catalog, prices: &serde_json::Map<String, Value>) -> Vec<Value> {
-    let pick = |v: &Value| {
-        v.as_object().filter(|o| !o.is_empty()).map(|o| {
-            json!({"median": o.get("median"), "avg": o.get("avg"), "min": o.get("min"),
-                   "max": o.get("max"), "pop": o.get("pop")})
-        })
-    };
-    let mut out: Vec<(f64, Value)> = catalog
+pub fn rows(catalog: &Catalog, prices: &serde_json::Map<String, Value>) -> Vec<RivenRow> {
+    let mut out: Vec<(f64, RivenRow)> = catalog
         .items
         .values()
         .filter_map(|it| {
@@ -553,12 +597,16 @@ pub fn rows(catalog: &Catalog, prices: &serde_json::Map<String, Value>) -> Vec<V
             let dots = it.dispo_dots.unwrap_or(0) as usize;
             Some((
                 py_round(dispo, 3),
-                json!({
-                    "name": it.name, "category": it.category, "image": crate::gamedata::image_url(it.image.as_deref()),
-                    "disposition": py_round(dispo, 3), "dots": it.dispo_dots,
-                    "dotStr": DOTS.get(dots).copied().unwrap_or(""),
-                    "unrolled": pick(&p["unrolled"]), "rerolled": pick(&p["rerolled"]),
-                }),
+                RivenRow {
+                    name: it.name.clone(),
+                    category: it.category.clone(),
+                    image: crate::gamedata::image_url(it.image.as_deref()),
+                    disposition: py_round(dispo, 3),
+                    dots: it.dispo_dots,
+                    dot_str: DOTS.get(dots).copied().unwrap_or(""),
+                    unrolled: riven_prices(&p["unrolled"]),
+                    rerolled: riven_prices(&p["rerolled"]),
+                },
             ))
         })
         .collect();

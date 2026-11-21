@@ -128,7 +128,8 @@ pub struct Item {
     pub set_slug: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ts_rs::TS)]
+#[ts(export)]
 pub struct PartRelic {
     pub relic: String,
     pub rarity: Option<String>,

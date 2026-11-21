@@ -3,7 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, ts_rs::TS)]
+#[ts(export)]
 pub struct Reward {
     pub name: String,
     pub uid: String,
@@ -13,7 +14,8 @@ pub struct Reward {
     pub needed: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, ts_rs::TS)]
+#[ts(export)]
 pub struct Entry {
     pub t: f64,
     pub drops: Vec<Reward>,

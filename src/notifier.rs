@@ -65,46 +65,42 @@ impl Notifier {
         }
         let fissures = world::fissures(raw);
         if err.is_none() && raw.is_some() {
-            let active: HashSet<&str> = fissures.iter().filter_map(|f| f["id"].as_str()).collect();
+            let active: HashSet<&str> = fissures.iter().filter_map(|f| f.id.as_deref()).collect();
             self.fissures.retain(|id| active.contains(id.as_str()));
         }
         for f in fissures {
-            let id = f["id"].as_str().unwrap_or_default().to_string();
+            let id = f.id.clone().unwrap_or_default();
             if id.is_empty() || !watch.contains(&world::watch_key(&f)) || !self.fissures.insert(id) {
                 continue;
             }
-            let kind = if f["storm"] == true {
+            let kind = if f.storm {
                 " (Void Storm)"
-            } else if f["hard"] == true {
+            } else if f.hard {
                 " (Steel Path)"
             } else {
                 ""
             };
-            let left =
-                f["expiry"].as_str().and_then(minutes_left).map_or(String::new(), |m| format!(" · {m} min left"));
+            let left = f.expiry.as_deref().and_then(minutes_left).map_or(String::new(), |m| format!(" · {m} min left"));
+            let or_unknown = |v: &Option<String>| v.clone().unwrap_or_else(|| "?".into());
             send(
-                &format!(
-                    "{} {} fissure{kind}",
-                    f["tier"].as_str().unwrap_or("?"),
-                    f["mission"].as_str().unwrap_or("?")
-                ),
-                &format!("{} · {}{left}", f["node"].as_str().unwrap_or("?"), f["enemy"].as_str().unwrap_or("?")),
+                &format!("{} {} fissure{kind}", or_unknown(&f.tier), or_unknown(&f.mission)),
+                &format!("{} · {}{left}", or_unknown(&f.node), or_unknown(&f.enemy)),
             );
         }
     }
 
-    pub fn baro(&mut self, baro: &serde_json::Value) {
-        if baro["active"] != true {
+    pub fn baro(&mut self, baro: &world::Baro) {
+        if !baro.active {
             return;
         }
-        let visit = baro["activation"].as_str().unwrap_or_default().to_string();
+        let visit = baro.activation.clone().unwrap_or_default();
         if self.baro.as_ref() == Some(&visit) {
             return;
         }
         self.baro = Some(visit);
         let hours =
-            baro["expiry"].as_str().and_then(minutes_left).map_or(String::new(), |m| format!(" for {} h", m / 60));
-        send("Baro Ki'Teer has arrived", &format!("{}{hours}", baro["location"].as_str().unwrap_or("A relay")));
+            baro.expiry.as_deref().and_then(minutes_left).map_or(String::new(), |m| format!(" for {} h", m / 60));
+        send("Baro Ki'Teer has arrived", &format!("{}{hours}", baro.location.as_deref().unwrap_or("A relay")));
     }
 
     pub fn foundry(&mut self, done: &[Build]) {

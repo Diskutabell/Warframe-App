@@ -612,8 +612,12 @@ impl Overlays {
         }
         block.add(&line);
         block.add(&label("warframe.market, same weapon and positives", "wfp-sub"));
-        let median = |kind: &str| r.traded.as_ref().and_then(|t| t[kind]["median"].as_f64());
-        let sold = match (median("unrolled"), median("rerolled")) {
+        let median = |p: Option<&crate::rivens::RivenPrices>| p.and_then(|p| p.median.as_ref()?.as_f64());
+        let traded = r.traded.as_ref();
+        let sold = match (
+            median(traded.and_then(|t| t.unrolled.as_ref())),
+            median(traded.and_then(|t| t.rerolled.as_ref())),
+        ) {
             (Some(a), Some(b)) => Some(format!("Sold lately: {a:.0} unrolled · {b:.0} rerolled")),
             (Some(a), None) => Some(format!("Sold lately: {a:.0} unrolled")),
             (None, Some(b)) => Some(format!("Sold lately: {b:.0} rerolled")),

@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -28,7 +28,8 @@ const MEMSCAN_GAP: f64 = 10.0;
 /// The progress shown moves in steps of this much.
 const PROGRESS_STEP: f64 = 0.02;
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Serialize, ts_rs::TS)]
+#[ts(export)]
 pub struct MemscanStatus {
     /// "idle" (nothing read yet), "scanning", "ok" or "error"; the summary adds "off" and
     /// "unavailable".
@@ -38,13 +39,24 @@ pub struct MemscanStatus {
     pub progress: f64,
     /// When the next read is due (epoch seconds), if one is scheduled.
     pub next: Option<f64>,
-    /// The last successful read: {t, stacks, seconds, account}.
-    pub last: Option<Value>,
+    /// The last successful read.
+    pub last: Option<LastScan>,
     #[serde(skip)]
     last_attempt: f64,
     /// The game process that refused access; it is not asked again, a restarted game is.
     #[serde(skip)]
     denied_pid: Option<u32>,
+}
+
+/// A memory scan that read an inventory.
+#[derive(Clone, Debug, Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct LastScan {
+    pub t: f64,
+    pub stacks: usize,
+    pub seconds: f64,
+    /// The account it was filed under.
+    pub account: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -111,13 +123,13 @@ impl MemscanService {
     }
 
     /// The status as the summary shows it.
-    pub fn status_json(&self) -> Value {
-        let mut st = serde_json::to_value(&*self.status.read()).unwrap_or_default();
+    pub fn status(&self) -> MemscanStatus {
+        let mut st = self.status.read().clone();
         if !self.settings.get().memory_scan_enabled {
-            st["state"] = json!("off");
+            st.state = "off";
         } else if let Err(why) = memscan::availability() {
-            st["state"] = json!("unavailable");
-            st["detail"] = json!(why);
+            st.state = "unavailable";
+            st.detail = Some(why);
         }
         st
     }
@@ -276,8 +288,7 @@ impl MemscanService {
                 let mut st = self.status.write();
                 st.state = "ok";
                 st.detail = None;
-                st.last =
-                    Some(json!({"t": now(), "stacks": inv.counts.len(), "seconds": seconds, "account": game_name}));
+                st.last = Some(LastScan { t: now(), stacks: inv.counts.len(), seconds, account: game_name.clone() });
             }
             Err(e) => {
                 let mut st = self.status.write();
