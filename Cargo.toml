@@ -60,9 +60,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_System_Console",
-    "Win32_System_Diagnostics_Debug",
-    "Win32_System_Diagnostics_ToolHelp",
-    "Win32_System_Memory",
     "Win32_System_Threading",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
@@ -71,6 +68,14 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [features]
+default = ["memscan"]
+# Reading the inventory from the game's memory (off unless switched on in Settings). A build
+# without it has no code that opens or reads another process at all.
+memscan = [
+    "windows-sys/Win32_System_Diagnostics_Debug",
+    "windows-sys/Win32_System_Diagnostics_ToolHelp",
+    "windows-sys/Win32_System_Memory",
+]
 # The Windows release exe carries tesseract inside it, so nothing has to be installed. The release
 # workflow builds the zip (.github/bundle-tesseract.sh) and points WFP_TESSERACT_ZIP at it.
 bundled-tesseract = ["dep:zip"]

@@ -26,7 +26,7 @@ use crate::history::{Entry, Reward};
 use crate::market::Price;
 use crate::memscan::Sections;
 use crate::services::lock;
-use crate::sources::{Inventory, Profile};
+use crate::sources::{Delta, Inventory, Profile};
 
 /// The schema, one step per version: `user_version` says how many have been applied.
 const MIGRATIONS: &[&str] = &[
@@ -81,6 +81,22 @@ const MIGRATIONS: &[&str] = &[
         platform TEXT NOT NULL, slug TEXT NOT NULL, t REAL NOT NULL, sell INTEGER, buy INTEGER,
         PRIMARY KEY (platform, slug, t)
     );
+    "#,
+    // 2: changes to an inventory made after it was read (a reward picked, a build marked done),
+    // kept until a read includes them; and which reward of a screen the player picked.
+    r#"
+    CREATE TABLE inventory_deltas (
+        id INTEGER PRIMARY KEY,
+        account TEXT NOT NULL,
+        t REAL NOT NULL,
+        kind TEXT NOT NULL,
+        uid TEXT NOT NULL,
+        change INTEGER NOT NULL,
+        equipment INTEGER NOT NULL DEFAULT 0,
+        reward INTEGER
+    );
+    CREATE INDEX inventory_deltas_by_account ON inventory_deltas (account, t);
+    ALTER TABLE reward_history ADD COLUMN picked TEXT;
     "#,
 ];
 
@@ -205,6 +221,7 @@ impl Db {
                 acc.inventory = json_row::<Inventory>(c, "SELECT data FROM inventories WHERE account = ?1", &acc.key)?
                     .map(Arc::new);
                 acc.manual = load_manual(c, &acc.key)?;
+                acc.deltas = load_deltas(c, &acc.key)?;
             }
             Ok(Registry {
                 active: meta("active")?,
@@ -284,9 +301,16 @@ impl Db {
     /// record of what dropped), no longer shown under any account's name.
     pub fn delete_account(&self, key: &str) -> Result<()> {
         self.transaction(|tx| {
-            for table in
-                ["profiles", "inventories", "manual_counts", "manual_mastered", "pins", "tasks", "memscan_sections"]
-            {
+            for table in [
+                "profiles",
+                "inventories",
+                "manual_counts",
+                "manual_mastered",
+                "pins",
+                "tasks",
+                "memscan_sections",
+                "inventory_deltas",
+            ] {
                 tx.execute(&format!("DELETE FROM {table} WHERE account = ?1"), [key])?;
             }
             tx.execute("DELETE FROM accounts WHERE key = ?1", [key])?;
@@ -314,9 +338,9 @@ impl Db {
 
     // ------------------------------------------------------------ reward history
 
-    /// Records a reward screen. Reading the same screen again (F9 pressed twice) replaces the
-    /// first record instead of counting the screen twice.
-    pub fn record_reward(&self, entry: &Entry) -> Result<()> {
+    /// Records a reward screen and says which row it is. Reading the same screen again (F9
+    /// pressed twice) replaces the first record instead of counting the screen twice.
+    pub fn record_reward(&self, entry: &Entry) -> Result<i64> {
         let drops = serde_json::to_string(&entry.drops)?;
         self.transaction(|tx| {
             let last: Option<(i64, f64, Option<String>, String)> = tx
@@ -332,16 +356,66 @@ impl Db {
                 entry.t - t < SAME_SCREEN && *account == entry.account && names(&before) == names(&entry.drops)
             });
             match last.filter(|_| same_screen) {
-                Some((id, ..)) => tx.execute(
-                    "UPDATE reward_history SET t = ?2, best = ?3, drops = ?4 WHERE id = ?1",
-                    params![id, entry.t, entry.best, drops],
-                )?,
-                None => tx.execute(
-                    "INSERT INTO reward_history (t, account, best, drops) VALUES (?1, ?2, ?3, ?4)",
-                    params![entry.t, entry.account, entry.best, drops],
-                )?,
-            };
+                Some((id, ..)) => {
+                    tx.execute(
+                        "UPDATE reward_history SET t = ?2, best = ?3, drops = ?4 WHERE id = ?1",
+                        params![id, entry.t, entry.best, drops],
+                    )?;
+                    Ok(id)
+                }
+                None => {
+                    tx.execute(
+                        "INSERT INTO reward_history (t, account, best, drops) VALUES (?1, ?2, ?3, ?4)",
+                        params![entry.t, entry.account, entry.best, drops],
+                    )?;
+                    Ok(tx.last_insert_rowid())
+                }
+            }
+        })
+    }
+
+    /// One reward screen by its row.
+    pub fn reward(&self, id: i64) -> Result<Option<Entry>> {
+        self.with(|c| {
+            c.query_row("SELECT t, account, best, drops, id, picked FROM reward_history WHERE id = ?1", [id], entry_row)
+                .optional()
+        })
+    }
+
+    /// Records which reward of a screen the player picked (None: undone), with the changes that
+    /// makes to the account's inventory, replacing those of an earlier pick on the same screen.
+    pub fn set_pick(&self, id: i64, account: &str, picked: Option<&str>, deltas: &[Delta]) -> Result<()> {
+        self.transaction(|tx| {
+            tx.execute("DELETE FROM inventory_deltas WHERE reward = ?1", [id])?;
+            tx.execute("UPDATE reward_history SET picked = ?2 WHERE id = ?1", params![id, picked])?;
+            for d in deltas {
+                insert_delta(tx, account, d)?;
+            }
             Ok(())
+        })
+    }
+
+    // ------------------------------------------------------------ inventory changes
+
+    /// Changes made to an account's inventory that no read has included yet, oldest first.
+    pub fn deltas(&self, account: &str) -> Result<Vec<Delta>> {
+        self.with(|c| load_deltas(c, account))
+    }
+
+    pub fn add_deltas(&self, account: &str, deltas: &[Delta]) -> Result<()> {
+        self.transaction(|tx| {
+            for d in deltas {
+                insert_delta(tx, account, d)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Drops the changes an inventory read at `as_of` includes: everything made before it.
+    pub fn settle_deltas(&self, account: &str, as_of: f64) -> Result<()> {
+        self.with(|c| {
+            c.execute("DELETE FROM inventory_deltas WHERE account = ?1 AND t <= ?2", params![account, as_of])
+                .map(|_| ())
         })
     }
 
@@ -350,7 +424,7 @@ impl Db {
     pub fn recent_rewards(&self, limit: usize, account: Option<&str>) -> Result<Vec<Entry>> {
         self.with(|c| {
             let mut stmt = c.prepare_cached(
-                "SELECT t, account, best, drops FROM reward_history
+                "SELECT t, account, best, drops, id, picked FROM reward_history
                  WHERE ?1 IS NULL OR account IS NULL OR account = ?1
                  ORDER BY t DESC, id DESC LIMIT ?2",
             )?;
@@ -364,7 +438,7 @@ impl Db {
     pub fn reward_totals(&self, since: f64, account: Option<&str>) -> Result<(usize, i64)> {
         self.with(|c| {
             let mut stmt = c.prepare_cached(
-                "SELECT t, account, best, drops FROM reward_history
+                "SELECT t, account, best, drops, id, picked FROM reward_history
                  WHERE t >= ?1 AND (?2 IS NULL OR account IS NULL OR account = ?2)",
             )?;
             let entries: Vec<Entry> = stmt.query_map(params![since, account], entry_row)?.collect::<Result<_, _>>()?;
@@ -535,6 +609,7 @@ fn json_row<T: serde::de::DeserializeOwned>(c: &Connection, sql: &str, key: &str
     Ok(text.and_then(|t| serde_json::from_str(&t).ok()))
 }
 
+/// A reward screen from `SELECT t, account, best, drops, id, picked`.
 fn entry_row(r: &rusqlite::Row) -> rusqlite::Result<Entry> {
     let drops: String = r.get(3)?;
     Ok(Entry {
@@ -542,7 +617,34 @@ fn entry_row(r: &rusqlite::Row) -> rusqlite::Result<Entry> {
         account: r.get(1)?,
         best: r.get(2)?,
         drops: serde_json::from_str(&drops).unwrap_or_default(),
+        id: r.get(4)?,
+        picked: r.get(5)?,
     })
+}
+
+fn load_deltas(c: &Connection, account: &str) -> rusqlite::Result<Vec<Delta>> {
+    let mut stmt = c.prepare_cached(
+        "SELECT t, kind, uid, change, equipment, reward FROM inventory_deltas WHERE account = ?1 ORDER BY t, id",
+    )?;
+    let rows = stmt.query_map([account], |r| {
+        Ok(Delta {
+            t: r.get(0)?,
+            kind: r.get(1)?,
+            uid: r.get(2)?,
+            change: r.get(3)?,
+            equipment: r.get::<_, i64>(4)? != 0,
+            reward: r.get(5)?,
+        })
+    })?;
+    rows.collect()
+}
+
+fn insert_delta(tx: &Transaction, account: &str, d: &Delta) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO inventory_deltas (account, t, kind, uid, change, equipment, reward) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![account, d.t, d.kind, d.uid, d.change, d.equipment as i64, d.reward],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -596,6 +698,47 @@ mod tests {
     }
 
     #[test]
+    fn a_pick_is_one_change_per_screen_and_a_newer_read_settles_it() {
+        let db = Db::memory();
+        let acc = Account::new("tenno".into(), "Tennoplayer".into());
+        db.save_registry(&Some("tenno".into()), 0.0, ProfileTimes::default(), std::slice::from_ref(&acc)).unwrap();
+        let entry = Entry {
+            t: 100.0,
+            drops: vec![reward("Ash Prime Systems Blueprint", Some(20)), reward("Forma Blueprint", None)],
+            best: None,
+            account: Some("tenno".into()),
+            id: None,
+            picked: None,
+        };
+        let id = db.record_reward(&entry).unwrap();
+        assert_eq!(db.record_reward(&Entry { t: 103.0, ..entry.clone() }).unwrap(), id, "the same screen");
+        let change = |uid: &str| Delta {
+            t: 103.0,
+            kind: "pick".into(),
+            uid: uid.into(),
+            change: 1,
+            equipment: false,
+            reward: Some(id),
+        };
+        db.set_pick(id, "tenno", Some("Forma Blueprint"), &[change("/Forma Blueprint")]).unwrap();
+        db.set_pick(id, "tenno", Some("Ash Prime Systems Blueprint"), &[change("/Ash Prime Systems Blueprint")])
+            .unwrap();
+        assert_eq!(
+            db.deltas("tenno").unwrap(),
+            [change("/Ash Prime Systems Blueprint")],
+            "changing the pick replaces it"
+        );
+        assert_eq!(db.reward(id).unwrap().unwrap().picked.as_deref(), Some("Ash Prime Systems Blueprint"));
+        assert_eq!(db.load_accounts().unwrap().accounts[0].deltas.len(), 1, "kept across a restart");
+        db.settle_deltas("tenno", 90.0).unwrap();
+        assert_eq!(db.deltas("tenno").unwrap().len(), 1, "an older read does not include it");
+        db.settle_deltas("tenno", 110.0).unwrap();
+        assert!(db.deltas("tenno").unwrap().is_empty());
+        db.set_pick(id, "tenno", None, &[]).unwrap();
+        assert_eq!(db.reward(id).unwrap().unwrap().picked, None);
+    }
+
+    #[test]
     fn the_same_screen_read_twice_is_one_record_and_the_history_has_no_cap() {
         let db = Db::memory();
         let entry = |t, account: Option<&str>, price| Entry {
@@ -603,6 +746,8 @@ mod tests {
             drops: vec![reward("Ash Prime Systems Blueprint", price), reward("Forma Blueprint", None)],
             best: None,
             account: account.map(str::to_owned),
+            id: None,
+            picked: None,
         };
         db.record_reward(&entry(100.0, Some("a"), None)).unwrap();
         db.record_reward(&entry(105.0, Some("a"), Some(25))).unwrap();

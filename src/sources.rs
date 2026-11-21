@@ -352,10 +352,55 @@ pub struct Inventory {
     pub source: Option<String>,
 }
 
+/// A change to an account's inventory made after the inventory was read: a reward the player
+/// said they picked, a build marked done. Kept (in the database) until a read includes it, so a
+/// newer full read always wins and nothing is counted twice.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Delta {
+    /// When it happened (a pick: when its screen was read).
+    pub t: f64,
+    /// What made it: "pick" (a reward picked), "built" (a build marked done), "claimed" (a
+    /// foundry entry collected; `uid` is its recipe).
+    pub kind: String,
+    pub uid: String,
+    pub change: i64,
+    /// Owned equipment rather than a stack.
+    pub equipment: bool,
+    /// The reward screen (history row) a pick belongs to.
+    pub reward: Option<i64>,
+}
+
 /// Ducats are an item stack (`MiscItems`), not a currency field of their own.
 pub const DUCATS: &str = "/Lotus/Types/Items/MiscItems/PrimeBucks";
 
 impl Inventory {
+    /// This inventory with the changes made since it was read. Changes from before it (which it
+    /// includes already) are left out.
+    pub fn with_deltas(&self, deltas: &[Delta]) -> Inventory {
+        let mut inv = self.clone();
+        let as_of = self.as_of();
+        for d in deltas.iter().filter(|d| d.t > as_of) {
+            if d.kind == "claimed" {
+                if let Some(i) = inv.foundry.iter().position(|f| f.recipe.as_deref() == Some(&d.uid)) {
+                    inv.foundry.remove(i);
+                }
+            } else if d.equipment {
+                let e = inv.equipment.entry(d.uid.clone()).or_insert(Equipment { count: 0, xp: 0 });
+                e.count += d.change;
+                if e.count <= 0 {
+                    inv.equipment.shift_remove(&d.uid);
+                }
+            } else {
+                let n = inv.counts.entry(d.uid.clone()).or_insert(0);
+                *n += d.change;
+                if *n <= 0 {
+                    inv.counts.shift_remove(&d.uid);
+                }
+            }
+        }
+        inv
+    }
+
     /// When the game last synced it, or when it was read if the payload does not say.
     pub fn as_of(&self) -> f64 {
         self.synced_at.filter(|t| *t > 0.0).unwrap_or(self.imported)
@@ -493,6 +538,27 @@ pub fn parse_inventory(data: &Value) -> Result<Inventory> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changes_go_on_top_of_a_read_until_a_newer_read_includes_them() {
+        let inv = Inventory {
+            counts: IndexMap::from([("/Part".to_string(), 1)]),
+            synced_at: Some(100.0),
+            imported: 120.0,
+            ..Inventory::default()
+        };
+        let pick = |t, change| Delta {
+            t,
+            kind: "pick".into(),
+            uid: "/Part".into(),
+            change,
+            equipment: false,
+            reward: Some(1),
+        };
+        assert_eq!(inv.with_deltas(&[pick(150.0, 1)]).counts["/Part"], 2);
+        assert_eq!(inv.with_deltas(&[pick(90.0, 1)]).counts["/Part"], 1, "the read includes it already");
+        assert!(!inv.with_deltas(&[pick(150.0, -3)]).counts.contains_key("/Part"), "never below zero");
+    }
     use serde_json::json;
 
     #[test]

@@ -990,6 +990,10 @@ a.list-row.plain { color: inherit; text-decoration: none; }
 .chip.vaulted { opacity: .55; }
 .chip.open { border-color: rgba(92, 196, 190, 0.5); color: var(--lotus); }
 .chip.owned { background: rgba(92, 196, 190, 0.08); border-color: rgba(92, 196, 190, 0.28); }
+.chip .pick { padding: 0 2px; margin-left: 2px; opacity: .45; }
+.chip .pick:hover, .chip .pick:focus-visible { opacity: 1; }
+.chip.picked { border-color: var(--good, #6c6); }
+.chip.picked .pick { opacity: 1; color: var(--good, #6c6); }
 .chip.res { cursor: default; padding: 3px 8px 3px 5px; }
 a.chip.res { cursor: pointer; }
 a.chip.res:hover { text-decoration: none; border-color: var(--line-gold); }

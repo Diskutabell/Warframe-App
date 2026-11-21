@@ -102,8 +102,9 @@ function rewards(h) {
   if (!entries.length) return head + `<div class="empty"><b>No reward screens yet</b>Crack a relic; the reward strip and this list fill in by themselves.</div>`;
   return head + `<div class="list">${entries.map((e) => `<div class="list-row">
       <span class="faint num" style="width:72px;flex:none;font-size:12.5px">${ago(e.t)}</span>
-      <div class="chips grow" style="margin:0">${e.drops.map((d) => `<span class="chip ${d.name === e.best ? "open" : ""}" data-part="${esc(d.uid)}">
-        ${esc(d.name)} ${d.price != null ? plat(d.price) : ""}${d.needed ? ` <span class="lotus">●</span>` : ""}</span>`).join("")}</div></div>`).join("")}</div>`;
+      <div class="chips grow" style="margin:0">${e.drops.map((d) => `<span class="chip ${d.name === e.best ? "open" : ""} ${d.name === e.picked ? "picked" : ""}" data-part="${esc(d.uid)}">
+        ${esc(d.name)} ${d.price != null ? plat(d.price) : ""}${d.needed ? ` <span class="lotus">●</span>` : ""}${e.id != null
+          ? `<button class="ghost icon pick" data-pick="${e.id}" data-name="${esc(d.name)}" title="${d.name === e.picked ? "Not picked after all" : "I picked this: add it to the inventory"}">${icon("check")}</button>` : ""}</span>`).join("")}</div></div>`).join("")}</div>`;
 }
 
 function worldCard(w) {
@@ -181,6 +182,14 @@ function pinned(S) {
 function wire(view) {
   for (const el of view.querySelectorAll("[data-relic]")) el.onclick = () => el.dataset.relic && drawer.open(el.dataset.relic);
   for (const el of view.querySelectorAll("[data-part]")) el.onclick = () => drawer.open(el.dataset.part);
+  for (const el of view.querySelectorAll("[data-pick]")) {
+    el.onclick = async (ev) => {
+      ev.stopPropagation();
+      const undo = el.closest(".chip").classList.contains("picked");
+      // The history event redraws the list.
+      await act("history/pick", { id: Number(el.dataset.pick), name: undo ? null : el.dataset.name }, undo ? "Pick undone" : "Added to the inventory");
+    };
+  }
   for (const el of view.querySelectorAll("[data-syn]")) el.onclick = () => drawer.open("syndicate:" + el.dataset.syn);
   const back = view.querySelector("[data-show-game]");
   if (back) {

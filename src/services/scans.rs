@@ -505,6 +505,8 @@ impl ScanService {
                     .collect(),
                 best: best.clone(),
                 account,
+                id: None,
+                picked: None,
             };
             let db = Arc::clone(&self.db);
             if let Ok(Err(e)) = blocking(move || db.record_reward(&entry)).await {

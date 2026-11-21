@@ -23,6 +23,18 @@ jobs:
       - name: Test
         run: cargo test
 
+      # A build without the memory scan must not be able to open or read another process: none of
+      # those calls may be among the exe's imports.
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Build without the memory scan
+        shell: powershell
+        run: |
+          cargo build --release --no-default-features --target-dir target-nomemscan
+          $imports = dumpbin /imports target-nomemscan\release\warframeproject.exe | Out-String
+          $found = @("OpenProcess", "ReadProcessMemory", "VirtualQueryEx", "CreateToolhelp32Snapshot", "Process32FirstW") |
+            Where-Object { $imports -match "\b$_\b" }
+          if ($found) { throw "a build without the memory scan imports: $($found -join ', ')" }
+
       # The OCR program goes into the exe, so Windows users have nothing to install.
       - uses: msys2/setup-msys2@v2
         with:

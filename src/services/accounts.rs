@@ -27,7 +27,7 @@ use crate::eelog::{self, DuviriOffers};
 use crate::market::Market;
 use crate::memscan;
 use crate::notifier;
-use crate::sources::{self, Inventory, Profile};
+use crate::sources::{self, Delta, Inventory, Profile};
 use crate::views::View;
 use crate::{UserError, net, now, tasks};
 
@@ -330,7 +330,11 @@ impl AccountService {
     pub fn view_of(&self, key: Option<&str>) -> View {
         let d = self.data.read();
         let acc = key.and_then(|k| d.get(k));
-        let inv = acc.and_then(|a| a.inventory.clone());
+        let inv = acc.and_then(|a| {
+            let inv = a.inventory.as_ref()?;
+            // What was picked or built since the read goes on top of it.
+            Some(if a.deltas.is_empty() { Arc::clone(inv) } else { Arc::new(inv.with_deltas(&a.deltas)) })
+        });
         let foundry =
             inv.as_ref().map_or_else(HashSet::new, |i| i.foundry.iter().filter_map(|f| f.recipe.clone()).collect());
         View {
@@ -883,6 +887,12 @@ impl AccountService {
             if let Err(e) = self.db.save_inventory(key, &inv) {
                 eprintln!("could not save the inventory: {e:#}");
             }
+            // The read includes what was picked or built before it.
+            let as_of = inv.as_of();
+            if let Err(e) = self.db.settle_deltas(key, as_of) {
+                eprintln!("could not settle the inventory's changes: {e:#}");
+            }
+            acc.deltas.retain(|c| c.t > as_of);
             acc.inventory = Some(Arc::clone(&inv));
         }
         let equipment: i64 = inv.equipment.values().map(|e| e.count).sum();
@@ -985,6 +995,72 @@ impl AccountService {
         d.save(&self.db);
         drop(d);
         // Hand-set counts, pins and tasks all show on the pages and the farming board.
+        self.bus.signal(Topic::Inventory);
+        self.bus.signal(Topic::Tasks);
+        Ok(())
+    }
+
+    /// The player says which reward of a screen they picked (`None`: none, undoing an earlier
+    /// pick). The pick is added to the inventory of the account the screen was read for, until a
+    /// read includes it.
+    pub fn pick_reward(&self, id: i64, name: Option<&str>) -> Result<()> {
+        let entry = self.db.reward(id)?.ok_or_else(|| UserError::new("That reward screen is not in the history."))?;
+        let key = entry
+            .account
+            .clone()
+            .or_else(|| self.active_key())
+            .ok_or_else(|| UserError::new("No account to add the reward to."))?;
+        let deltas = match name {
+            None => Vec::new(),
+            Some(name) => {
+                let reward = entry
+                    .drops
+                    .iter()
+                    .find(|r| r.name == name)
+                    .ok_or_else(|| UserError::new(format!("{name} was not on that reward screen.")))?;
+                vec![Delta {
+                    t: entry.t,
+                    kind: "pick".into(),
+                    uid: reward.uid.clone(),
+                    change: 1,
+                    equipment: false,
+                    reward: Some(id),
+                }]
+            }
+        };
+        self.db.set_pick(id, &key, name, &deltas)?;
+        self.reload_deltas(&key)?;
+        self.bus.signal(Topic::History);
+        Ok(())
+    }
+
+    /// "Mark built": the item is owned, and what building it took is gone from the inventory
+    /// (or, when it was in the foundry, its foundry entry is collected).
+    pub fn mark_built(&self, uid: &str) -> Result<()> {
+        let view = self.view();
+        let key = self.active_key().ok_or_else(|| UserError::new("No account to mark it built for."))?;
+        if view.inv.is_none() {
+            return Err(UserError::new("Builds can be marked once an inventory has been read.").into());
+        }
+        let built = crate::tasks::built(&view, uid, now()).map_err(UserError::new)?;
+        self.db.add_deltas(&key, &built.deltas)?;
+        // Parts counted by hand are counted down by hand: the inventory does not hold them.
+        if !built.hand_counts.is_empty() {
+            self.edit_manual(|m| {
+                for (part, n) in &built.hand_counts {
+                    m.counts.insert(part.clone(), (*n, now()));
+                }
+            })?;
+        }
+        self.reload_deltas(&key)?;
+        Ok(())
+    }
+
+    fn reload_deltas(&self, key: &str) -> Result<()> {
+        let deltas = self.db.deltas(key)?;
+        if let Some(acc) = self.data.write().get_mut(key) {
+            acc.deltas = deltas;
+        }
         self.bus.signal(Topic::Inventory);
         self.bus.signal(Topic::Tasks);
         Ok(())

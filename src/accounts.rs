@@ -106,6 +106,9 @@ pub struct Account {
     pub profile: Option<Arc<Profile>>,
     #[serde(skip)]
     pub inventory: Option<Arc<Inventory>>,
+    /// Changes made since the inventory was read (`sources::Delta`), oldest first.
+    #[serde(skip)]
+    pub deltas: Vec<crate::sources::Delta>,
     #[serde(skip)]
     pub manual: Manual,
     /// Ids seen in EE.log while this account was logged in.

@@ -22,4 +22,10 @@ pub struct Entry {
     /// none and are shown for every account.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// The database row (absent in the files of older versions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<i64>,
+    /// The reward the player said they picked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picked: Option<String>,
 }

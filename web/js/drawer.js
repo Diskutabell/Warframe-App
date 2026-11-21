@@ -380,6 +380,7 @@ function item(x) {
     <div class="row" style="margin-top:12px">
       <button data-mastered="${x.manual ? 0 : 1}">${icon("check")} ${x.manual ? "Unmark as mastered" : "Mark as mastered"}</button>
       ${x.task ? taskButton(x.task) : ""}
+      ${x.parts.length ? `<button data-built title="${x.building ? "Collect it from the foundry" : "Takes its parts and resources from your counts"} until the next inventory read">${icon("foundry")} Mark built</button>` : ""}
       <span class="muted" style="font-size:13px">${x.manual ? "Marked by hand." : "If the profile is out of date."}</span>
     </div>
     ${acquisition(x.name, x.drops, x.dropCoverage)}
@@ -452,6 +453,10 @@ function wire(d, x, version) {
   const board = d.querySelector("[data-board]");
   if (board) board.onclick = async () => {
     if (await setOnBoard(board.dataset.uid, board.dataset.board === "1")) refresh();
+  };
+  const built = d.querySelector("[data-built]");
+  if (built) built.onclick = async () => {
+    if (await act("foundry/built", { uid: x.uid }, `${x.name} marked built`)) refresh();
   };
   const m = d.querySelector("[data-mastered]");
   if (m) m.onclick = async () => {

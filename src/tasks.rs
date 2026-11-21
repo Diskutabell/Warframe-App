@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 
 use crate::accounts::Task;
 use crate::gamedata::{self, ComponentKind, Item, PartRecipe};
+use crate::sources::Delta;
 use crate::views::{View, match_rank};
 
 /// What a task can be about.
@@ -205,6 +206,72 @@ fn final_recipe<'a>(view: &'a View, it: &Item) -> Option<&'a PartRecipe> {
             .filter_map(|u| view.cat.part_recipes.get(u))
             .find(|r| r.result == it.uid)
     })
+}
+
+/// What marking an item built changes: the inventory's changes, and the parts counted by hand
+/// with their new counts.
+pub struct Built {
+    pub deltas: Vec<Delta>,
+    pub hand_counts: Vec<(String, i64)>,
+}
+
+/// Marking `uid` built at `t`. Built in the foundry: its entry there is collected (the game took
+/// the parts when the build started). Otherwise every part, consumed item and resource the build
+/// takes is taken from what is held - crafted parts before blueprints, never below zero - and
+/// the item is owned once more.
+pub fn built(view: &View, uid: &str, t: f64) -> Result<Built, String> {
+    let it = view.cat.items.get(uid).ok_or_else(|| "Only equipment can be marked built.".to_string())?;
+    let change = |kind: &str, uid: &str, change: i64, equipment: bool| Delta {
+        t,
+        kind: kind.into(),
+        uid: uid.into(),
+        change,
+        equipment,
+        reward: None,
+    };
+    let mut out = Built { deltas: vec![change("built", &it.uid, 1, true)], hand_counts: Vec::new() };
+    // The main blueprint: the one whose recipe makes the item.
+    let main = it.components.iter().filter(|c| c.kind == ComponentKind::Part).find_map(|c| {
+        view.twins(&c.uid).into_iter().find(|u| view.cat.part_recipes.get(*u).is_some_and(|r| r.result == it.uid))
+    });
+    let in_foundry = |u: &str| view.inv.iter().flat_map(|i| &i.foundry).any(|f| f.recipe.as_deref() == Some(u));
+    if let Some(main) = main.filter(|m| in_foundry(m)) {
+        out.deltas.push(change("claimed", main, -1, false));
+        return Ok(out);
+    }
+    for c in &it.components {
+        match c.kind {
+            ComponentKind::Part if view.hand_counted(&c.uid) => {
+                out.hand_counts.push((c.uid.clone(), (view.count(&c.uid) - c.count).max(0)));
+            }
+            ComponentKind::Part => {
+                // The crafted part first: that is what a build consumes.
+                let mut twins = view.twins(&c.uid);
+                twins.sort_by_key(|u| !u.ends_with("Component"));
+                let mut left = c.count;
+                for u in twins {
+                    let take = left.min(view.held_stack(u));
+                    if take > 0 {
+                        out.deltas.push(change("built", u, -take, false));
+                        left -= take;
+                    }
+                }
+            }
+            ComponentKind::Item => {
+                let take = c.count.min(view.owned(&c.uid).unwrap_or(0));
+                if take > 0 {
+                    out.deltas.push(change("built", &c.uid, -take, true));
+                }
+            }
+            ComponentKind::Resource => {
+                let take = c.count.min(view.held_stack(&c.uid));
+                if take > 0 {
+                    out.deltas.push(change("built", &c.uid, -take, false));
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The crafted half of a part that drops as a blueprint: of a part and its twin, the one named
@@ -673,6 +740,39 @@ mod tests {
         fresh.imported = 30.0;
         v.inv = Some(Arc::new(fresh));
         assert_eq!(v.count(CHASSIS), 2);
+    }
+
+    #[test]
+    fn marking_a_build_done_takes_its_parts_or_collects_it_from_the_foundry() {
+        // A crafted chassis and a chassis blueprint: the crafted one goes, the blueprint stays.
+        let held = inventory(&[(BP, 1), (CHASSIS, 1), (CHASSIS_BP, 1), (CELL, 3)]);
+        let v = view(Some(held.clone()), &[]);
+        let b = built(&v, ASH, 50.0).unwrap();
+        let after = held.with_deltas(&b.deltas);
+        assert_eq!(after.equipment.get(ASH).map(|e| e.count), Some(1));
+        assert_eq!(after.counts.get(CHASSIS), None);
+        assert_eq!(after.counts.get(CHASSIS_BP), Some(&1));
+        assert_eq!(after.counts.get(BP), None);
+        assert_eq!(after.counts.get(CELL), Some(&1));
+        // Short of cells: what is there goes, nothing below zero.
+        let held = inventory(&[(BP, 1), (CHASSIS, 1), (CELL, 1)]);
+        let after = held.with_deltas(&built(&view(Some(held.clone()), &[]), ASH, 50.0).unwrap().deltas);
+        assert_eq!(after.counts.get(CELL), None);
+        // Building in the foundry: only collected - the game took the parts when it started.
+        let mut held = inventory(&[(CELL, 3)]);
+        held.foundry.push(FoundryEntry { recipe: Some(BP.into()), done: None });
+        let b = built(&view(Some(held.clone()), &[]), ASH, 50.0).unwrap();
+        let after = held.with_deltas(&b.deltas);
+        assert!(after.foundry.is_empty());
+        assert_eq!(after.counts.get(CELL), Some(&3));
+        assert_eq!(after.equipment.get(ASH).map(|e| e.count), Some(1));
+        // A part counted by hand is counted down by hand.
+        let mut v = view(Some(inventory(&[(BP, 1)])), &[]);
+        let mut manual = Manual::default();
+        manual.counts.insert(CHASSIS.into(), (2, 20.0));
+        v.manual = Arc::new(manual);
+        assert_eq!(built(&v, ASH, 50.0).unwrap().hand_counts, [(CHASSIS.to_string(), 1)]);
+        assert!(built(&v, CELL, 50.0).is_err(), "only equipment is built");
     }
 
     #[test]

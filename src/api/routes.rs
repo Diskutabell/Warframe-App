@@ -107,6 +107,19 @@ pub fn api(engine: Engine, stop: CancellationToken) -> Router<Engine> {
         )
         .route("/api/manual/task", post(manual_task))
         .route(
+            "/api/history/pick",
+            post(|s: State<Engine>, JsonBody(b): Body| {
+                change(s, move |e| {
+                    let id = b["id"].as_i64().ok_or_else(|| UserError::new("id is missing"))?;
+                    e.accounts.pick_reward(id, b["name"].as_str())
+                })
+            }),
+        )
+        .route(
+            "/api/foundry/built",
+            post(|s: State<Engine>, JsonBody(b): Body| change(s, move |e| e.accounts.mark_built(&uid(&b)?))),
+        )
+        .route(
             "/api/manual/mastered",
             post(|s: State<Engine>, JsonBody(b): Body| {
                 change(s, move |e| e.accounts.set_manual_mastered(&uid(&b)?, b["mastered"].as_bool().unwrap_or(false)))
