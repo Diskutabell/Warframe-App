@@ -6,7 +6,7 @@ use std::path::PathBuf;
 #[cfg(unix)]
 use std::process::Command;
 #[cfg(unix)]
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(unix)]
 use std::time::Duration;
 
@@ -117,11 +117,22 @@ pub fn capture(setting: ScreenshotTool) -> Result<Rgb> {
         );
     };
     if tool == ScreenshotTool::Grim {
+        let output = compositor::game_output();
+        // What grim does, without starting it; grim itself when that fails.
+        match super::screencopy::capture(output.as_deref()) {
+            Ok(frame) => return Ok(frame),
+            Err(e) => {
+                static SAID: AtomicBool = AtomicBool::new(false);
+                if !SAID.swap(true, Ordering::Relaxed) {
+                    eprintln!("capturing through grim instead: {e:#}");
+                }
+            }
+        }
         // PPM straight to stdout: PNG compression of a 2560x1440 frame alone took ~1 s.
         let mut cmd = Command::new("grim");
         cmd.args(["-t", "ppm"]);
-        if let Some(output) = compositor::game_output() {
-            cmd.args(["-o", &output]);
+        if let Some(output) = &output {
+            cmd.args(["-o", output]);
         }
         cmd.arg("-");
         let out = process::run(&mut cmd, None, TIMEOUT)?;

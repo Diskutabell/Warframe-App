@@ -7,6 +7,8 @@ pub mod image;
 pub mod matcher;
 pub mod reward;
 pub mod riven;
+#[cfg(unix)]
+mod screencopy;
 pub mod screenshot;
 pub mod tesseract;
 

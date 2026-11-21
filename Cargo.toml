@@ -53,6 +53,9 @@ gtk = "0.18"
 # v0_6: keyboard modes and is_supported(); nixpkgs ships gtk-layer-shell 0.10.
 gtk-layer-shell = { version = "0.8", features = ["v0_6"] }
 libc = "0.2"
+# Screen capture straight from the compositor (wlr-screencopy), without starting grim.
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
 
 # Windows: tao for the windows, wry for the page (in Edge's WebView2), the Win32 API for the rest.
