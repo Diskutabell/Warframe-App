@@ -7,7 +7,6 @@
 //! in the window (counts, pins, imports, a profile refresh) to `active`.
 
 use std::collections::{HashSet, VecDeque};
-use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,6 +22,7 @@ use super::settings::SettingsStore;
 use super::watched::Watched;
 use crate::accounts::{self, Account, Evidence};
 use crate::bus::{Bus, Topic};
+use crate::db::Db;
 use crate::eelog::{self, DuviriOffers};
 use crate::market::Market;
 use crate::memscan;
@@ -117,8 +117,8 @@ impl Data {
         key
     }
 
-    fn save(&self) {
-        if let Err(e) = accounts::save(&self.active, self.switched, self.profile_requests, &self.accounts) {
+    fn save(&self, db: &Db) {
+        if let Err(e) = db.save_registry(&self.active, self.switched, self.profile_requests, &self.accounts) {
             eprintln!("could not save the account list: {e:#}");
         }
     }
@@ -262,6 +262,7 @@ pub struct AccountsSummary {
 
 pub struct AccountService {
     data: Watched<Data>,
+    db: Arc<Db>,
     settings: Arc<SettingsStore>,
     catalog: Arc<CatalogStore>,
     market: Arc<Market>,
@@ -275,14 +276,18 @@ async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) 
 }
 
 impl AccountService {
+    /// The accounts kept in `db`; `notes` (what opening the database had to say) go to the
+    /// activity list.
     pub fn new(
+        db: Arc<Db>,
+        notes: Vec<String>,
         settings: Arc<SettingsStore>,
         catalog: Arc<CatalogStore>,
         market: Arc<Market>,
         bus: &Bus,
         stop: CancellationToken,
-    ) -> Arc<AccountService> {
-        let (registry, notes) = accounts::load();
+    ) -> anyhow::Result<Arc<AccountService>> {
+        let registry = db.load_accounts()?;
         let mut data = Data {
             accounts: registry.accounts,
             active: registry.active,
@@ -302,7 +307,15 @@ impl AccountService {
         for note in notes {
             data.push_event(note, "info");
         }
-        Arc::new(AccountService { data: Watched::new(data, bus), settings, catalog, market, bus: bus.clone(), stop })
+        Ok(Arc::new(AccountService {
+            data: Watched::new(data, bus),
+            db,
+            settings,
+            catalog,
+            market,
+            bus: bus.clone(),
+            stop,
+        }))
     }
 
     /// Adds a line to the activity list.
@@ -454,7 +467,7 @@ impl AccountService {
                     acc.seen = Some(now());
                 }
             }
-            d.save();
+            d.save(&self.db);
             (key, switched)
         };
         if live {
@@ -486,7 +499,7 @@ impl AccountService {
         d.switched = now();
         let name = d.name_of(&game);
         d.push_event(format!("Showing {name}, the account the game is logged in to"), "info");
-        d.save();
+        d.save(&self.db);
         drop(d);
         self.bus.signal(Topic::Account);
     }
@@ -546,7 +559,7 @@ impl AccountService {
         if let Some(acc) = d.get_mut(&game) {
             acc.badge = Some((lo, hi));
         }
-        d.save();
+        d.save(&self.db);
     }
 
     /// What Duviri offers the logged-in account, rolled anew.
@@ -563,7 +576,7 @@ impl AccountService {
             return;
         }
         acc.duviri = Some(offers);
-        d.save();
+        d.save(&self.db);
     }
 
     /// Links `id` to an account. An id belongs to one account: a link made now wins over an
@@ -589,7 +602,7 @@ impl AccountService {
             if changed {
                 d.push_event(format!("Account linked: {name}"), "info");
             }
-            d.save();
+            d.save(&self.db);
             changed
         };
         if changed {
@@ -732,7 +745,7 @@ impl AccountService {
             return Err(UserError::new(format!("{why} Try again in {minutes}:{seconds:02}.")).into());
         }
         d.profile_requests.requested = now();
-        d.save();
+        d.save(&self.db);
         Ok(())
     }
 
@@ -786,7 +799,7 @@ impl AccountService {
                 "DE's profile service refused a request; no profile is asked for during the next hour".into(),
                 "warn",
             );
-            d.save();
+            d.save(&self.db);
         }
     }
 
@@ -836,13 +849,13 @@ impl AccountService {
             }
             acc.profile = Some(Arc::clone(&prof));
             acc.profile_error = None;
-            if let Err(e) = acc.write("profile.json", &*prof) {
+            if let Err(e) = self.db.save_profile(&target, &prof) {
                 eprintln!("could not save the profile: {e:#}");
             }
         }
         let name = d.name_of(&target);
         d.push_event(format!("Profile updated: {name}, {} items with mastery XP", prof.xp.len()), "info");
-        d.save();
+        d.save(&self.db);
         drop(d);
         self.bus.signal(Topic::Inventory);
         prof
@@ -867,7 +880,7 @@ impl AccountService {
         let mut d = self.data.write();
         let name = d.name_of(key);
         if let Some(acc) = d.get_mut(key) {
-            if let Err(e) = acc.write("inventory.json", &*inv) {
+            if let Err(e) = self.db.save_inventory(key, &inv) {
                 eprintln!("could not save the inventory: {e:#}");
             }
             acc.inventory = Some(Arc::clone(&inv));
@@ -930,12 +943,9 @@ impl AccountService {
         if let Some(acc) = d.get_mut(&key) {
             acc.inventory = None;
         }
-        let _ = fs::remove_file(accounts::dir(&key).join("inventory.json"));
-        let sections = accounts::dir(&key).join("memscan_sections.json");
-        if let Err(e) = fs::remove_file(&sections) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                d.push_event(format!("Could not reset memory scan expectations: {e}"), "warn");
-            }
+        // The memory scan's expectations go with it: the next captures teach them anew.
+        if let Err(e) = self.db.delete_inventory(&key) {
+            d.push_event(format!("Could not forget the inventory: {e:#}"), "warn");
         }
         drop(d);
         self.bus.signal(Topic::Inventory);
@@ -944,6 +954,17 @@ impl AccountService {
     /// Which capture of a memory scan belongs to the account logged in (`game`).
     pub fn choose_capture(&self, game: &str, sections: &memscan::Sections, captures: Vec<Value>) -> CaptureChoice {
         choose_capture(&self.data.read(), game, sections, captures)
+    }
+
+    /// What the memory scan has learnt to expect of an account's captures.
+    pub fn memscan_sections(&self, key: &str) -> memscan::Sections {
+        self.db.memscan_sections(key).unwrap_or_default()
+    }
+
+    pub fn save_memscan_sections(&self, key: &str, sections: &memscan::Sections) {
+        if let Err(e) = self.db.save_memscan_sections(key, sections) {
+            eprintln!("could not save memory scan expectations: {e:#}");
+        }
     }
 
     /// The sync time and section count of an account's inventory, to tell a capture of the same
@@ -960,8 +981,8 @@ impl AccountService {
         let key = d.active_or_new();
         let acc = d.get_mut(&key).ok_or_else(|| UserError::new("No account to save this for."))?;
         change(&mut acc.manual);
-        acc.write("manual.json", &acc.manual)?;
-        d.save();
+        self.db.save_manual(&key, &acc.manual)?;
+        d.save(&self.db);
         drop(d);
         // Hand-set counts, pins and tasks all show on the pages and the farming board.
         self.bus.signal(Topic::Inventory);
@@ -1071,7 +1092,7 @@ impl AccountService {
             if d.active.as_deref() != Some(key) {
                 d.active = Some(key.to_string());
                 d.switched = now();
-                d.save();
+                d.save(&self.db);
             }
             due
         };
@@ -1098,9 +1119,13 @@ impl AccountService {
             d.switched = now();
         }
         d.profile_queue.retain(|k| k != key);
+        if let Err(e) = self.db.delete_account(key) {
+            eprintln!("could not delete {key}'s data: {e:#}");
+        }
+        // An older version's files of it too, so it does not come back on a downgrade.
         accounts::delete(key);
         d.push_event(format!("Forgot {} and deleted its data", gone.name), "info");
-        d.save();
+        d.save(&self.db);
         drop(d);
         self.bus.signal(Topic::Account);
         Ok(())

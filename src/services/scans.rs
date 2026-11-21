@@ -19,6 +19,7 @@ use super::lock;
 use super::settings::SettingsStore;
 use super::shell::{Shell, UiEvent};
 use crate::bus::{Bus, Topic};
+use crate::db::Db;
 use crate::market::Market;
 use crate::ocr::image::Rgb;
 use crate::ocr::matcher::RewardMatch;
@@ -231,6 +232,7 @@ enum Turn {
 }
 
 pub struct ScanService {
+    db: Arc<Db>,
     settings: Arc<SettingsStore>,
     catalog: Arc<CatalogStore>,
     accounts: Arc<AccountService>,
@@ -276,7 +278,11 @@ fn matches_json(r: &RewardResult) -> Value {
 }
 
 impl ScanService {
+    // The scans read the screen for the accounts, price for the market and draw through the
+    // shell: every one of these is a service of its own.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        db: Arc<Db>,
         settings: Arc<SettingsStore>,
         catalog: Arc<CatalogStore>,
         accounts: Arc<AccountService>,
@@ -286,6 +292,7 @@ impl ScanService {
         bus: &Bus,
     ) -> ScanService {
         ScanService {
+            db,
             settings,
             catalog,
             accounts,
@@ -499,7 +506,10 @@ impl ScanService {
                 best: best.clone(),
                 account,
             };
-            let _ = blocking(move || history::record(entry)).await;
+            let db = Arc::clone(&self.db);
+            if let Ok(Err(e)) = blocking(move || db.record_reward(&entry)).await {
+                eprintln!("could not record the reward screen: {e:#}");
+            }
             self.bus.signal(Topic::History);
             self.bus.state_changed();
         }

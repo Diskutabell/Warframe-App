@@ -14,6 +14,7 @@ mod art;
 mod bus;
 mod clock;
 mod config;
+mod db;
 mod difflib;
 mod drops;
 mod eelog;
@@ -211,7 +212,7 @@ fn run(settings: config::Settings, browser: bool, headless: bool, offline: bool)
     // The engine's background tasks are spawned onto the runtime from here on, also from the
     // desktop shell's callbacks on this thread.
     let _runtime = runtime.enter();
-    let state = app::App::new(settings, port);
+    let state = app::App::new(settings, port)?;
     state.start();
     let server = runtime.spawn(api::serve(listener, Arc::clone(&state), state.stop.clone()));
     runtime.spawn(quit_on_signal(Arc::clone(&state)));

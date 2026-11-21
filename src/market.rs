@@ -2,7 +2,6 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -15,6 +14,7 @@ use serde_json::{Value, json};
 
 use crate::bus::{Bus, Topic};
 use crate::config::{self, Platform};
+use crate::db::Db;
 use crate::services::settings::SettingsStore;
 use crate::{net, now};
 
@@ -125,6 +125,8 @@ struct PriceCache {
 
 pub struct Market {
     settings: Arc<SettingsStore>,
+    /// Where the prices are kept (with a sparse history).
+    db: Arc<Db>,
     /// Fresh prices are announced here, so the pages showing them can redraw.
     bus: Bus,
     items: RwLock<Items>,
@@ -137,7 +139,8 @@ pub struct Market {
     /// Wakes the worker when a slug is queued.
     wake: Notify,
     next_slot: Mutex<Instant>,
-    dirty: AtomicBool,
+    /// Prices fetched since the last save, by slug (all of the cache's platform).
+    dirty: Mutex<HashSet<String>>,
     pub error: Mutex<Option<String>>,
 }
 
@@ -146,13 +149,6 @@ fn valid_slug(slug: &str) -> bool {
     !slug.is_empty()
         && slug.len() <= 128
         && slug.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-}
-
-fn prices_file(platform: Platform) -> PathBuf {
-    match platform {
-        Platform::Pc => config::dirs().cache.join("prices.json"),
-        other => config::dirs().cache.join(format!("prices_{}.json", other.as_str())),
-    }
 }
 
 fn items_file() -> PathBuf {
@@ -229,11 +225,15 @@ fn reserve_slot(next: &Mutex<Instant>, deadline: Option<Instant>) -> anyhow::Res
 impl Market {
     /// The market with the prices cached for the current platform. Nothing is fetched until
     /// `run` works the queue.
-    pub fn new(settings: Arc<SettingsStore>, bus: Bus) -> Arc<Market> {
+    pub fn new(settings: Arc<SettingsStore>, db: Arc<Db>, bus: Bus) -> Arc<Market> {
         let platform = settings.get().platform;
-        let entries = config::read_json(&prices_file(platform)).unwrap_or_default();
+        let entries = db.load_prices(platform).unwrap_or_else(|e| {
+            eprintln!("could not read the kept prices: {e:#}");
+            HashMap::new()
+        });
         Arc::new(Market {
             settings,
+            db,
             bus,
             items: RwLock::new(Items::default()),
             prices: Mutex::new(PriceCache { platform, entries }),
@@ -243,7 +243,7 @@ impl Market {
             queue: Mutex::new(Queue::default()),
             wake: Notify::new(),
             next_slot: Mutex::new(Instant::now()),
-            dirty: AtomicBool::new(false),
+            dirty: Mutex::new(HashSet::new()),
             error: Mutex::new(None),
         })
     }
@@ -255,6 +255,7 @@ impl Market {
         let settings = Arc::new(SettingsStore::new(crate::config::Settings::default(), &bus));
         Arc::new(Market {
             settings,
+            db: Arc::new(Db::memory()),
             bus,
             items: RwLock::new(Items::default()),
             prices: Mutex::new(PriceCache { platform: Platform::Pc, entries: HashMap::new() }),
@@ -264,7 +265,7 @@ impl Market {
             queue: Mutex::new(Queue::default()),
             wake: Notify::new(),
             next_slot: Mutex::new(Instant::now()),
-            dirty: AtomicBool::new(false),
+            dirty: Mutex::new(HashSet::new()),
             error: Mutex::new(None),
         })
     }
@@ -284,7 +285,7 @@ impl Market {
             p.platform
         };
         self.save_if_dirty();
-        let loaded: HashMap<String, Price> = config::read_json(&prices_file(current)).unwrap_or_default();
+        let loaded: HashMap<String, Price> = self.db.load_prices(current).unwrap_or_default();
         let mut p = self.prices.lock().unwrap_or_else(|e| e.into_inner());
         if p.platform == old && current == self.platform() {
             p.platform = current;
@@ -486,7 +487,7 @@ impl Market {
             let stored = cache.platform == platform;
             if stored {
                 cache.entries.insert(slug.to_string(), entry.clone());
-                self.dirty.store(true, Ordering::Relaxed);
+                self.dirty.lock().unwrap_or_else(|e| e.into_inner()).insert(slug.to_string());
             }
             stored
         };
@@ -496,17 +497,23 @@ impl Market {
         Some(entry)
     }
 
+    /// Keeps the prices fetched since the last save. Blocking (the database).
     pub fn save_if_dirty(&self) {
         let _guard = self.save_lock.lock().unwrap_or_else(|e| e.into_inner());
-        if self.dirty.swap(false, Ordering::Relaxed) {
-            let (platform, snapshot) = {
-                let cache = self.prices.lock().unwrap_or_else(|e| e.into_inner());
-                (cache.platform, cache.entries.clone())
-            };
-            if let Err(e) = config::write_json(&prices_file(platform), &snapshot) {
-                self.dirty.store(true, Ordering::Relaxed);
-                eprintln!("could not save market prices: {e:#}");
-            }
+        let slugs = std::mem::take(&mut *self.dirty.lock().unwrap_or_else(|e| e.into_inner()));
+        if slugs.is_empty() {
+            return;
+        }
+        let (platform, changed) = {
+            let cache = self.prices.lock().unwrap_or_else(|e| e.into_inner());
+            let changed: Vec<(String, Price)> =
+                slugs.iter().filter_map(|s| cache.entries.get(s).map(|p| (s.clone(), p.clone()))).collect();
+            (cache.platform, changed)
+        };
+        if let Err(e) = self.db.save_prices(platform, &changed) {
+            // Tried again at the next save.
+            self.dirty.lock().unwrap_or_else(|e| e.into_inner()).extend(slugs);
+            eprintln!("could not save market prices: {e:#}");
         }
     }
 
@@ -771,11 +778,5 @@ mod tests {
         assert_eq!(q.pop().as_deref(), Some("ash_prime_set"));
         assert_eq!(q.pop(), None);
         assert!(q.queued_urgent.is_empty() && q.queued_normal.is_empty());
-    }
-
-    #[test]
-    fn price_cache_files_are_separate_per_platform() {
-        assert_ne!(prices_file(Platform::Pc), prices_file(Platform::Ps4));
-        assert_ne!(prices_file(Platform::Ps4), prices_file(Platform::Xb1));
     }
 }

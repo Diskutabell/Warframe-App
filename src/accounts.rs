@@ -10,7 +10,7 @@
 //! not belong to the profile's account aside instead of adopting it.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use indexmap::IndexMap;
@@ -150,9 +150,9 @@ impl Account {
         out
     }
 
-    /// Writes one of the account's files.
-    pub fn write<T: Serialize + ?Sized>(&self, file: &str, value: &T) -> anyhow::Result<()> {
-        let dir = dir(&self.key);
+    /// Writes one of the account's files in an older version's data folder `data`.
+    fn write_in<T: Serialize + ?Sized>(&self, data: &Path, file: &str, value: &T) -> anyhow::Result<()> {
+        let dir = dir_in(data, &self.key);
         fs::create_dir_all(&dir)?;
         config::write_json(&dir.join(file), value)
     }
@@ -171,7 +171,7 @@ pub struct ProfileTimes {
     pub paused_until: f64,
 }
 
-/// `accounts.json` as read.
+/// The account list: `accounts.json` as older versions wrote it, and as the database keeps it.
 #[derive(Default, Deserialize)]
 pub struct Registry {
     /// The account the window shows.
@@ -185,12 +185,18 @@ pub struct Registry {
     pub accounts: Vec<Account>,
 }
 
-fn registry_file() -> PathBuf {
-    config::dirs().data.join("accounts.json")
+fn registry_file_in(data: &Path) -> PathBuf {
+    data.join("accounts.json")
 }
 
+/// An account's folder of an older version (its JSON files) under the data folder `data`.
+pub fn dir_in(data: &Path, key: &str) -> PathBuf {
+    data.join("accounts").join(key)
+}
+
+/// An account's folder of an older version (its JSON files).
 pub fn dir(key: &str) -> PathBuf {
-    config::dirs().data.join("accounts").join(key)
+    dir_in(&config::dirs().data, key)
 }
 
 /// `accounts.json` as written: the same fields as `Registry`, borrowed.
@@ -202,24 +208,27 @@ struct RegistryRef<'a> {
     accounts: &'a [Account],
 }
 
-pub fn save(
+fn save_in(
+    data: &Path,
     active: &Option<String>,
     switched: f64,
     profile_requests: ProfileTimes,
     accounts: &[Account],
 ) -> anyhow::Result<()> {
-    config::write_json_pretty(&registry_file(), &RegistryRef { active, switched, profile_requests, accounts })
+    config::write_json_pretty(&registry_file_in(data), &RegistryRef { active, switched, profile_requests, accounts })
 }
 
-/// The accounts with their data, and what happened while loading them (for the activity list).
-pub fn load() -> (Registry, Vec<String>) {
+/// The accounts an older version kept in the JSON files of its data folder `data`, with their
+/// data, and what happened while loading them (for the activity list). Only the import into the
+/// database reads them now.
+pub fn load_from(data: &Path) -> (Registry, Vec<String>) {
     let mut notes = Vec::new();
-    let file = registry_file();
+    let file = registry_file_in(data);
     let mut registry = match read_file::<Registry>(&file) {
         Read::Found(r) => r,
         Read::Missing => {
-            let r = migrate(&mut notes);
-            if let Err(e) = save(&r.active, r.switched, r.profile_requests, &r.accounts) {
+            let r = migrate(data, &mut notes);
+            if let Err(e) = save_in(data, &r.active, r.switched, r.profile_requests, &r.accounts) {
                 notes.push(format!("Could not save the account list: {e:#}"));
             }
             r
@@ -232,15 +241,15 @@ pub fn load() -> (Registry, Vec<String>) {
                 "The account list {why}; it was rebuilt from the accounts' folders{}.",
                 kept.map_or_else(String::new, |k| format!(" (the old one is kept as {})", k.display()))
             ));
-            let r = rebuild();
-            if let Err(e) = save(&r.active, r.switched, r.profile_requests, &r.accounts) {
+            let r = rebuild(data);
+            if let Err(e) = save_in(data, &r.active, r.switched, r.profile_requests, &r.accounts) {
                 notes.push(format!("Could not save the account list: {e:#}"));
             }
             r
         }
     };
     for acc in &mut registry.accounts {
-        let folder = dir(&acc.key);
+        let folder = dir_in(data, &acc.key);
         acc.profile = config::read_json::<Profile>(&folder.join("profile.json")).map(Arc::new);
         acc.inventory = config::read_json::<Inventory>(&folder.join("inventory.json")).map(Arc::new);
         // Hand-set counts, pins and tasks exist nowhere else: a file that cannot be read is set
@@ -260,7 +269,7 @@ pub fn load() -> (Registry, Vec<String>) {
             }
         };
         if acc.manual.adopt_goals() {
-            if let Err(e) = acc.write("manual.json", &acc.manual) {
+            if let Err(e) = acc.write_in(data, "manual.json", &acc.manual) {
                 notes.push(format!("Could not save {}'s farming tasks: {e:#}", acc.name));
             }
         }
@@ -298,8 +307,8 @@ fn set_aside(path: &std::path::Path) -> Option<PathBuf> {
 /// The account list made again from the accounts' folders: each folder is an account, named by
 /// its saved profile (else by the folder). When DE's profile service was last asked is lost
 /// with the list, so it counts as asked just now: no request goes out before the cooldown.
-fn rebuild() -> Registry {
-    let mut accounts: Vec<Account> = fs::read_dir(config::dirs().data.join("accounts"))
+fn rebuild(data: &Path) -> Registry {
+    let mut accounts: Vec<Account> = fs::read_dir(data.join("accounts"))
         .into_iter()
         .flatten()
         .flatten()
@@ -377,8 +386,7 @@ pub fn same_owner(a: &IndexMap<String, i64>, b: &IndexMap<String, i64>) -> Optio
 }
 
 /// Moves the single-account layout of 0.2.0 into an account folder.
-fn migrate(notes: &mut Vec<String>) -> Registry {
-    let data = config::dirs().data.clone();
+fn migrate(data: &Path, notes: &mut Vec<String>) -> Registry {
     let legacy: Value = config::read_json(&data.join("account.json")).unwrap_or(Value::Null);
     // The account id could also be set in settings.json (since removed from the settings).
     let settings: Value = config::read_json(&config::settings_file()).unwrap_or(Value::Null);
@@ -403,7 +411,7 @@ fn migrate(notes: &mut Vec<String>) -> Registry {
     let mut acc = Account::new(new_key(&name, &[]), name);
     acc.id = id;
     acc.source = Some(if set_id.is_some() { "Settings" } else { "saved" }.to_string());
-    let folder = dir(&acc.key);
+    let folder = dir_in(data, &acc.key);
     let _ = fs::create_dir_all(&folder);
     let moved = |file: &str| {
         let _ = fs::rename(data.join(file), folder.join(file));

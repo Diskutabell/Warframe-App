@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
@@ -19,6 +19,7 @@ use tokio_util::task::TaskTracker;
 
 use crate::bus::Bus;
 use crate::config::Settings;
+use crate::db::{Db, Legacy};
 use crate::difflib::py_round;
 use crate::eelog::{self, LogEvent};
 use crate::market::Market;
@@ -34,7 +35,7 @@ use crate::services::settings::SettingsStore;
 use crate::services::shell::{Shell, UiEvent};
 use crate::services::world::WorldService;
 use crate::watch::Wakeups;
-use crate::{UserError, arbitration, compositor, history, net, now, ocr, standing, tasks, update, world};
+use crate::{UserError, arbitration, compositor, net, now, ocr, standing, tasks, update, world};
 
 /// What the summary says about the helper programs is looked up again after this long.
 const TOOLS_MAX_AGE: f64 = 30.0;
@@ -43,6 +44,8 @@ const INVENTORY_FILE_LOOK: Duration = Duration::from_secs(20);
 
 pub struct App {
     pub bus: Bus,
+    /// The app's own data (`<data>/warframeproject.db`).
+    pub db: Arc<Db>,
     /// Cancelled when the app quits: background work stops and the server shuts down.
     pub stop: CancellationToken,
     pub settings: Arc<SettingsStore>,
@@ -77,19 +80,36 @@ async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) 
 
 impl App {
     /// The engine with its saved data loaded. Must be called inside the runtime; nothing runs
-    /// until `start`.
-    pub fn new(settings: Settings, port: u16) -> Arc<App> {
+    /// until `start`. Fails only when the app's data cannot be opened: then it must not run (it
+    /// would start empty and could overwrite what is there).
+    pub fn new(settings: Settings, port: u16) -> Result<Arc<App>> {
+        let dirs = crate::config::dirs();
+        let (db, notes) =
+            Db::open(&dirs.data.join("warframeproject.db"), Legacy { data: &dirs.data, cache: &dirs.cache })
+                .context("the app's data could not be opened")?;
+        Self::with_db(settings, port, Arc::new(db), notes)
+    }
+
+    fn with_db(settings: Settings, port: u16, db: Arc<Db>, notes: Vec<String>) -> Result<Arc<App>> {
         let bus = Bus::new();
         let stop = CancellationToken::new();
         let settings = Arc::new(SettingsStore::new(settings, &bus));
         let shell = Arc::new(Shell::default());
         let catalog = Arc::new(CatalogStore::new(&bus));
-        let market = Market::new(Arc::clone(&settings), bus.clone());
-        let accounts =
-            AccountService::new(Arc::clone(&settings), Arc::clone(&catalog), Arc::clone(&market), &bus, stop.clone());
+        let market = Market::new(Arc::clone(&settings), Arc::clone(&db), bus.clone());
+        let accounts = AccountService::new(
+            Arc::clone(&db),
+            notes,
+            Arc::clone(&settings),
+            Arc::clone(&catalog),
+            Arc::clone(&market),
+            &bus,
+            stop.clone(),
+        )?;
         let world = Arc::new(WorldService::new(Arc::clone(&settings), &bus));
         let log = Arc::new(LogService::new(Arc::clone(&settings)));
         let scans = Arc::new(ScanService::new(
+            Arc::clone(&db),
             Arc::clone(&settings),
             Arc::clone(&catalog),
             Arc::clone(&accounts),
@@ -101,8 +121,9 @@ impl App {
         let memscan = Arc::new(MemscanService::new(Arc::clone(&settings), Arc::clone(&accounts), &bus, stop.clone()));
         let notifications =
             Arc::new(Notifications::new(Arc::clone(&settings), Arc::clone(&world), Arc::clone(&accounts)));
-        Arc::new(App {
+        Ok(Arc::new(App {
             bus,
+            db,
             stop,
             settings,
             shell,
@@ -121,7 +142,7 @@ impl App {
             inventory_watch: Mutex::new(None),
             started: now(),
             port,
-        })
+        }))
     }
 
     pub fn settings(&self) -> Settings {
@@ -190,10 +211,13 @@ impl App {
         if tokio::time::timeout(grace, self.tasks.wait()).await.is_err() {
             eprintln!("background work did not stop in time");
         }
-        let market = Arc::clone(&self.market);
+        let (market, db) = (Arc::clone(&self.market), Arc::clone(&self.db));
         let _ = blocking(move || {
             market.save_if_dirty();
             ocr::flush_archives(Duration::from_secs(5));
+            if let Err(e) = db.checkpoint() {
+                eprintln!("could not tidy the database: {e:#}");
+            }
         })
         .await;
     }
@@ -358,7 +382,7 @@ impl App {
         let recent = self.log.recent(8);
         let active = self.log.game_active();
         let a = self.accounts.summary();
-        let (screens, best_value) = history::totals(self.started, a.active.as_deref());
+        let (screens, best_value) = self.db.reward_totals(self.started, a.active.as_deref()).unwrap_or_default();
         let settings = self.settings.get();
         json!({
             "ready": v.cat.loaded_at.is_some(), "dataError": self.catalog.error(),
@@ -525,8 +549,8 @@ impl App {
 
     pub fn history(&self) -> Value {
         let key = self.accounts.active_key();
-        let (screens, best_value) = history::totals(self.started, key.as_deref());
-        json!({"entries": history::recent(40, key.as_deref()),
+        let (screens, best_value) = self.db.reward_totals(self.started, key.as_deref()).unwrap_or_default();
+        json!({"entries": self.db.recent_rewards(40, key.as_deref()).unwrap_or_default(),
                "session": {"since": self.started, "screens": screens, "bestValue": best_value}})
     }
 

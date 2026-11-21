@@ -20,7 +20,7 @@ use super::watched::Watched;
 use crate::bus::Bus;
 use crate::difflib::py_round;
 use crate::memscan::{self, ScanError};
-use crate::{accounts, now, sources};
+use crate::{now, sources};
 
 /// Minimum time between the starts of memory scans.
 const MEMSCAN_GAP: f64 = 10.0;
@@ -234,8 +234,7 @@ impl MemscanService {
                 "Waiting for the game's \"Logged in\" line, which says whose inventory this is.".into(),
             );
         };
-        let file = accounts::dir(&game).join("memscan_sections.json");
-        let mut sections: memscan::Sections = crate::config::read_json(&file).unwrap_or_default();
+        let mut sections = self.accounts.memscan_sections(&game);
         let choice = self.accounts.choose_capture(&game, &sections, captures);
         let obj = match (choice.chosen, choice.missing) {
             (Some(obj), _) => obj,
@@ -268,12 +267,7 @@ impl MemscanService {
         match stored {
             Ok(inv) => {
                 sections.learn(&obj);
-                let saved = std::fs::create_dir_all(accounts::dir(&game))
-                    .map_err(anyhow::Error::from)
-                    .and_then(|_| crate::config::write_json(&file, &sections));
-                if let Err(e) = saved {
-                    eprintln!("could not save memory scan expectations: {e:#}");
-                }
+                self.accounts.save_memscan_sections(&game, &sections);
                 let mut st = self.status.write();
                 st.state = "ok";
                 st.detail = None;

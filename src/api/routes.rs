@@ -40,6 +40,7 @@ pub fn api(engine: Engine, stop: CancellationToken) -> Router<Engine> {
         .route("/api/standing", get(|State(e): State<Engine>| async move { answer(e.standing().await) }))
         .route("/api/syndicate", get(syndicate))
         .route("/api/search", get(search))
+        .route("/api/price-history", get(price_history))
         .route_layer(middleware::from_fn_with_state(engine, loading_guard));
 
     let events_stop = stop.clone();
@@ -255,6 +256,15 @@ async fn item(State(e): State<Engine>, q: Query) -> ApiResult {
 
 async fn syndicate(s: State<Engine>, q: Query) -> ApiResult {
     view(s, move |e| e.syndicate(q.str("tag"))).await
+}
+
+/// An item's price history on the platform in the settings: `[{t, sell, buy}, ...]`, oldest first.
+async fn price_history(s: State<Engine>, q: Query) -> ApiResult {
+    view(s, move |e| {
+        let history = e.db.price_history(e.settings().platform, q.str("slug"))?;
+        Ok(json!(history))
+    })
+    .await
 }
 
 async fn search(s: State<Engine>, q: Query) -> ApiResult {
