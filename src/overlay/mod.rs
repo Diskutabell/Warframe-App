@@ -193,7 +193,8 @@ mod tests {
         rewards(&msg, at(game, 1.0, 0.85), false).pixels.save_png(dir.join("message.png")).unwrap();
         riven(&panels::sample_riven(), at(game, 1.0, 0.85)).pixels.save_png(dir.join("riven.png")).unwrap();
         // Narrow: a 150% desktop at a 70% interface, panels above the cards.
-        let wide = Screen { game: Rect { x: 0, y: 0, width: 1920, height: 1080 }, display: 1.0, dpi: 1.5, ui_scale: 0.7 };
+        let wide =
+            Screen { game: Rect { x: 0, y: 0, width: 1920, height: 1080 }, display: 1.0, dpi: 1.5, ui_scale: 0.7 };
         rewards(&RewardResult::sample(0.7), wide, true).pixels.save_png(dir.join("narrow.png")).unwrap();
     }
 }

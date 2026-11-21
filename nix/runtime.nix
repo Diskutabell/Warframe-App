@@ -8,14 +8,13 @@ rec {
     libsoup_3
     glib-networking   # TLS for the item art the UI loads from warframe.market and warframestat
     gtk-layer-shell   # the reward/riven overlays on Wayland compositors (Hyprland, Sway, KDE)
-    fontconfig        # registers the bundled fonts for the overlays
   ];
 
-  # Programs the app runs. Compositor tools (hyprctl, swaymsg) are deliberately not here: they
-  # have to match the compositor that is actually running, so they come from the system.
+  # Programs the app runs. Hyprland and Sway are spoken to over their own sockets (src/ipc.rs),
+  # so their command-line tools are not needed.
   tools = with pkgs; [
     (tesseract.override { enableLanguages = [ "eng" ]; })
-    grim       # screenshots on wlroots-style compositors (Hyprland, Sway)
+    grim       # screenshots when the compositor cannot be copied from directly (src/ocr/screencopy.rs)
     libnotify  # notify-send, for the optional desktop notification
   ];
 

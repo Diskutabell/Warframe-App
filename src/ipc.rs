@@ -16,14 +16,18 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-const TIMEOUT: Duration = Duration::from_secs(5);
+/// A compositor answers a query in milliseconds; a slower one is stuck, and some callers are on the
+/// window's thread.
+pub const TIMEOUT: Duration = Duration::from_secs(1);
+/// Reading the whole config again (a reload) may take a while on a large one.
+pub const RELOAD_TIMEOUT: Duration = Duration::from_secs(15);
 /// No answer of either compositor comes near this; a larger one is not one of theirs.
 const MAX_ANSWER: u64 = 64 * 1024 * 1024;
 
-fn connect(path: &PathBuf) -> Result<UnixStream> {
+fn connect(path: &PathBuf, timeout: Duration) -> Result<UnixStream> {
     let stream = UnixStream::connect(path).with_context(|| format!("connecting to {}", path.display()))?;
-    stream.set_read_timeout(Some(TIMEOUT))?;
-    stream.set_write_timeout(Some(TIMEOUT))?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
     Ok(stream)
 }
 
@@ -42,11 +46,29 @@ fn hyprland_socket() -> Result<PathBuf> {
 
 /// One request to Hyprland, as hyprctl sends it, and its answer.
 pub fn hyprland(request: &str) -> Result<String> {
-    let mut stream = connect(&hyprland_socket()?)?;
+    hyprland_within(request, TIMEOUT)
+}
+
+fn hyprland_within(request: &str, timeout: Duration) -> Result<String> {
+    let mut stream = connect(&hyprland_socket()?, timeout)?;
     stream.write_all(request.as_bytes())?;
     let mut answer = Vec::new();
     stream.take(MAX_ANSWER).read_to_end(&mut answer).context("reading Hyprland's answer")?;
     Ok(String::from_utf8_lossy(&answer).into_owned())
+}
+
+/// A Hyprland command that answers "ok" when it worked (`/eval`, `/keyword`, `/reload`); anything
+/// else, nothing included, is its reason for refusing.
+pub fn hyprland_ok(request: &str, timeout: Duration) -> Result<()> {
+    said_ok(&hyprland_within(request, timeout)?)
+}
+
+fn said_ok(said: &str) -> Result<()> {
+    let said = said.trim();
+    if !said.eq_ignore_ascii_case("ok") {
+        bail!("{}", if said.is_empty() { "no answer".to_string() } else { said.chars().take(160).collect() });
+    }
+    Ok(())
 }
 
 /// Hyprland's answer to a JSON request (`j/clients`, `j/monitors`).
@@ -92,9 +114,13 @@ fn read_sway_answer(r: &mut impl Read) -> Result<Vec<u8>> {
 
 /// One message to Sway and its answer (JSON).
 pub fn sway(kind: SwayMessage, payload: &str) -> Result<serde_json::Value> {
+    sway_within(kind, payload, TIMEOUT)
+}
+
+fn sway_within(kind: SwayMessage, payload: &str, timeout: Duration) -> Result<serde_json::Value> {
     let path =
         std::env::var_os("SWAYSOCK").filter(|s| !s.is_empty()).map(PathBuf::from).context("not in a Sway session")?;
-    let mut stream = connect(&path)?;
+    let mut stream = connect(&path, timeout)?;
     stream.write_all(&sway_frame(kind, payload))?;
     let body = read_sway_answer(&mut stream)?;
     // Window titles are passed on as the windows set them, not always as UTF-8.
@@ -102,8 +128,8 @@ pub fn sway(kind: SwayMessage, payload: &str) -> Result<serde_json::Value> {
 }
 
 /// Runs Sway commands; an error names the first one Sway refused.
-pub fn sway_command(command: &str) -> Result<()> {
-    let answer = sway(SwayMessage::RunCommand, command)?;
+pub fn sway_command(command: &str, timeout: Duration) -> Result<()> {
+    let answer = sway_within(SwayMessage::RunCommand, command, timeout)?;
     for result in answer.as_array().into_iter().flatten() {
         if result["success"] != true {
             bail!("Sway refused \"{command}\": {}", result["error"].as_str().unwrap_or("no reason given"));
@@ -130,6 +156,14 @@ mod tests {
     }
 
     #[test]
+    fn only_ok_is_success_for_a_hyprland_command() {
+        assert!(said_ok("ok\n").is_ok());
+        assert!(said_ok("OK").is_ok());
+        assert_eq!(said_ok("unknown request").unwrap_err().to_string(), "unknown request");
+        assert_eq!(said_ok("  ").unwrap_err().to_string(), "no answer");
+    }
+
+    #[test]
     fn a_hyprland_answer_is_read_until_the_socket_closes() {
         let dir = std::env::temp_dir().join(format!("wfp-ipc-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -143,7 +177,7 @@ mod tests {
             assert_eq!(&req, b"j/clients");
             s.write_all(b"[{\"class\":\"steam_app_230410\"}]").unwrap();
         });
-        let mut stream = connect(&path).unwrap();
+        let mut stream = connect(&path, TIMEOUT).unwrap();
         stream.write_all(b"j/clients").unwrap();
         let mut answer = String::new();
         stream.read_to_string(&mut answer).unwrap();

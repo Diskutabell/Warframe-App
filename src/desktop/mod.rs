@@ -1,6 +1,5 @@
 //! The desktop shell: the main window (the web UI in WebKitGTK) and the overlays over the game.
 
-mod fonts;
 mod overlay;
 mod tray;
 
@@ -125,8 +124,6 @@ fn hide_main_window(window: &gtk::Window, tray: &RefCell<tray::Tray>) {
 pub fn run(state: Arc<App>, url: &str, backend: Backend) -> Result<()> {
     glib::set_prgname(Some("warframeproject"));
     glib::set_application_name("warframeproject");
-    // Before GTK starts: Pango builds its font list once, and fonts added later are not in it.
-    fonts::register();
     gtk::init().map_err(|e| anyhow!("GTK could not start: {e}"))?;
 
     let backend = if backend == Backend::LayerShell && !gtk_layer_shell::is_supported() {

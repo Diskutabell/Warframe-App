@@ -374,7 +374,28 @@ pub fn possible() -> bool {
     std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty()) && !NEVER.load(Ordering::Relaxed)
 }
 
-static SESSION: Mutex<Option<Session>> = Mutex::new(None);
+static SESSION: Mutex<Option<(Session, Instant)>> = Mutex::new(None);
+
+/// How long the connection and its buffer (33 MB at 4K) are kept after the last capture: a scan
+/// captures every 120-400 ms, and between scans nothing needs them.
+const KEEP: Duration = Duration::from_secs(10);
+
+/// Lets go of the session once it has not been used for `KEEP`.
+fn start_reaper() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        let _ = std::thread::Builder::new().name("capture-idle".into()).spawn(|| {
+            loop {
+                std::thread::sleep(KEEP / 2);
+                if let Ok(mut session) = SESSION.lock() {
+                    if session.as_ref().is_some_and(|(_, used)| used.elapsed() >= KEEP) {
+                        *session = None;
+                    }
+                }
+            }
+        });
+    });
+}
 static NEVER: AtomicBool = AtomicBool::new(false);
 
 /// The output named `name` (the game's monitor), or the only one there is.
@@ -383,10 +404,14 @@ pub fn capture(name: Option<&str>) -> Result<Rgb> {
         bail!("wlr-screencopy does not work in this session");
     }
     let deadline = Instant::now() + TIMEOUT;
+    start_reaper();
     let mut session = SESSION.lock().map_err(|_| anyhow!("capture lock poisoned"))?;
     let result = match session.as_mut() {
-        Some(s) => s.capture(name, deadline),
-        None => Session::connect(deadline).and_then(|s| session.insert(s).capture(name, deadline)),
+        Some((s, used)) => {
+            *used = Instant::now();
+            s.capture(name, deadline)
+        }
+        None => Session::connect(deadline).and_then(|s| session.insert((s, Instant::now())).0.capture(name, deadline)),
     };
     if let Err(e) = &result {
         if e.downcast_ref::<Unsupported>().is_some() {

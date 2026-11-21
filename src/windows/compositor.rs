@@ -252,7 +252,7 @@ pub fn capture() -> Result<Rgb> {
             if old.is_null() {
                 false
             } else {
-                let copied = BitBlt(dc, 0, 0, w, h, screen, m.x, m.y, SRCCOPY | CAPTUREBLT) != 0;
+                let copied = BitBlt(dc, 0, 0, w, h, screen, m.x, m.y, SRCCOPY) != 0;
                 SelectObject(dc, old);
                 copied
             }

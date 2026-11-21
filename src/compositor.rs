@@ -4,7 +4,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::{UserError, ipc};
@@ -129,6 +129,22 @@ pub fn game_rect() -> Option<Rect> {
 /// `grim` with no -o stitches every monitor into one image, so on a multi-monitor desk the
 /// centred-16:9 crop lands hundreds of pixels off. Capturing only the game's output avoids that.
 pub fn game_output() -> Option<String> {
+    // A reward scan captures every 120 ms; the game does not change monitors that fast.
+    static LAST: std::sync::Mutex<Option<(std::time::Instant, Option<String>)>> = std::sync::Mutex::new(None);
+    const FRESH: std::time::Duration = std::time::Duration::from_secs(2);
+    if let Ok(last) = LAST.lock() {
+        if let Some((_, output)) = last.as_ref().filter(|(at, _)| at.elapsed() < FRESH) {
+            return output.clone();
+        }
+    }
+    let output = ask_game_output();
+    if let Ok(mut last) = LAST.lock() {
+        *last = Some((std::time::Instant::now(), output.clone()));
+    }
+    output
+}
+
+fn ask_game_output() -> Option<String> {
     if running()? == Running::Hyprland {
         let clients = hypr_json("clients")?;
         let hit = hypr_game(&clients)?;
@@ -317,14 +333,9 @@ pub fn float_main_window() -> Result<()> {
     let Some(flavour) = detect_flavour() else { return Ok(()) };
     let rule = float_rule(flavour, std::process::id());
     if flavour == Flavour::Sway {
-        return ipc::sway_command(&rule);
+        return ipc::sway_command(&rule, ipc::TIMEOUT);
     }
-    // Hyprland answers "ok", and anything else is a refusal.
-    let said = ipc::hyprland(&rule)?;
-    if said.trim() != "ok" {
-        bail!("Hyprland refused the rule: {}", said.trim().chars().take(160).collect::<String>());
-    }
-    Ok(())
+    ipc::hyprland_ok(&rule, ipc::TIMEOUT).context("Hyprland refused the rule")
 }
 
 /// The config lines for the given (key, API path) pairs.
@@ -389,18 +400,10 @@ pub struct Installed {
 fn reload(running: Running) -> Result<()> {
     let failed = |e: String| UserError::new(format!("Reloading the compositor's config failed: {e}"));
     match running {
-        Running::Sway => ipc::sway_command("reload").map_err(|e| failed(format!("{e:#}")).into()),
-        Running::Hyprland => {
-            let said = ipc::hyprland("/reload").map_err(|e| failed(format!("{e:#}")))?;
-            // Hyprland answers "ok"; anything else (a config error, nothing at all) is a failure.
-            let said = said.trim();
-            if said != "ok" {
-                let why = if said.is_empty() { "no answer".to_string() } else { said.chars().take(160).collect() };
-                return Err(failed(why).into());
-            }
-            Ok(())
-        }
+        Running::Sway => ipc::sway_command("reload", ipc::RELOAD_TIMEOUT),
+        Running::Hyprland => ipc::hyprland_ok("/reload", ipc::RELOAD_TIMEOUT),
     }
+    .map_err(|e| failed(format!("{e:#}")).into())
 }
 
 /// Writes the binds to the compositor config and reloads it. Nothing of the user's own config is

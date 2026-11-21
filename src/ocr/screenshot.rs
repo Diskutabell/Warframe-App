@@ -26,6 +26,11 @@ use crate::process;
 // Windows needs no screenshot program: the app copies the screen itself, and the tool setting
 // does not apply.
 #[cfg(windows)]
+pub fn describe(tool: ScreenshotTool) -> &'static str {
+    program(tool)
+}
+
+#[cfg(windows)]
 pub fn program(_tool: ScreenshotTool) -> &'static str {
     "built in"
 }
@@ -98,6 +103,15 @@ pub fn resolve(setting: ScreenshotTool) -> Option<ScreenshotTool> {
         }
         t => available(t).then_some(t),
     }
+}
+
+/// What a capture with `tool` uses, for the Settings page.
+#[cfg(unix)]
+pub fn describe(tool: ScreenshotTool) -> &'static str {
+    if tool == ScreenshotTool::Grim && super::screencopy::possible() {
+        return if which("grim").is_some() { "built in (grim as fallback)" } else { "built in" };
+    }
+    program(tool)
 }
 
 /// A tool can be used: its program is installed, or (grim) the app copies the screen itself.

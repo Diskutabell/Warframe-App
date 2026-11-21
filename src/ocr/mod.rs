@@ -35,7 +35,7 @@ pub struct Tools {
 pub fn detect_tools(setting: ScreenshotTool) -> Tools {
     Tools {
         tesseract: which("tesseract").is_some(),
-        screenshot: screenshot::resolve(setting).map(screenshot::program),
+        screenshot: screenshot::resolve(setting).map(screenshot::describe),
         notify_send: cfg!(windows) || which("notify-send").is_some(),
     }
 }
