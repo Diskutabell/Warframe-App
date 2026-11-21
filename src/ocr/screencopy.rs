@@ -369,9 +369,22 @@ impl Session {
     }
 }
 
-/// Whether a capture is worth trying: a Wayland session where it has not failed for good.
+/// Whether a capture is worth trying: a Wayland compositor that offers wlr-screencopy (asked
+/// once; GNOME and KDE do not), where it has not failed for good.
 pub fn possible() -> bool {
-    std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty()) && !NEVER.load(Ordering::Relaxed)
+    static OFFERED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty()) || NEVER.load(Ordering::Relaxed) {
+        return false;
+    }
+    if let Some(offered) = OFFERED.get() {
+        return *offered;
+    }
+    match Session::connect(Instant::now() + TIMEOUT) {
+        Ok(_) => *OFFERED.get_or_init(|| true),
+        Err(e) if e.downcast_ref::<Unsupported>().is_some() => *OFFERED.get_or_init(|| false),
+        // Not answered this time: worth asking again later.
+        Err(_) => true,
+    }
 }
 
 static SESSION: Mutex<Option<(Session, Instant)>> = Mutex::new(None);

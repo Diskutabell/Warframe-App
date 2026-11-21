@@ -137,8 +137,9 @@ pub fn game_output() -> Option<String> {
             return output.clone();
         }
     }
+    // Only a found monitor is kept: a game not up yet may be up a moment later.
     let output = ask_game_output();
-    if let Ok(mut last) = LAST.lock() {
+    if let (Ok(mut last), Some(_)) = (LAST.lock(), &output) {
         *last = Some((std::time::Instant::now(), output.clone()));
     }
     output
@@ -295,7 +296,16 @@ impl Flavour {
 /// Hyprland can be configured by hyprland.conf or by Lua, and the bind syntax differs. A
 /// Lua-driven Hyprland never reads hyprland.conf, and refuses `hyprctl keyword bind`.
 fn hyprland_uses_lua() -> bool {
-    ipc::hyprland("/systeminfo").is_ok_and(|o| o.contains("configProvider: lua"))
+    // /systeminfo gathers system details first (it may run lspci) and can take a while; the
+    // answer holds for the session, so it is asked until it once answers.
+    static LUA: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if let Some(lua) = LUA.get() {
+        return *lua;
+    }
+    match ipc::hyprland_within("/systeminfo", ipc::RELOAD_TIMEOUT) {
+        Ok(info) => *LUA.get_or_init(|| info.contains("configProvider: lua")),
+        Err(_) => false,
+    }
 }
 
 pub fn detect_flavour() -> Option<Flavour> {

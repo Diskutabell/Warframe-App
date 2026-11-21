@@ -18,8 +18,8 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, HWND_TOPMOST, IsWindowVisible, MA_NOACTIVATE, RegisterClassW,
     SW_HIDE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowPos, ShowWindow, ULW_ALPHA,
-    UpdateLayeredWindow, WM_MOUSEACTIVATE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    UpdateLayeredWindow, WM_CLOSE, WM_MOUSEACTIVATE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use crate::overlay::Drawn;
@@ -35,6 +35,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     // A click (there should be none: the window is transparent to them) never activates it.
     if msg == WM_MOUSEACTIVATE {
         return MA_NOACTIVATE as LRESULT;
+    }
+    // Only its owner destroys it (LayeredWindow's drop): asked to close, it hides.
+    if msg == WM_CLOSE {
+        // SAFETY: the window Windows passed in.
+        unsafe { ShowWindow(hwnd, SW_HIDE) };
+        return 0;
     }
     // SAFETY: the arguments are the ones Windows passed in.
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
@@ -165,11 +171,12 @@ impl LayeredWindow {
                         &blend,
                         ULW_ALPHA,
                     );
+                    // Read before the next call can overwrite it.
+                    let error = (ok == 0).then(std::io::Error::last_os_error);
                     SelectObject(dc, old);
-                    if ok == 0 {
-                        Err(anyhow::anyhow!("UpdateLayeredWindow failed: {}", std::io::Error::last_os_error()))
-                    } else {
-                        Ok(())
+                    match error {
+                        Some(e) => Err(anyhow::anyhow!("UpdateLayeredWindow failed: {e}")),
+                        None => Ok(()),
                     }
                 }
             };

@@ -7,6 +7,7 @@ use super::canvas::{self, Canvas, Colour, Face, Style};
 use crate::rivens::Graded;
 use crate::services::scans::{RewardItem, RewardResult, RivenResult};
 
+const NOTHING_READ: &str = "No reward names recognized.";
 const PANEL: Colour = Colour(8, 12, 17, 0.97);
 const PANEL_BEST: Colour = Colour(45, 37, 15, 0.97);
 const EDGE: Colour = Colour(150, 170, 186, 0.3);
@@ -54,7 +55,7 @@ pub fn rewards(r: &RewardResult, size: (u32, u32), boxes: &[[f32; 4]], u: f32) -
     let mut c = Canvas::new(size.0, size.1);
     if r.items.is_empty() {
         if let Some(&b) = boxes.first() {
-            message(&mut c, b, u, r.error.as_deref().unwrap_or("No reward names recognized."));
+            message(&mut c, b, u, r.error.as_deref().unwrap_or(NOTHING_READ));
         }
     } else {
         for (k, &b) in boxes.iter().enumerate() {
@@ -82,8 +83,16 @@ fn item_panel(c: &mut Canvas, b: [f32; 4], u: f32, it: &RewardItem, best: bool) 
     let h = if best { name.line().max(tag.line()) } else { name.line() };
     let room = w - if best { tag_w + 6.0 * u } else { 0.0 };
     // The whole name matters (it shows a misread): a second line before an ellipsis.
-    let first = name.wrap(&it.name, room).into_iter().next().unwrap_or_default();
-    let rest = it.name[first.len().min(it.name.len())..].trim();
+    let lines = name.wrap(&it.name, room);
+    let first = lines.first().cloned().unwrap_or_default();
+    let mut rest = lines.get(1..).unwrap_or_default().join(" ");
+    // A first word wider than the room beside BEST: the whole name goes below instead.
+    let first = if name.fit(&first, room).is_empty() {
+        rest = lines.join(" ");
+        String::new()
+    } else {
+        first
+    };
     c.text(name, x, baseline(name, y, h), &name.fit(&first, room));
     if best {
         let tx = x + w - tag_w;
@@ -92,8 +101,8 @@ fn item_panel(c: &mut Canvas, b: [f32; 4], u: f32, it: &RewardItem, best: bool) 
         c.text(tag, tx + 4.0 * u, ty + tag.ascent(), "BEST");
     }
     y += h;
-    if !rest.is_empty() && name.width(&first) <= room {
-        c.text(name, x, y + name.ascent(), &name.fit(rest, w));
+    if !rest.is_empty() {
+        c.text(name, x, y + name.ascent(), &name.fit(&rest, w));
         y += name.line();
     }
 
@@ -170,6 +179,12 @@ fn item_panel(c: &mut Canvas, b: [f32; 4], u: f32, it: &RewardItem, best: bool) 
 /// How tall the price panels have to be, `widths` wide (pixels), so every one shows all it has:
 /// the tallest one's height, for all of them alike.
 pub fn rewards_height(r: &RewardResult, widths: &[f32], u: f32) -> f32 {
+    if r.items.is_empty() {
+        let text = r.error.as_deref().unwrap_or(NOTHING_READ);
+        return widths
+            .first()
+            .map_or(0.0, |&w| message(&mut Canvas::measure(), [0.0, 0.0, w, 0.0], u, text) + 5.0 * u + 1.0);
+    }
     let mut tallest: f32 = 0.0;
     for (k, &w) in widths.iter().enumerate() {
         let item = r.items.iter().enumerate().find(|(i, it)| it.slot.unwrap_or(*i) == k).map(|(_, it)| it);
@@ -188,7 +203,8 @@ pub fn rewards_height(r: &RewardResult, widths: &[f32], u: f32) -> f32 {
 }
 
 /// A message in place of the panels: why nothing was recognised.
-fn message(c: &mut Canvas, b: [f32; 4], u: f32, text: &str) {
+/// Where its text ends.
+fn message(c: &mut Canvas, b: [f32; 4], u: f32, text: &str) -> f32 {
     let [x, mut y, w, _] = frame(c, b, u, PANEL, EDGE);
     let title = Style::new(Face::Label, 14.5 * u, NAME);
     c.text(title, x, y + title.ascent(), "Reward scan");
@@ -198,6 +214,7 @@ fn message(c: &mut Canvas, b: [f32; 4], u: f32, text: &str) {
         c.text(body, x, y + body.ascent(), &line);
         y += body.line();
     }
+    y
 }
 
 // ---------------------------------------------------------------- the riven panel

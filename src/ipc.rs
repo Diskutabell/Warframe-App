@@ -49,7 +49,7 @@ pub fn hyprland(request: &str) -> Result<String> {
     hyprland_within(request, TIMEOUT)
 }
 
-fn hyprland_within(request: &str, timeout: Duration) -> Result<String> {
+pub fn hyprland_within(request: &str, timeout: Duration) -> Result<String> {
     let mut stream = connect(&hyprland_socket()?, timeout)?;
     stream.write_all(request.as_bytes())?;
     let mut answer = Vec::new();

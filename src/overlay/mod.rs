@@ -246,6 +246,34 @@ mod tests {
     }
 
     #[test]
+    fn odd_names_and_long_messages_draw_whole() {
+        // Narrow panels (150% desktop, 70% interface, above the cards) and names with odd spacing,
+        // other scripts, a first word wider than the room beside BEST, and none at all.
+        let screen =
+            Screen { game: Rect { x: 0, y: 0, width: 1920, height: 1080 }, display: 1.0, dpi: 1.5, ui_scale: 0.7 };
+        for name in [
+            "  Ash  Prime\u{a0}Systems ",
+            "É É\u{a0}É",
+            "Sevagoth Prime Systems Blueprint",
+            "",
+            "Supercalifragilisticexpialidocious",
+        ] {
+            let mut r = RewardResult::sample(0.7);
+            r.items[1].name = name.into();
+            r.best = Some(name.into());
+            let d = rewards(&r, screen, true);
+            assert!(ink(&d.pixels) > 0, "{name:?}");
+        }
+        let long = "No screenshot tool found. Install grim (Hyprland, Sway), spectacle (KDE), gnome-screenshot, maim or scrot.";
+        let msg = RewardResult { error: Some(long.into()), ..Default::default() };
+        let d = rewards(&msg, Screen { ui_scale: 0.5, ..screen }, false);
+        let lowest = (0..d.pixels.height())
+            .rev()
+            .find(|&y| (0..d.pixels.width()).any(|x| d.pixels.pixel(x, y).is_some_and(|p| p.alpha() > 0)));
+        assert_eq!(lowest, Some(d.pixels.height() - 1), "the message panel is as tall as its text");
+    }
+
+    #[test]
     fn a_message_gets_one_panel_and_a_riven_its_own_height() {
         let game = Rect { x: 0, y: 0, width: 1920, height: 1080 };
         let msg = RewardResult { error: Some("No reward names recognized.".into()), ..Default::default() };

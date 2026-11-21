@@ -141,6 +141,10 @@ pub fn capture(setting: ScreenshotTool) -> Result<Rgb> {
         // What grim does, without starting it; grim itself when that fails.
         match super::screencopy::capture(output.as_deref()) {
             Ok(frame) => return Ok(frame),
+            // Found out only now that the compositor cannot do it: Auto tries the next tool.
+            Err(_) if setting == ScreenshotTool::Auto && !super::screencopy::possible() && which("grim").is_none() => {
+                return capture(setting);
+            }
             Err(e) if which("grim").is_none() => {
                 return Err(e.context("the screen could not be copied, and grim (the fallback) is not installed"));
             }
