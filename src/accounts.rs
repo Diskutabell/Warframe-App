@@ -10,7 +10,7 @@
 //! not belong to the profile's account aside instead of adopting it.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use indexmap::IndexMap;
@@ -73,7 +73,8 @@ impl Manual {
 }
 
 /// A log line that may hold the account's id, for the user to confirm.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ts_rs::TS)]
+#[ts(export)]
 pub struct Evidence {
     pub id: String,
     pub line: String,
@@ -106,6 +107,9 @@ pub struct Account {
     pub profile: Option<Arc<Profile>>,
     #[serde(skip)]
     pub inventory: Option<Arc<Inventory>>,
+    /// Changes made since the inventory was read (`sources::Delta`), oldest first.
+    #[serde(skip)]
+    pub deltas: Vec<crate::sources::Delta>,
     #[serde(skip)]
     pub manual: Manual,
     /// Ids seen in EE.log while this account was logged in.
@@ -150,9 +154,9 @@ impl Account {
         out
     }
 
-    /// Writes one of the account's files.
-    pub fn write<T: Serialize + ?Sized>(&self, file: &str, value: &T) -> anyhow::Result<()> {
-        let dir = dir(&self.key);
+    /// Writes one of the account's files in an older version's data folder `data`.
+    fn write_in<T: Serialize + ?Sized>(&self, data: &Path, file: &str, value: &T) -> anyhow::Result<()> {
+        let dir = dir_in(data, &self.key);
         fs::create_dir_all(&dir)?;
         config::write_json(&dir.join(file), value)
     }
@@ -169,9 +173,14 @@ pub struct ProfileTimes {
     /// Epoch seconds until which no request is made (after a refusal); 0 when not paused.
     #[serde(default)]
     pub paused_until: f64,
+    /// A request was sent and its answer not yet recorded. Still set at the next start (the app
+    /// was stopped or crashed meanwhile), the answer may have been a refusal: the service is
+    /// then left alone as after one.
+    #[serde(default, skip_serializing)]
+    pub unanswered: bool,
 }
 
-/// `accounts.json` as read.
+/// The account list: `accounts.json` as older versions wrote it, and as the database keeps it.
 #[derive(Default, Deserialize)]
 pub struct Registry {
     /// The account the window shows.
@@ -185,12 +194,18 @@ pub struct Registry {
     pub accounts: Vec<Account>,
 }
 
-fn registry_file() -> PathBuf {
-    config::dirs().data.join("accounts.json")
+fn registry_file_in(data: &Path) -> PathBuf {
+    data.join("accounts.json")
 }
 
+/// An account's folder of an older version (its JSON files) under the data folder `data`.
+pub fn dir_in(data: &Path, key: &str) -> PathBuf {
+    data.join("accounts").join(key)
+}
+
+/// An account's folder of an older version (its JSON files).
 pub fn dir(key: &str) -> PathBuf {
-    config::dirs().data.join("accounts").join(key)
+    dir_in(&config::dirs().data, key)
 }
 
 /// `accounts.json` as written: the same fields as `Registry`, borrowed.
@@ -202,40 +217,128 @@ struct RegistryRef<'a> {
     accounts: &'a [Account],
 }
 
-pub fn save(
+fn save_in(
+    data: &Path,
     active: &Option<String>,
     switched: f64,
     profile_requests: ProfileTimes,
     accounts: &[Account],
 ) -> anyhow::Result<()> {
-    config::write_json_pretty(&registry_file(), &RegistryRef { active, switched, profile_requests, accounts })
+    config::write_json_pretty(&registry_file_in(data), &RegistryRef { active, switched, profile_requests, accounts })
 }
 
-/// The accounts with their data, and what happened while loading them (for the activity list).
-pub fn load() -> (Registry, Vec<String>) {
+/// The accounts an older version kept in the JSON files of its data folder `data`, with their
+/// data, and what happened while loading them (for the activity list). Only the import into the
+/// database reads them now.
+pub fn load_from(data: &Path) -> (Registry, Vec<String>) {
     let mut notes = Vec::new();
-    let mut registry = match config::read_json::<Registry>(&registry_file()) {
-        Some(r) => r,
-        None => {
-            let r = migrate(&mut notes);
-            if let Err(e) = save(&r.active, r.switched, r.profile_requests, &r.accounts) {
+    let file = registry_file_in(data);
+    let mut registry = match read_file::<Registry>(&file) {
+        Read::Found(r) => r,
+        Read::Missing => {
+            let r = migrate(data, &mut notes);
+            if let Err(e) = save_in(data, &r.active, r.switched, r.profile_requests, &r.accounts) {
+                notes.push(format!("Could not save the account list: {e:#}"));
+            }
+            r
+        }
+        // Never written over: it is set aside, and the list is made again from the accounts'
+        // folders, which hold everything but the list itself.
+        Read::Broken(why) => {
+            let kept = set_aside(&file);
+            notes.push(format!(
+                "The account list {why}; it was rebuilt from the accounts' folders{}.",
+                kept.map_or_else(String::new, |k| format!(" (the old one is kept as {})", k.display()))
+            ));
+            let r = rebuild(data);
+            if let Err(e) = save_in(data, &r.active, r.switched, r.profile_requests, &r.accounts) {
                 notes.push(format!("Could not save the account list: {e:#}"));
             }
             r
         }
     };
     for acc in &mut registry.accounts {
-        let folder = dir(&acc.key);
+        let folder = dir_in(data, &acc.key);
         acc.profile = config::read_json::<Profile>(&folder.join("profile.json")).map(Arc::new);
         acc.inventory = config::read_json::<Inventory>(&folder.join("inventory.json")).map(Arc::new);
-        acc.manual = config::read_json(&folder.join("manual.json")).unwrap_or_default();
+        // Hand-set counts, pins and tasks exist nowhere else: a file that cannot be read is set
+        // aside, never replaced by the next edit.
+        let manual = folder.join("manual.json");
+        acc.manual = match read_file::<Manual>(&manual) {
+            Read::Found(m) => m,
+            Read::Missing => Manual::default(),
+            Read::Broken(why) => {
+                let kept = set_aside(&manual);
+                notes.push(format!(
+                    "{}'s hand-set counts and tasks {why}; they start empty{}.",
+                    acc.name,
+                    kept.map_or_else(String::new, |k| format!(" (the old file is kept as {})", k.display()))
+                ));
+                Manual::default()
+            }
+        };
         if acc.manual.adopt_goals() {
-            if let Err(e) = acc.write("manual.json", &acc.manual) {
+            if let Err(e) = acc.write_in(data, "manual.json", &acc.manual) {
                 notes.push(format!("Could not save {}'s farming tasks: {e:#}", acc.name));
             }
         }
     }
     (registry, notes)
+}
+
+/// What reading one of the app's own files found.
+enum Read<T> {
+    Missing,
+    Found(T),
+    /// There, but not readable: why.
+    Broken(String),
+}
+
+fn read_file<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> Read<T> {
+    match fs::read(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Read::Missing,
+        Err(e) => Read::Broken(format!("could not be read ({e})")),
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(v) => Read::Found(v),
+            Err(e) => Read::Broken(format!("is damaged ({e})")),
+        },
+    }
+}
+
+/// Moves a damaged file out of the way under a name of its own, so nothing overwrites it and it
+/// can be looked at or put back. Where it went, if it could be moved.
+fn set_aside(path: &std::path::Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    let kept = path.with_file_name(format!("{name}.broken-{}", crate::clock::stamp(crate::now())));
+    fs::rename(path, &kept).ok().map(|_| kept)
+}
+
+/// The account list made again from the accounts' folders: each folder is an account, named by
+/// its saved profile (else by the folder). When DE's profile service was last asked is lost
+/// with the list, so it counts as asked just now: no request goes out before the cooldown.
+fn rebuild(data: &Path) -> Registry {
+    let mut accounts: Vec<Account> = fs::read_dir(data.join("accounts"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter_map(|e| {
+            let key = e.file_name().to_str()?.to_string();
+            let profile: Option<Profile> = config::read_json(&e.path().join("profile.json"));
+            let name = profile.as_ref().and_then(|p| p.name.as_deref()).map(eelog::strip_glyphs);
+            let mut acc = Account::new(key.clone(), name.filter(|n| !n.is_empty()).unwrap_or(key));
+            acc.id = profile.and_then(|p| p.id);
+            acc.source = acc.id.as_ref().map(|_| "saved".to_string());
+            Some(acc)
+        })
+        .collect();
+    accounts.sort_by(|a, b| a.key.cmp(&b.key));
+    Registry {
+        active: accounts.first().map(|a| a.key.clone()),
+        switched: 0.0,
+        profile_requests: ProfileTimes { requested: crate::now(), ..ProfileTimes::default() },
+        accounts,
+    }
 }
 
 /// Removes an account's folder for good.
@@ -292,8 +395,7 @@ pub fn same_owner(a: &IndexMap<String, i64>, b: &IndexMap<String, i64>) -> Optio
 }
 
 /// Moves the single-account layout of 0.2.0 into an account folder.
-fn migrate(notes: &mut Vec<String>) -> Registry {
-    let data = config::dirs().data.clone();
+fn migrate(data: &Path, notes: &mut Vec<String>) -> Registry {
     let legacy: Value = config::read_json(&data.join("account.json")).unwrap_or(Value::Null);
     // The account id could also be set in settings.json (since removed from the settings).
     let settings: Value = config::read_json(&config::settings_file()).unwrap_or(Value::Null);
@@ -318,7 +420,7 @@ fn migrate(notes: &mut Vec<String>) -> Registry {
     let mut acc = Account::new(new_key(&name, &[]), name);
     acc.id = id;
     acc.source = Some(if set_id.is_some() { "Settings" } else { "saved" }.to_string());
-    let folder = dir(&acc.key);
+    let folder = dir_in(data, &acc.key);
     let _ = fs::create_dir_all(&folder);
     let moved = |file: &str| {
         let _ = fs::rename(data.join(file), folder.join(file));
@@ -420,7 +522,7 @@ mod tests {
         // Written by a build before the times were kept.
         let old: Registry = serde_json::from_str(r#"{"active": "tenno", "switched": 1.0, "accounts": []}"#).unwrap();
         assert_eq!((old.profile_requests.requested, old.profile_requests.paused_until), (0.0, 0.0));
-        let times = ProfileTimes { requested: 100.0, paused_until: 3700.0 };
+        let times = ProfileTimes { requested: 100.0, paused_until: 3700.0, unanswered: false };
         let written = RegistryRef { active: &None, switched: 0.0, profile_requests: times, accounts: &[] };
         let back: Registry = serde_json::from_str(&serde_json::to_string(&written).unwrap()).unwrap();
         assert_eq!((back.profile_requests.requested, back.profile_requests.paused_until), (100.0, 3700.0));

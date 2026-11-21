@@ -5,34 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>warframeproject</title>
 <link rel="stylesheet" href="fonts.css">
-<link rel="stylesheet" href="css/app.css">
 </head>
 <body>
-<aside class="rail">
-  <div class="acct" id="acct"></div>
-  <button class="search-trigger" id="openPalette" type="button">
-    <span data-icon="search"></span><span>Quick jump…</span><kbd>Ctrl K</kbd>
-  </button>
-  <nav aria-label="Sections" id="nav"></nav>
-  <div class="rail-status" id="railStatus"></div>
-</aside>
-<main id="view" tabindex="-1"></main>
-<div class="drawer-scrim" id="scrim" hidden></div>
-<aside class="drawer" id="drawer" aria-label="Details" hidden></aside>
-<div class="palette" id="palette" hidden>
-  <div class="palette-box" role="dialog" aria-label="Search">
-    <div class="palette-input"><span data-icon="search"></span>
-      <input id="paletteInput" type="search" placeholder="Search items, parts, relics, syndicates, or pages…" autocomplete="off" spellcheck="false">
-      <kbd>Esc</kbd></div>
-    <ul class="palette-results" id="paletteResults" role="listbox"></ul>
-    <div class="palette-foot"><span><kbd>↑</kbd><kbd>↓</kbd> navigate</span><span><kbd>↵</kbd> open</span><span><kbd>/</kbd> anywhere to search</span></div>
-  </div>
-</div>
-<div class="modal" id="update" hidden>
-  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="updateTitle"></div>
-</div>
-<div id="toasts" role="status" aria-live="polite"></div>
-<input type="file" id="filePick" accept=".json,application/json" hidden>
-<script type="module" src="js/main.js"></script>
+<div id="app"></div>
+<script type="module" src="/src/main.ts"></script>
 </body>
 </html>

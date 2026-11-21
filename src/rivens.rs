@@ -32,6 +32,16 @@ pub enum Unit {
 }
 
 impl Unit {
+    /// Half a step of the last digit the card prints: one decimal for percentages, metres and
+    /// seconds, whole counts, and two decimals of a multiplier ("x1.45", half a percentage point).
+    /// A printed value can be this far from the roll it shows.
+    pub fn rounding(self) -> f64 {
+        match self {
+            Unit::Percent | Unit::Metres | Unit::Seconds => 0.05,
+            Unit::Count | Unit::Multiplier => 0.5,
+        }
+    }
+
     pub fn suffix(self) -> &'static str {
         match self {
             Unit::Percent | Unit::Multiplier => "%",
@@ -58,6 +68,9 @@ pub struct Stat {
     pub sign: Sign,
     /// Only reachable through the Riven Splicer.
     pub spliced: bool,
+    /// Printed with the opposite sign: Recoil's good rolls are reductions ("-91.1% Weapon
+    /// Recoil"), its curse an increase (the wiki's Riven Mods tables).
+    pub inverted: bool,
 }
 
 /// Every riven attribute and its base value, from wiki.warframe.com's Riven Mods page ("Base
@@ -65,57 +78,57 @@ pub struct Stat {
 #[rustfmt::skip]
 pub static STATS: &[Stat] = &[
     // The 32 regular attributes.
-    Stat { name: "Damage", unit: Unit::Percent, base: [Some(165.0), Some(164.7), Some(219.6), Some(99.9), Some(164.7)], sign: Sign::PositiveOnly, spliced: false },
-    Stat { name: "Multishot", unit: Unit::Percent, base: [Some(90.0), Some(119.7), Some(119.7), Some(60.3), None], sign: Sign::Either, spliced: false },
-    Stat { name: "Critical Chance", unit: Unit::Percent, base: [Some(149.99), Some(90.0), Some(149.99), Some(99.9), Some(180.0)], sign: Sign::Either, spliced: false },
-    Stat { name: "Critical Damage", unit: Unit::Percent, base: [Some(119.997), Some(90.0), Some(90.0), Some(80.1), Some(90.0)], sign: Sign::Either, spliced: false },
-    Stat { name: "Fire Rate / Attack Speed", unit: Unit::Percent, base: [Some(60.03), Some(90.0), Some(74.7), Some(60.03), Some(54.9)], sign: Sign::Either, spliced: false },
-    Stat { name: "Status Chance", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(60.3), Some(90.0)], sign: Sign::Either, spliced: false },
-    Stat { name: "Status Duration", unit: Unit::Percent, base: [Some(99.99), Some(99.99), Some(99.99), Some(99.99), Some(99.99)], sign: Sign::Either, spliced: false },
-    Stat { name: "Magazine Capacity", unit: Unit::Percent, base: [Some(49.995), Some(49.995), Some(49.995), Some(60.3), None], sign: Sign::Either, spliced: false },
-    Stat { name: "Ammo Maximum", unit: Unit::Percent, base: [Some(49.95), Some(90.0), Some(90.0), Some(99.9), None], sign: Sign::Either, spliced: false },
-    Stat { name: "Reload Speed", unit: Unit::Percent, base: [Some(49.995), Some(49.995), Some(49.995), Some(99.9), None], sign: Sign::Either, spliced: false },
-    Stat { name: "Punch Through", unit: Unit::Metres, base: [Some(2.7), Some(2.7), Some(2.7), Some(2.7), None], sign: Sign::PositiveOnly, spliced: false },
-    Stat { name: "Projectile Speed", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), None, None], sign: Sign::Either, spliced: false },
-    Stat { name: "Recoil", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), None], sign: Sign::Either, spliced: false },
-    Stat { name: "Zoom", unit: Unit::Percent, base: [Some(59.99), Some(41.994), Some(80.1), Some(59.99), None], sign: Sign::Either, spliced: false },
-    Stat { name: "Heat Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(119.7), Some(90.0)], sign: Sign::PositiveOnly, spliced: false },
-    Stat { name: "Cold Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(119.7), Some(90.0)], sign: Sign::PositiveOnly, spliced: false },
-    Stat { name: "Electricity Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(119.7), Some(90.0)], sign: Sign::PositiveOnly, spliced: false },
-    Stat { name: "Toxin Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(119.7), Some(90.0)], sign: Sign::PositiveOnly, spliced: false },
-    Stat { name: "Impact Damage", unit: Unit::Percent, base: [Some(119.97), Some(119.97), Some(119.97), Some(90.0), Some(119.7)], sign: Sign::Either, spliced: false },
-    Stat { name: "Puncture Damage", unit: Unit::Percent, base: [Some(119.997), Some(119.997), Some(119.997), Some(90.0), Some(119.997)], sign: Sign::Either, spliced: false },
-    Stat { name: "Slash Damage", unit: Unit::Percent, base: [Some(119.97), Some(119.97), Some(119.97), Some(90.0), Some(119.7)], sign: Sign::Either, spliced: false },
-    Stat { name: "Damage to Grineer", unit: Unit::Multiplier, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), Some(45.0)], sign: Sign::Either, spliced: false },
-    Stat { name: "Damage to Corpus", unit: Unit::Multiplier, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), Some(45.0)], sign: Sign::Either, spliced: false },
-    Stat { name: "Damage to Infested", unit: Unit::Multiplier, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), Some(45.0)], sign: Sign::Either, spliced: false },
-    Stat { name: "Range", unit: Unit::Metres, base: [None, None, None, None, Some(1.94)], sign: Sign::Either, spliced: false },
-    Stat { name: "Combo Duration", unit: Unit::Seconds, base: [None, None, None, None, Some(8.1)], sign: Sign::Either, spliced: false },
-    Stat { name: "Finisher Damage", unit: Unit::Percent, base: [None, None, None, None, Some(119.7)], sign: Sign::Either, spliced: false },
-    Stat { name: "Heavy Attack Efficiency", unit: Unit::Percent, base: [None, None, None, None, Some(73.44)], sign: Sign::Either, spliced: false },
-    Stat { name: "Initial Combo", unit: Unit::Count, base: [None, None, None, None, Some(24.5)], sign: Sign::Either, spliced: false },
-    Stat { name: "Slide Critical Chance", unit: Unit::Percent, base: [None, None, None, None, Some(120.0)], sign: Sign::Either, spliced: false },
-    Stat { name: "Additional Combo Count Chance", unit: Unit::Percent, base: [None, None, None, None, Some(58.77)], sign: Sign::PositiveOnly, spliced: false },
-    Stat { name: "Chance to Gain Combo Count", unit: Unit::Percent, base: [None, None, None, None, Some(104.85)], sign: Sign::NegativeOnly, spliced: false },
+    Stat { name: "Damage", unit: Unit::Percent, base: [Some(165.0), Some(164.7), Some(219.6), Some(99.9), Some(164.7)], sign: Sign::PositiveOnly, spliced: false, inverted: false },
+    Stat { name: "Multishot", unit: Unit::Percent, base: [Some(90.0), Some(119.7), Some(119.7), Some(60.3), None], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Critical Chance", unit: Unit::Percent, base: [Some(149.99), Some(90.0), Some(149.99), Some(99.9), Some(180.0)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Critical Damage", unit: Unit::Percent, base: [Some(119.997), Some(90.0), Some(90.0), Some(80.1), Some(90.0)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Fire Rate / Attack Speed", unit: Unit::Percent, base: [Some(60.03), Some(90.0), Some(74.7), Some(60.03), Some(54.9)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Status Chance", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(60.3), Some(90.0)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Status Duration", unit: Unit::Percent, base: [Some(99.99), Some(99.99), Some(99.99), Some(99.99), Some(99.99)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Magazine Capacity", unit: Unit::Percent, base: [Some(49.995), Some(49.995), Some(49.995), Some(60.3), None], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Ammo Maximum", unit: Unit::Percent, base: [Some(49.95), Some(90.0), Some(90.0), Some(99.9), None], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Reload Speed", unit: Unit::Percent, base: [Some(49.995), Some(49.995), Some(49.995), Some(99.9), None], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Punch Through", unit: Unit::Metres, base: [Some(2.7), Some(2.7), Some(2.7), Some(2.7), None], sign: Sign::PositiveOnly, spliced: false, inverted: false },
+    Stat { name: "Projectile Speed", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), None, None], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Recoil", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), None], sign: Sign::Either, spliced: false, inverted: true },
+    Stat { name: "Zoom", unit: Unit::Percent, base: [Some(59.99), Some(41.994), Some(80.1), Some(59.99), None], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Heat Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(119.7), Some(90.0)], sign: Sign::PositiveOnly, spliced: false, inverted: false },
+    Stat { name: "Cold Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(119.7), Some(90.0)], sign: Sign::PositiveOnly, spliced: false, inverted: false },
+    Stat { name: "Electricity Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(119.7), Some(90.0)], sign: Sign::PositiveOnly, spliced: false, inverted: false },
+    Stat { name: "Toxin Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(119.7), Some(90.0)], sign: Sign::PositiveOnly, spliced: false, inverted: false },
+    Stat { name: "Impact Damage", unit: Unit::Percent, base: [Some(119.97), Some(119.97), Some(119.97), Some(90.0), Some(119.7)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Puncture Damage", unit: Unit::Percent, base: [Some(119.997), Some(119.997), Some(119.997), Some(90.0), Some(119.997)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Slash Damage", unit: Unit::Percent, base: [Some(119.97), Some(119.97), Some(119.97), Some(90.0), Some(119.7)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Damage to Grineer", unit: Unit::Multiplier, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), Some(45.0)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Damage to Corpus", unit: Unit::Multiplier, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), Some(45.0)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Damage to Infested", unit: Unit::Multiplier, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), Some(45.0)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Range", unit: Unit::Metres, base: [None, None, None, None, Some(1.94)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Combo Duration", unit: Unit::Seconds, base: [None, None, None, None, Some(8.1)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Finisher Damage", unit: Unit::Percent, base: [None, None, None, None, Some(119.7)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Heavy Attack Efficiency", unit: Unit::Percent, base: [None, None, None, None, Some(73.44)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Initial Combo", unit: Unit::Count, base: [None, None, None, None, Some(24.5)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Slide Critical Chance", unit: Unit::Percent, base: [None, None, None, None, Some(120.0)], sign: Sign::Either, spliced: false, inverted: false },
+    Stat { name: "Additional Combo Count Chance", unit: Unit::Percent, base: [None, None, None, None, Some(58.77)], sign: Sign::PositiveOnly, spliced: false, inverted: false },
+    Stat { name: "Chance to Gain Combo Count", unit: Unit::Percent, base: [None, None, None, None, Some(104.85)], sign: Sign::NegativeOnly, spliced: false, inverted: false },
     // The 18 spliced attributes (Riven Splicer).
-    Stat { name: "Ammo Efficiency", unit: Unit::Percent, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), None], sign: Sign::Either, spliced: true },
-    Stat { name: "Blast Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::PositiveOnly, spliced: true },
-    Stat { name: "Corrosive Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::PositiveOnly, spliced: true },
-    Stat { name: "Damage to Orokin", unit: Unit::Multiplier, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), Some(45.0)], sign: Sign::Either, spliced: true },
-    Stat { name: "Damage to Scaldra", unit: Unit::Multiplier, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), Some(45.0)], sign: Sign::Either, spliced: true },
-    Stat { name: "Damage to Techrot", unit: Unit::Multiplier, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), Some(45.0)], sign: Sign::Either, spliced: true },
-    Stat { name: "Gas Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::PositiveOnly, spliced: true },
-    Stat { name: "Heavy Attack Wind Up Speed", unit: Unit::Percent, base: [None, None, None, None, Some(119.7)], sign: Sign::PositiveOnly, spliced: true },
-    Stat { name: "Magnetic Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::PositiveOnly, spliced: true },
-    Stat { name: "Melee Damage On Heavy Attack", unit: Unit::Percent, base: [None, None, None, None, Some(119.7)], sign: Sign::PositiveOnly, spliced: true },
-    Stat { name: "Parry Angle", unit: Unit::Percent, base: [None, None, None, None, Some(81.0)], sign: Sign::Either, spliced: true },
-    Stat { name: "Radiation Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::PositiveOnly, spliced: true },
-    Stat { name: "Reload While Holstered", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), None, None], sign: Sign::Either, spliced: true },
-    Stat { name: "Slam Attack Damage", unit: Unit::Percent, base: [None, None, None, None, Some(119.7)], sign: Sign::PositiveOnly, spliced: true },
-    Stat { name: "Status Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::Either, spliced: true },
-    Stat { name: "Viral Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::PositiveOnly, spliced: true },
-    Stat { name: "Weakpoint Damage", unit: Unit::Percent, base: [Some(225.0), Some(225.0), Some(225.0), Some(225.0), None], sign: Sign::Either, spliced: true },
-    Stat { name: "Weakpoint Critical Chance", unit: Unit::Percent, base: [Some(247.5), Some(247.5), Some(247.5), Some(247.5), None], sign: Sign::Either, spliced: true },
+    Stat { name: "Ammo Efficiency", unit: Unit::Percent, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), None], sign: Sign::Either, spliced: true, inverted: false },
+    Stat { name: "Blast Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::PositiveOnly, spliced: true, inverted: false },
+    Stat { name: "Corrosive Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::PositiveOnly, spliced: true, inverted: false },
+    Stat { name: "Damage to Orokin", unit: Unit::Multiplier, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), Some(45.0)], sign: Sign::Either, spliced: true, inverted: false },
+    Stat { name: "Damage to Scaldra", unit: Unit::Multiplier, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), Some(45.0)], sign: Sign::Either, spliced: true, inverted: false },
+    Stat { name: "Damage to Techrot", unit: Unit::Multiplier, base: [Some(45.0), Some(45.0), Some(45.0), Some(45.0), Some(45.0)], sign: Sign::Either, spliced: true, inverted: false },
+    Stat { name: "Gas Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::PositiveOnly, spliced: true, inverted: false },
+    Stat { name: "Heavy Attack Wind Up Speed", unit: Unit::Percent, base: [None, None, None, None, Some(119.7)], sign: Sign::PositiveOnly, spliced: true, inverted: false },
+    Stat { name: "Magnetic Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::PositiveOnly, spliced: true, inverted: false },
+    Stat { name: "Melee Damage On Heavy Attack", unit: Unit::Percent, base: [None, None, None, None, Some(119.7)], sign: Sign::PositiveOnly, spliced: true, inverted: false },
+    Stat { name: "Parry Angle", unit: Unit::Percent, base: [None, None, None, None, Some(81.0)], sign: Sign::Either, spliced: true, inverted: false },
+    Stat { name: "Radiation Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::PositiveOnly, spliced: true, inverted: false },
+    Stat { name: "Reload While Holstered", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), None, None], sign: Sign::Either, spliced: true, inverted: false },
+    Stat { name: "Slam Attack Damage", unit: Unit::Percent, base: [None, None, None, None, Some(119.7)], sign: Sign::PositiveOnly, spliced: true, inverted: false },
+    Stat { name: "Status Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::Either, spliced: true, inverted: false },
+    Stat { name: "Viral Damage", unit: Unit::Percent, base: [Some(90.0), Some(90.0), Some(90.0), Some(90.0), Some(90.0)], sign: Sign::PositiveOnly, spliced: true, inverted: false },
+    Stat { name: "Weakpoint Damage", unit: Unit::Percent, base: [Some(225.0), Some(225.0), Some(225.0), Some(225.0), None], sign: Sign::Either, spliced: true, inverted: false },
+    Stat { name: "Weakpoint Critical Chance", unit: Unit::Percent, base: [Some(247.5), Some(247.5), Some(247.5), Some(247.5), None], sign: Sign::Either, spliced: true, inverted: false },
 ];
 
 /// How the card words each stat, lower-case and letters only, as the OCR reader sees it. Several
@@ -255,7 +268,8 @@ fn class_index(item: &Item) -> usize {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ts_rs::TS)]
+#[ts(export)]
 pub struct StatRow {
     pub stat: &'static str,
     pub unit: &'static str,
@@ -264,10 +278,13 @@ pub struct StatRow {
     pub max: f64,
     pub spliced: bool,
     #[serde(rename = "negMin", skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub neg_min: Option<f64>,
     #[serde(rename = "negCentre", skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub neg_centre: Option<f64>,
     #[serde(rename = "negMax", skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub neg_max: Option<f64>,
 }
 
@@ -298,7 +315,8 @@ pub fn stat_table(item: &Item, positives: u8, negatives: u8) -> Vec<StatRow> {
         .collect()
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ts_rs::TS)]
+#[ts(export)]
 pub struct Graded {
     pub stat: &'static str,
     pub value: f64,
@@ -306,6 +324,11 @@ pub struct Graded {
     pub deviation: f64,
     pub grade: &'static str,
     pub negative: bool,
+    /// The card prints this stat with the opposite sign (Recoil): show `-` for a good roll.
+    pub inverted: bool,
+    /// The value as the card prints it, sign and unit included ("+57.5%", "−91.1%", "+1.2m"):
+    /// what every view shows.
+    pub printed: String,
     /// A real roll always lands within +-10% of the centre. Outside that, the stat count or the
     /// weapon is wrong - worth saying so rather than printing a confident C-.
     #[serde(rename = "outOfRange")]
@@ -336,6 +359,11 @@ pub fn grade_roll(
     // A negative is better when it is smaller, so the sign of the deviation flips.
     let dev = if is_negative { (centre - mag) / centre } else { (mag - centre) / centre } * 100.0;
     let sign_conflict = matches!((s.sign, is_negative), (Sign::PositiveOnly, true) | (Sign::NegativeOnly, false));
+    // The card prints a rounded value: on a small stat (a metre of range) that rounding alone
+    // moves it several percent, so the window is widened by it.
+    let out_of_range = (mag - centre).abs() > centre * VARIANCE + s.unit.rounding() + 1e-9;
+    let minus = is_negative != s.inverted;
+    let printed = format!("{}{mag}{}", if minus { "\u{2212}" } else { "+" }, s.unit.suffix());
     Some(Graded {
         stat: s.name,
         value,
@@ -343,7 +371,9 @@ pub fn grade_roll(
         deviation: py_round(dev, 3),
         grade: grade_for(dev),
         negative: is_negative,
-        out_of_range: dev.abs() > VARIANCE * 100.0 + 0.01,
+        inverted: s.inverted,
+        printed,
+        out_of_range,
         sign_conflict,
     })
 }
@@ -364,16 +394,17 @@ pub fn infer_counts(item: &Item, stats: &[(&str, f64, bool)]) -> (u8, u8, u8) {
             grade_roll(item, stat, value, p, n, negative).is_some_and(|g| !g.out_of_range)
         })
     };
+    let unread = |p: u8, n: u8| (p + n).saturating_sub(stats.len() as u8);
     if fits(read) {
-        return (read.0, read.1, 0);
+        return (read.0, read.1, unread(read.0, read.1));
     }
     let options: Vec<(u8, u8)> = [(2, 0), (2, 1), (3, 0), (3, 1)]
         .into_iter()
         .filter(|&(p, n)| p as usize >= pos && n as usize >= neg && fits((p, n)))
         .collect();
     match options[..] {
-        [(p, n)] => (p, n, (p + n).saturating_sub(stats.len() as u8)),
-        _ => (read.0, read.1, 0),
+        [(p, n)] => (p, n, unread(p, n)),
+        _ => (read.0, read.1, unread(read.0, read.1)),
     }
 }
 
@@ -398,7 +429,8 @@ struct RivenCacheState {
     last_failed: std::collections::HashMap<Platform, f64>,
 }
 
-static MARKET_LOCK: Mutex<()> = Mutex::new(());
+/// One fetch of the traded prices at a time.
+static MARKET_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static RIVEN_CACHE: std::sync::LazyLock<Mutex<RivenCacheState>> =
     std::sync::LazyLock::new(|| Mutex::new(RivenCacheState::default()));
 
@@ -438,16 +470,16 @@ fn claim_background_refresh(state: &mut RivenCacheState, platform: Platform, tim
 }
 
 /// {weapon name: {unrolled: {...}, rerolled: {...}}} of traded riven prices, cached 6 h.
-fn market(platform: Platform) -> (serde_json::Map<String, Value>, Option<String>) {
-    let _guard = MARKET_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let cached = load_cached(platform);
+pub async fn market(platform: Platform) -> (std::sync::Arc<serde_json::Map<String, Value>>, Option<String>) {
+    let _guard = MARKET_LOCK.lock().await;
+    let cached = tokio::task::spawn_blocking(move || load_cached(platform)).await.ok().flatten();
     if let Some(c) = &cached {
         if now() - c.fetched < MARKET_MAX_AGE {
-            return ((*c.data).clone(), None);
+            return (std::sync::Arc::clone(&c.data), None);
         }
     }
     let url = RIVEN_API.replace("{platform}", platform.as_str());
-    match net::get_json(&url, &[], Duration::from_secs(25)) {
+    match net::get_json(&url, &[], Duration::from_secs(25)).await {
         Ok(raw) => {
             let mut data = serde_json::Map::new();
             for group in raw.as_object().into_iter().flat_map(|o| o.values()) {
@@ -458,25 +490,55 @@ fn market(platform: Platform) -> (serde_json::Map<String, Value>, Option<String>
                 }
             }
             let fetched = now();
-            let _ = config::write_json(
-                &riven_cache_file(platform),
-                &json!({"t": fetched, "platform": platform.as_str(), "data": data}),
-            );
+            let data = std::sync::Arc::new(data);
+            let saved = json!({"t": fetched, "platform": platform.as_str(), "data": &*data});
+            let _ = tokio::task::spawn_blocking(move || config::write_json(&riven_cache_file(platform), &saved)).await;
             let mut state = RIVEN_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-            state.by_platform.insert(platform, CachedRivens { fetched, data: std::sync::Arc::new(data.clone()) });
+            state.by_platform.insert(platform, CachedRivens { fetched, data: std::sync::Arc::clone(&data) });
             state.last_failed.remove(&platform);
             (data, None)
         }
         Err(e) => {
             RIVEN_CACHE.lock().unwrap_or_else(|e| e.into_inner()).last_failed.insert(platform, now());
-            (cached.map(|c| (*c.data).clone()).unwrap_or_default(), Some(format!("Riven prices unavailable: {e}")))
+            (cached.map(|c| c.data).unwrap_or_default(), Some(format!("Riven prices unavailable: {e}")))
         }
     }
 }
 
 /// What `weapon`'s rivens sold for lately, from the cached prices (whatever their age; a stale
 /// copy is refreshed in the background, so a riven read never waits for it).
-pub fn traded(weapon: &str, platform: Platform) -> Option<Value> {
+/// What rivens for a weapon sold for lately (api.warframestat.us), unrolled and rerolled.
+#[derive(Clone, Debug, PartialEq, Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct Traded {
+    pub unrolled: Option<RivenPrices>,
+    pub rerolled: Option<RivenPrices>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct RivenPrices {
+    #[ts(type = "number | null")]
+    pub median: Option<serde_json::Number>,
+    #[ts(type = "number | null")]
+    pub avg: Option<serde_json::Number>,
+    #[ts(type = "number | null")]
+    pub min: Option<serde_json::Number>,
+    #[ts(type = "number | null")]
+    pub max: Option<serde_json::Number>,
+    /// How many sold.
+    #[ts(type = "number | null")]
+    pub pop: Option<serde_json::Number>,
+}
+
+/// The prices of one kind (`unrolled`, `rerolled`) from warframestat's entry, if it has any.
+fn riven_prices(v: &Value) -> Option<RivenPrices> {
+    let o = v.as_object().filter(|o| !o.is_empty())?;
+    let n = |k: &str| o.get(k).and_then(Value::as_number).cloned();
+    Some(RivenPrices { median: n("median"), avg: n("avg"), min: n("min"), max: n("max"), pop: n("pop") })
+}
+
+pub fn traded(weapon: &str, platform: Platform) -> Option<Traded> {
     let cached = load_cached(platform);
     let stale = cached.as_ref().is_none_or(|c| now() - c.fetched >= MARKET_MAX_AGE);
     if stale && !net::offline() {
@@ -485,37 +547,48 @@ pub fn traded(weapon: &str, platform: Platform) -> Option<Value> {
             claim_background_refresh(&mut state, platform, now())
         };
         if should_spawn {
-            let spawn = std::thread::Builder::new().name("rivens-market".into()).spawn(move || {
-                struct RefreshGuard(Platform);
-                impl Drop for RefreshGuard {
-                    fn drop(&mut self) {
-                        RIVEN_CACHE.lock().unwrap_or_else(|e| e.into_inner()).refreshing.remove(&self.0);
-                    }
+            struct RefreshGuard(Platform);
+            impl Drop for RefreshGuard {
+                fn drop(&mut self) {
+                    RIVEN_CACHE.lock().unwrap_or_else(|e| e.into_inner()).refreshing.remove(&self.0);
                 }
-                let _guard = RefreshGuard(platform);
-                let _ = market(platform);
-            });
-            if spawn.is_err() {
-                RIVEN_CACHE.lock().unwrap_or_else(|e| e.into_inner()).refreshing.remove(&platform);
+            }
+            let guard = RefreshGuard(platform);
+            match tokio::runtime::Handle::try_current() {
+                Ok(runtime) => {
+                    runtime.spawn(async move {
+                        let _guard = guard;
+                        let _ = market(platform).await;
+                    });
+                }
+                // Outside the engine (`replay`): no refresh, the cache will do.
+                Err(_) => drop(guard),
             }
         }
     }
     let p = cached?.data.get(weapon)?.clone();
-    let pick = |v: &Value| v.as_object().filter(|o| !o.is_empty()).map(|_| v.clone());
-    let (unrolled, rerolled) = (pick(&p["unrolled"]), pick(&p["rerolled"]));
-    (unrolled.is_some() || rerolled.is_some()).then(|| json!({"unrolled": unrolled, "rerolled": rerolled}))
+    let (unrolled, rerolled) = (riven_prices(&p["unrolled"]), riven_prices(&p["rerolled"]));
+    (unrolled.is_some() || rerolled.is_some()).then_some(Traded { unrolled, rerolled })
 }
 
-/// Every weapon that takes a riven, with its traded riven prices.
-pub fn rows(catalog: &Catalog, platform: Platform) -> (Vec<Value>, Option<String>) {
-    let (prices, err) = market(platform);
-    let pick = |v: &Value| {
-        v.as_object().filter(|o| !o.is_empty()).map(|o| {
-            json!({"median": o.get("median"), "avg": o.get("avg"), "min": o.get("min"),
-                   "max": o.get("max"), "pop": o.get("pop")})
-        })
-    };
-    let mut out: Vec<(f64, Value)> = catalog
+/// A weapon that takes a riven, with what its rivens sold for.
+#[derive(Serialize, ts_rs::TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct RivenRow {
+    pub name: String,
+    pub category: String,
+    pub image: Option<String>,
+    pub disposition: f64,
+    pub dots: Option<i64>,
+    pub dot_str: &'static str,
+    pub unrolled: Option<RivenPrices>,
+    pub rerolled: Option<RivenPrices>,
+}
+
+/// Every weapon that takes a riven, with its traded riven prices (`market`).
+pub fn rows(catalog: &Catalog, prices: &serde_json::Map<String, Value>) -> Vec<RivenRow> {
+    let mut out: Vec<(f64, RivenRow)> = catalog
         .items
         .values()
         .filter_map(|it| {
@@ -524,17 +597,21 @@ pub fn rows(catalog: &Catalog, platform: Platform) -> (Vec<Value>, Option<String
             let dots = it.dispo_dots.unwrap_or(0) as usize;
             Some((
                 py_round(dispo, 3),
-                json!({
-                    "name": it.name, "category": it.category, "image": crate::gamedata::image_url(it.image.as_deref()),
-                    "disposition": py_round(dispo, 3), "dots": it.dispo_dots,
-                    "dotStr": DOTS.get(dots).copied().unwrap_or(""),
-                    "unrolled": pick(&p["unrolled"]), "rerolled": pick(&p["rerolled"]),
-                }),
+                RivenRow {
+                    name: it.name.clone(),
+                    category: it.category.clone(),
+                    image: crate::gamedata::image_url(it.image.as_deref()),
+                    disposition: py_round(dispo, 3),
+                    dots: it.dispo_dots,
+                    dot_str: DOTS.get(dots).copied().unwrap_or(""),
+                    unrolled: riven_prices(&p["unrolled"]),
+                    rerolled: riven_prices(&p["rerolled"]),
+                },
             ))
         })
         .collect();
     out.sort_by(|a, b| b.0.total_cmp(&a.0));
-    (out.into_iter().map(|(_, v)| v).collect(), err)
+    out.into_iter().map(|(_, v)| v).collect()
 }
 
 #[cfg(test)]
@@ -613,6 +690,28 @@ mod tests {
         assert!(grade_roll(&w, "Damage", 500.0, 2, 0, false).unwrap().out_of_range);
         assert!(grade_roll(&w, "Damage", -20.0, 2, 1, true).unwrap().sign_conflict);
         assert!(grade_roll(&w, "Multishot", 50.0, 2, 0, false).is_none(), "melee cannot roll multishot");
+    }
+
+    #[test]
+    fn rolls_shown_rounded_are_not_out_of_range() {
+        // Melee range, 2+1, a negative: centre 1.94 x 1.2 x 0.495 = 1.15236 m, window
+        // 1.037-1.268 m. A real -1.04 m roll is printed "-1.0m".
+        let w = weapon("melee", 1.2);
+        assert!(!grade_roll(&w, "Range", -1.0, 2, 1, true).unwrap().out_of_range);
+        // Faction damage, 2+1, a positive: centre 45 x 1.2 x 1.2375 = 66.825%, window up to
+        // 73.51%. A real 73.5% roll is printed to two places, "x1.74", and read as 74%.
+        assert!(!grade_roll(&weapon("rifle", 1.2), "Damage to Grineer", 74.0, 2, 1, false).unwrap().out_of_range);
+        // A genuinely wrong reading still is.
+        assert!(grade_roll(&w, "Range", -1.4, 2, 1, true).unwrap().out_of_range);
+    }
+
+    #[test]
+    fn stats_not_read_are_counted_when_the_read_count_fits() {
+        // One positive read off a 2+0 riven: the second line was lost.
+        let w = weapon("rifle", 1.2);
+        let centre = |stat: &str| stat_table(&w, 2, 0).into_iter().find(|r| r.stat == stat).unwrap().centre;
+        let read = [("Damage", centre("Damage"), false)];
+        assert_eq!(infer_counts(&w, &read), (2, 0, 1));
     }
 
     #[test]

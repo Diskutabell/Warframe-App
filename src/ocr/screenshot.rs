@@ -6,7 +6,7 @@ use std::path::PathBuf;
 #[cfg(unix)]
 use std::process::Command;
 #[cfg(unix)]
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(unix)]
 use std::time::Duration;
 
@@ -25,6 +25,11 @@ use crate::process;
 
 // Windows needs no screenshot program: the app copies the screen itself, and the tool setting
 // does not apply.
+#[cfg(windows)]
+pub fn describe(tool: ScreenshotTool) -> &'static str {
+    program(tool)
+}
+
 #[cfg(windows)]
 pub fn program(_tool: ScreenshotTool) -> &'static str {
     "built in"
@@ -57,16 +62,23 @@ pub fn cheap(setting: ScreenshotTool) -> bool {
 #[cfg(unix)]
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The order Auto tries the tools in, for the session the app runs in. grim works only on
+/// wlroots-style compositors (Hyprland, Sway and the like); KDE and GNOME have their own tools on
+/// Wayland; an X11 session has the classic ones (grim cannot capture there at all).
 #[cfg(unix)]
-/// Auto-detection order: wlroots-style compositors, KDE, GNOME, then X11 tools.
-const AUTO: [ScreenshotTool; 6] = [
-    ScreenshotTool::Grim,
-    ScreenshotTool::Spectacle,
-    ScreenshotTool::GnomeScreenshot,
-    ScreenshotTool::Maim,
-    ScreenshotTool::Scrot,
-    ScreenshotTool::Import,
-];
+fn auto_order(wayland: bool, desktop: &str) -> &'static [ScreenshotTool] {
+    use ScreenshotTool::*;
+    let desktop = desktop.to_ascii_lowercase();
+    if !wayland {
+        &[Maim, Scrot, Import, Spectacle, GnomeScreenshot]
+    } else if desktop.contains("kde") {
+        &[Spectacle, Grim, GnomeScreenshot]
+    } else if desktop.contains("gnome") {
+        &[GnomeScreenshot, Spectacle, Grim]
+    } else {
+        &[Grim, Spectacle, GnomeScreenshot, Maim, Scrot, Import]
+    }
+}
 
 #[cfg(unix)]
 pub fn program(tool: ScreenshotTool) -> &'static str {
@@ -84,9 +96,28 @@ pub fn program(tool: ScreenshotTool) -> &'static str {
 /// The tool a capture would use, if one is installed.
 pub fn resolve(setting: ScreenshotTool) -> Option<ScreenshotTool> {
     match setting {
-        ScreenshotTool::Auto => AUTO.into_iter().find(|t| which(program(*t)).is_some()),
-        t => which(program(t)).map(|_| t),
+        ScreenshotTool::Auto => {
+            let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
+            let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+            auto_order(wayland, &desktop).iter().copied().find(|t| available(*t))
+        }
+        t => available(t).then_some(t),
     }
+}
+
+/// What a capture with `tool` uses, for the Settings page.
+#[cfg(unix)]
+pub fn describe(tool: ScreenshotTool) -> &'static str {
+    if tool == ScreenshotTool::Grim && super::screencopy::possible() {
+        return if which("grim").is_some() { "built in (grim as fallback)" } else { "built in" };
+    }
+    program(tool)
+}
+
+/// A tool can be used: its program is installed, or (grim) the app copies the screen itself.
+#[cfg(unix)]
+fn available(tool: ScreenshotTool) -> bool {
+    (tool == ScreenshotTool::Grim && super::screencopy::possible()) || which(program(tool)).is_some()
 }
 
 #[cfg(unix)]
@@ -106,11 +137,29 @@ pub fn capture(setting: ScreenshotTool) -> Result<Rgb> {
         );
     };
     if tool == ScreenshotTool::Grim {
+        let output = compositor::game_output();
+        // What grim does, without starting it; grim itself when that fails.
+        match super::screencopy::capture(output.as_deref()) {
+            Ok(frame) => return Ok(frame),
+            // Found out only now that the compositor cannot do it: Auto tries the next tool.
+            Err(_) if setting == ScreenshotTool::Auto && !super::screencopy::possible() && which("grim").is_none() => {
+                return capture(setting);
+            }
+            Err(e) if which("grim").is_none() => {
+                return Err(e.context("the screen could not be copied, and grim (the fallback) is not installed"));
+            }
+            Err(e) => {
+                static SAID: AtomicBool = AtomicBool::new(false);
+                if !SAID.swap(true, Ordering::Relaxed) {
+                    eprintln!("capturing through grim instead: {e:#}");
+                }
+            }
+        }
         // PPM straight to stdout: PNG compression of a 2560x1440 frame alone took ~1 s.
         let mut cmd = Command::new("grim");
         cmd.args(["-t", "ppm"]);
-        if let Some(output) = compositor::game_output() {
-            cmd.args(["-o", &output]);
+        if let Some(output) = &output {
+            cmd.args(["-o", output]);
         }
         cmd.arg("-");
         let out = process::run(&mut cmd, None, TIMEOUT)?;
@@ -148,4 +197,19 @@ pub fn decode(bytes: &[u8]) -> Result<Rgb> {
 
 pub fn load(path: &std::path::Path) -> Result<Rgb> {
     decode(&fs::read(path).with_context(|| format!("reading {}", path.display()))?)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_picks_a_tool_that_works_in_the_session() {
+        use ScreenshotTool::*;
+        assert_eq!(auto_order(true, "Hyprland")[0], Grim);
+        assert_eq!(auto_order(true, "sway")[0], Grim);
+        assert_eq!(auto_order(true, "KDE")[0], Spectacle);
+        assert_eq!(auto_order(true, "ubuntu:GNOME")[0], GnomeScreenshot);
+        assert!(!auto_order(false, "KDE").contains(&Grim), "grim cannot capture an X11 session");
+    }
 }

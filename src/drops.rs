@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use serde::Serialize;
 use serde_json::Value;
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, ts_rs::TS)]
+#[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct Drop {
     pub item: String,

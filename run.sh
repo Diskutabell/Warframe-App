@@ -22,7 +22,22 @@ if [ "${1:-}" = "--detach" ] || [ "${1:-}" = "-d" ]; then
   exit 0
 fi
 
-if command -v cargo >/dev/null && pkg-config --exists webkit2gtk-4.1 gtk-layer-shell-0 2>/dev/null; then
+# The interface (web/, Svelte) is built into web/dist, which the binary embeds: again whenever a
+# source of it is newer than the last build.
+build_ui() {
+  # npm writes node_modules/.package-lock.json last: missing (an install cut short) or older than
+  # the lock file (a pull changed the dependencies) means the packages are not the locked ones.
+  if [ ! -f web/node_modules/.package-lock.json ] || [ web/package-lock.json -nt web/node_modules/.package-lock.json ]; then
+    (cd web && npm ci --silent --no-audit --no-fund) || return
+  fi
+  if [ ! -f web/dist/index.html ] || [ -n "$(find web/src web/public web/index.html web/package.json web/package-lock.json \
+      web/vite.config.ts web/svelte.config.js web/tsconfig.json -newer web/dist/index.html -print -quit 2>/dev/null)" ]; then
+    (cd web && npm run --silent build >/dev/null) || return
+  fi
+}
+
+if command -v cargo >/dev/null && command -v npm >/dev/null && pkg-config --exists webkit2gtk-4.1 gtk-layer-shell-0 2>/dev/null; then
+  build_ui
   cargo build --release --quiet
   exec ./target/release/warframeproject "$@"
 fi
@@ -30,9 +45,9 @@ fi
 if [ -e /etc/NIXOS ] && command -v nix-shell >/dev/null; then
   args=""
   for a in "$@"; do args+=" $(printf '%q' "$a")"; done
-  exec nix-shell "$PWD/shell.nix" --run "cargo build --release --quiet && exec ./target/release/warframeproject$args"
+  exec nix-shell "$PWD/shell.nix" --run "set -euo pipefail; $(declare -f build_ui); build_ui && cargo build --release --quiet && exec ./target/release/warframeproject$args"
 fi
 
-echo "Building needs cargo plus the development files of GTK 3, WebKitGTK 4.1 and gtk-layer-shell," >&2
+echo "Building needs cargo, npm (Node 22) and the development files of GTK 3, WebKitGTK 4.1 and gtk-layer-shell," >&2
 echo "or Nix. See README.md." >&2
 exit 1

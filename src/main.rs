@@ -7,10 +7,15 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod accounts;
+mod api;
+mod app;
 mod arbitration;
 mod art;
+mod bundle;
+mod bus;
 mod clock;
 mod config;
+mod db;
 mod difflib;
 mod drops;
 mod eelog;
@@ -22,17 +27,18 @@ mod memscan;
 mod net;
 mod notifier;
 mod ocr;
+mod overlay;
 mod process;
 mod relics;
 mod rivens;
-mod server;
+mod services;
 mod sources;
 mod standing;
-mod state;
 mod tasks;
 mod tray_icon;
 mod update;
 mod views;
+mod watch;
 mod world;
 
 // The parts that talk to the desktop differ per system. On Windows the same module names load
@@ -48,6 +54,8 @@ mod desktop;
 #[cfg(windows)]
 #[path = "windows/desktop.rs"]
 mod desktop;
+#[cfg(unix)]
+mod ipc;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -122,6 +130,13 @@ enum Command {
         #[arg(long)]
         scale: Option<f64>,
     },
+    /// Download every game data source, check it, and write the prepared bundle and its
+    /// manifest into a folder (what CI publishes on the `catalog` release).
+    BuildCatalog {
+        /// Where the bundle and manifest.json go.
+        #[arg(long, default_value = "catalog")]
+        out: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -148,6 +163,10 @@ fn main() -> ExitCode {
             net::set_offline(cli.offline);
             replay(&frames, riven, scale)
         }
+        Command::BuildCatalog { out } => {
+            net::set_offline(cli.offline);
+            build_catalog(&out)
+        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -162,25 +181,26 @@ fn main() -> ExitCode {
     }
 }
 
+/// Calls the running app's own API (`trigger`, `quit`, the single-instance check).
 fn local(port: u16, path: &str, post: bool, timeout: Duration) -> Result<Value> {
-    let url = format!("http://127.0.0.1:{port}/api/{path}");
-    let agent: ureq::Agent =
-        ureq::Agent::config_builder().timeout_global(Some(timeout)).http_status_as_error(false).build().into();
-    let mut resp = if post {
-        agent.post(&url).header("Content-Type", "application/json").send("{}")?
-    } else {
-        agent.get(&url).call()?
-    };
-    Ok(serde_json::from_slice(&resp.body_mut().read_to_vec()?)?)
+    net::local::call(port, path, post, timeout)
 }
 
+/// Whether this app (not some other program on the port) answers there: its settings carry keys
+/// nothing else would.
 fn running(port: u16) -> bool {
-    local(port, "settings", false, Duration::from_secs(2)).is_ok_and(|v| v.is_object())
+    local(port, "settings", false, Duration::from_secs(2))
+        .is_ok_and(|v| v.get("hotkey_rewards").is_some() && v.get("ee_log_path").is_some())
 }
+
+/// How long the engine gets, once the window is closed, to finish requests and background work
+/// and to write what is not on disk yet.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 fn run(settings: config::Settings, browser: bool, headless: bool, offline: bool) -> Result<()> {
     let desktop = !browser && !headless;
-    // Before anything starts a thread: the display backend is chosen through the environment.
+    // Before anything starts a thread: the display backend is chosen through the environment,
+    // which may only be changed while the process is single-threaded.
     let backend = desktop.then(|| desktop::prepare_environment(&settings));
     net::set_offline(offline);
 
@@ -191,38 +211,42 @@ fn run(settings: config::Settings, browser: bool, headless: bool, offline: bool)
         println!("warframeproject is already running.");
         return Ok(());
     }
-    let server = server::bind(port).map_err(|e| {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("engine")
+        .build()
+        .context("the engine's runtime could not start")?;
+    let listener = runtime.block_on(tokio::net::TcpListener::bind(("127.0.0.1", port))).map_err(|e| {
         UserError::new(format!(
             "Port {port} is in use by another program ({e}). Change \"port\" in {} or pass --port.",
             config::settings_file().display()
         ))
     })?;
-    let state = state::State::new(settings);
+    // `--port 0` binds any free port: from here on the port is the one bound.
+    let port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
+    // The engine's background tasks are spawned onto the runtime from here on, also from the
+    // desktop shell's callbacks on this thread.
+    let _runtime = runtime.enter();
+    let state = app::App::new(settings, port)?;
     state.start();
-    server::serve(server, Arc::clone(&state), 6);
+    let server = runtime.spawn(api::serve(listener, Arc::clone(&state), state.stop.clone()));
+    runtime.spawn(quit_on_signal(Arc::clone(&state)));
     #[cfg(windows)]
     {
         if let Err(e) = state.install_hotkeys() {
-            state.event(&format!("Hotkeys not registered: {e}"), "warn");
+            state.accounts.event(&format!("Hotkeys not registered: {e}"), "warn");
         }
         let me = Arc::clone(&state);
-        std::thread::Builder::new().name("unpack-ocr".into()).spawn(move || {
-            if let Err(e) = compositor::unpack_tesseract() {
-                me.event(&format!("The built-in OCR could not be unpacked: {e:#}"), "warn");
-            }
+        std::thread::Builder::new().name("unpack-ocr".into()).spawn(move || match compositor::unpack_tesseract() {
+            Ok(()) => me.tools_changed(),
+            Err(e) => me.accounts.event(&format!("The built-in OCR could not be unpacked: {e:#}"), "warn"),
         })?;
     }
     let url = format!("http://127.0.0.1:{port}/");
     println!("warframeproject {} engine on {url}", env!("CARGO_PKG_VERSION"));
 
-    match backend {
-        Some(backend) => {
-            let res = desktop::run(Arc::clone(&state), &url, backend);
-            // Flush dirty caches and wait briefly for in-flight disk writes before ending background threads.
-            state.shutdown();
-            res?;
-            std::process::exit(0);
-        }
+    let result = match backend {
+        Some(backend) => desktop::run(Arc::clone(&state), &url, backend),
         None => {
             if browser {
                 #[cfg(unix)]
@@ -230,11 +254,47 @@ fn run(settings: config::Settings, browser: bool, headless: bool, offline: bool)
                 #[cfg(windows)]
                 desktop::open_url(&url);
             }
-            loop {
-                std::thread::park();
-            }
+            // Until `/api/quit`, Ctrl+C or SIGTERM.
+            runtime.block_on(state.stop.cancelled());
+            Ok(())
+        }
+    };
+    // The window is gone: stop the background work, let running requests finish, and write what
+    // is not on disk yet. Returning from `main` then ends whatever is left.
+    state.stop.cancel();
+    // Scans looking for cards give up now, so the requests waiting on them end too.
+    state.scans.stop_scans();
+    runtime.block_on(async {
+        if tokio::time::timeout(SHUTDOWN_GRACE, server).await.is_err() {
+            eprintln!("the server did not stop in time; quitting anyway");
+        }
+        state.shutdown(SHUTDOWN_GRACE).await;
+    });
+    drop(_runtime);
+    runtime.shutdown_timeout(Duration::from_secs(1));
+    result
+}
+
+/// Ctrl+C in the terminal, or SIGTERM from the system, quits like the window's Quit button.
+async fn quit_on_signal(state: Arc<app::App>) {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let (Ok(mut term), Ok(mut int)) = (signal(SignalKind::terminate()), signal(SignalKind::interrupt())) else {
+            return;
+        };
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = int.recv() => {}
+            _ = state.stop.cancelled() => return,
         }
     }
+    #[cfg(windows)]
+    tokio::select! {
+        r = tokio::signal::ctrl_c() => if r.is_err() { return },
+        _ = state.stop.cancelled() => return,
+    }
+    state.quit();
 }
 
 fn trigger(port: u16) -> Result<()> {
@@ -270,10 +330,9 @@ fn riven(port: u16) -> Result<()> {
         res["positives"]
     );
     for g in res["stats"].as_array().into_iter().flatten() {
-        let sign = if g["negative"].as_bool().unwrap_or(false) { "-" } else { "+" };
         println!(
-            "  {sign}{:<8} {:<26} {:<3} ({:+.2}%)",
-            g["value"].as_f64().unwrap_or(0.0).abs(),
+            "  {:<9} {:<26} {:<3} ({:+.2}%)",
+            g["printed"].as_str().unwrap_or("").replace('\u{2212}', "-"),
             g["stat"].as_str().unwrap_or(""),
             g["grade"].as_str().unwrap_or(""),
             g["deviation"].as_f64().unwrap_or(0.0)
@@ -283,10 +342,32 @@ fn riven(port: u16) -> Result<()> {
 }
 
 /// Reads a saved frame offline: the regression check for the OCR.
+fn build_catalog(out: &std::path::Path) -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let prepared = runtime.block_on(gamedata::prepare_from_sources(true))?;
+    let catalog = gamedata::build_prepared(&prepared);
+    eprintln!("prepared: {}", serde_json::Value::Object(bundle::counts(&catalog)));
+    let failed = bundle::check(&prepared, &catalog);
+    if !failed.is_empty() {
+        for f in &failed {
+            eprintln!("check failed: {f}");
+        }
+        anyhow::bail!("the game data failed {} check(s); nothing was written", failed.len());
+    }
+    let (packed, manifest) = bundle::encode(&prepared, bundle::counts(&catalog))?;
+    std::fs::create_dir_all(out)?;
+    std::fs::write(out.join(&manifest.file), &packed)?;
+    std::fs::write(out.join("manifest.json"), serde_json::to_vec_pretty(&manifest)?)?;
+    println!("{} ({} bytes): {}", manifest.file, manifest.size, serde_json::Value::Object(manifest.counts.clone()));
+    Ok(())
+}
+
 fn replay(frames: &[PathBuf], riven: bool, scale: Option<f64>) -> Result<()> {
     #[cfg(windows)]
     compositor::unpack_tesseract()?;
-    let catalog = gamedata::load(false).context("the game data is needed to know what to look for")?;
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let catalog =
+        runtime.block_on(gamedata::load(false)).context("the game data is needed to know what to look for")?;
     // The scale the frames were taken at: as given, else the game's own now, else any.
     let scales: Vec<f64> = match scale {
         Some(percent) => vec![percent / 100.0],
@@ -345,7 +426,8 @@ fn replay_riven(catalog: &gamedata::Catalog, frame: &std::path::Path, scales: &[
         let graded =
             item.zip(counts).and_then(|(it, (p, n, _))| rivens::grade_roll(it, s.stat, s.value, p, n, s.negative));
         let grade = graded.map_or(String::new(), |g| format!("  {} ({:+.2}%)", g.grade, g.deviation));
-        println!("  {}{} {}{grade}", if s.negative { "-" } else { "+" }, s.value.abs(), s.stat);
+        // As the card prints it: the value keeps the card's sign (Recoil's good rolls are "-").
+        println!("  {}{} {}{grade}", if s.value < 0.0 { "-" } else { "+" }, s.value.abs(), s.stat);
     }
     eprintln!("--- text\n{text}");
     eprintln!("--- read in {:.2} s", started.elapsed().as_secs_f64());

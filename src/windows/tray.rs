@@ -23,7 +23,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_DESTROY, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_USER, WNDCLASSW,
 };
 
-use crate::state::State;
+use crate::app::App;
 use crate::tray_icon;
 
 const WM_TRAY: u32 = WM_USER + 1;
@@ -33,7 +33,7 @@ const CMD_RIVEN: usize = 3;
 const CMD_QUIT: usize = 4;
 
 struct TrayCtx {
-    state: Arc<State>,
+    state: Arc<App>,
     visible: Arc<AtomicBool>,
 }
 
@@ -43,13 +43,13 @@ struct RunningTray {
 }
 
 pub struct Tray {
-    state: Arc<State>,
+    state: Arc<App>,
     visible: Arc<AtomicBool>,
     running: Option<RunningTray>,
 }
 
 impl Tray {
-    pub fn new(state: Arc<State>, enabled: bool, window_visible: bool) -> Self {
+    pub fn new(state: Arc<App>, enabled: bool, window_visible: bool) -> Self {
         let mut tray = Self { state, visible: Arc::new(AtomicBool::new(window_visible)), running: None };
         tray.set_enabled(enabled, window_visible);
         tray
@@ -74,9 +74,14 @@ impl Tray {
         };
         match rx.recv_timeout(Duration::from_secs(3)) {
             Ok(hwnd) if hwnd != 0 => self.running = Some(RunningTray { hwnd, thread }),
-            _ => {
+            // It could not make its window and has ended.
+            Ok(_) => {
                 let _ = thread.join();
             }
+            // The shell is slow to take the icon (Explorer restarting): not waited for here, on
+            // the window's thread. Once the thread finds nobody waiting it removes its icon and
+            // ends by itself; dropping the handle lets it.
+            Err(_) => drop(thread),
         }
     }
 
@@ -145,7 +150,7 @@ unsafe fn create_icon() -> HICON {
     icon
 }
 
-fn run_tray_thread(state: Arc<State>, visible: Arc<AtomicBool>, ready: std::sync::mpsc::Sender<usize>) {
+fn run_tray_thread(state: Arc<App>, visible: Arc<AtomicBool>, ready: std::sync::mpsc::Sender<usize>) {
     let class_name = wide("warframeproject_tray");
     // SAFETY: registers a thread-local message-only window class, creates a hidden HWND_MESSAGE
     // window, attaches our Box<TrayCtx> for the duration of the loop, and cleans up before return.
@@ -186,12 +191,15 @@ fn run_tray_thread(state: Arc<State>, visible: Arc<AtomicBool>, ready: std::sync
         nid.szTip[..n].copy_from_slice(&tip[..n]);
 
         Shell_NotifyIconW(NIM_ADD, &nid);
-        let _ = ready.send(hwnd as usize);
-
-        let mut msg: MSG = std::mem::zeroed();
-        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+        if ready.send(hwnd as usize).is_ok() {
+            let mut msg: MSG = std::mem::zeroed();
+            while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        } else {
+            // Nobody waits for this tray any more (the window gave up on a slow start): undo it.
+            DestroyWindow(hwnd);
         }
 
         Shell_NotifyIconW(NIM_DELETE, &nid);
@@ -259,18 +267,8 @@ unsafe fn show_menu(hwnd: HWND, ctx: &TrayCtx) {
 
         match cmd {
             CMD_TOGGLE => ctx.state.toggle_window(),
-            CMD_REWARDS => {
-                let s = Arc::clone(&ctx.state);
-                let _ = std::thread::Builder::new().name("tray-rewards".into()).spawn(move || {
-                    let _ = s.scan_rewards();
-                });
-            }
-            CMD_RIVEN => {
-                let s = Arc::clone(&ctx.state);
-                let _ = std::thread::Builder::new().name("tray-riven".into()).spawn(move || {
-                    let _ = s.scan_riven();
-                });
-            }
+            CMD_REWARDS => ctx.state.scan_rewards_later(),
+            CMD_RIVEN => ctx.state.scan_riven_later(),
             CMD_QUIT => ctx.state.quit(),
             _ => {}
         }

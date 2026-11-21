@@ -8,8 +8,9 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Result, anyhow};
-use serde_json::{Value, json};
+use anyhow::anyhow;
+use serde::Serialize;
+use ts_rs::TS;
 
 use crate::gamedata::{self, Catalog};
 use crate::{config, now};
@@ -21,13 +22,22 @@ const HOUR: i64 = 3600;
 /// How far ahead the World page lists them.
 const AHEAD: usize = 24;
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Schedule {
     /// When each hour starts (epoch seconds) and its node tag, in time order.
     pub slots: Vec<(i64, String)>,
     /// Node tag -> "S", "A", "B", "C" or "D"; a node the list leaves out is F tier, as on
     /// browse.wf. Empty when the list could not be loaded: then no tier is shown at all.
     pub tiers: HashMap<String, String>,
+}
+
+impl Schedule {
+    /// Only the hours that have not ended yet: the file runs from 2024.
+    pub fn current(mut self) -> Schedule {
+        let t = now() as i64;
+        self.slots.retain(|(start, _)| start + HOUR > t);
+        self
+    }
 }
 
 /// The "<start>,<node>" lines of `arbys.txt`, in time order. Other lines are skipped.
@@ -65,33 +75,32 @@ pub fn parse_tiers(js: &str) -> HashMap<String, String> {
 
 /// Both files, revalidated once a day like the game data (`gamedata::download_file`). Without
 /// them the World page simply has no arbitration card.
-pub fn download(force: bool) -> Schedule {
-    let cache = &config::dirs().cache;
-    let read_schedule = |bytes: &[u8]| -> Result<Vec<(i64, String)>> {
+pub async fn download(force: bool) -> Schedule {
+    let cache = config::dirs().cache.clone();
+    let read_schedule: gamedata::Reader<Vec<(i64, String)>> = std::sync::Arc::new(|bytes: &[u8]| {
         let slots = parse_schedule(&String::from_utf8_lossy(bytes));
         if slots.is_empty() { Err(anyhow!("no arbitration in the schedule")) } else { Ok(slots) }
-    };
-    let mut slots = match gamedata::download_file(SCHEDULE_URL, &cache.join("arbys.txt"), force, read_schedule) {
-        Ok(slots) => slots,
-        Err(e) => {
-            eprintln!("arbitration schedule unavailable: {e:#}");
-            Vec::new()
-        }
-    };
+    });
+    let read_tiers: gamedata::Reader<HashMap<String, String>> = std::sync::Arc::new(|bytes: &[u8]| {
+        let tiers = parse_tiers(&String::from_utf8_lossy(bytes));
+        if tiers.is_empty() { Err(anyhow!("no tier in the tier list")) } else { Ok(tiers) }
+    });
+    let (schedule_path, tiers_path) = (cache.join("arbys.txt"), cache.join("arbyTiers.js"));
+    let (slots, tiers) = tokio::join!(
+        gamedata::download_file(SCHEDULE_URL, &schedule_path, force, read_schedule),
+        gamedata::download_file(TIERS_URL, &tiers_path, force, read_tiers),
+    );
+    let mut slots = slots.unwrap_or_else(|e| {
+        eprintln!("arbitration schedule unavailable: {e:#}");
+        Vec::new()
+    });
     // The file starts in 2024; only what has not ended yet is of use.
     let t = now() as i64;
     slots.retain(|(start, _)| start + HOUR > t);
-    let read_tiers = |bytes: &[u8]| -> Result<HashMap<String, String>> {
-        let tiers = parse_tiers(&String::from_utf8_lossy(bytes));
-        if tiers.is_empty() { Err(anyhow!("no tier in the tier list")) } else { Ok(tiers) }
-    };
-    let tiers = match gamedata::download_file(TIERS_URL, &cache.join("arbyTiers.js"), force, read_tiers) {
-        Ok(tiers) => tiers,
-        Err(e) => {
-            eprintln!("arbitration tiers unavailable: {e:#}");
-            HashMap::new()
-        }
-    };
+    let tiers = tiers.unwrap_or_else(|e| {
+        eprintln!("arbitration tiers unavailable: {e:#}");
+        HashMap::new()
+    });
     Schedule { slots, tiers }
 }
 
@@ -113,28 +122,62 @@ impl Schedule {
 }
 
 /// One hour of the schedule as the page shows it.
-fn slot(cat: &Catalog, start: i64, tag: &str) -> Value {
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct Slot {
+    pub start: i64,
+    pub end: i64,
+    pub tag: String,
+    pub node: String,
+    pub planet: String,
+    pub mission: String,
+    pub faction: String,
+    /// A Dark Sector's extra resources, in percent.
+    pub bonus: Option<i64>,
+    /// "S" to "F"; None when the tier list could not be loaded.
+    pub tier: Option<String>,
+}
+
+/// The World page's arbitration panel.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct Arbitrations {
+    pub current: Option<Slot>,
+    pub upcoming: Vec<Slot>,
+    /// When each of the S, A and B tiers comes up next.
+    pub next: Vec<Slot>,
+    /// Whether tiers are known.
+    pub tiers: bool,
+}
+
+fn slot(cat: &Catalog, start: i64, tag: &str) -> Slot {
     let node = cat.nodes.get(tag).cloned().unwrap_or_default();
     // A node the star chart export does not know (yet) keeps its tag as its name.
     let name = if node.name.is_empty() { tag.to_string() } else { node.name };
-    json!({
-        "start": start, "end": start + HOUR, "tag": tag, "node": name, "planet": node.planet,
-        "mission": node.mission, "faction": node.faction, "bonus": node.resource_bonus,
-        "tier": cat.arbitrations.tier(tag),
-    })
+    Slot {
+        start,
+        end: start + HOUR,
+        tag: tag.to_string(),
+        node: name,
+        planet: node.planet,
+        mission: node.mission,
+        faction: node.faction,
+        bonus: node.resource_bonus,
+        tier: cat.arbitrations.tier(tag).map(str::to_owned),
+    }
 }
 
 /// What the World page shows at time `t`: the arbitration running now, the next `AHEAD` hours,
 /// and when each of the S, A and B tiers comes up next (after the one running).
-pub fn summary(cat: &Catalog, t: f64) -> Value {
+pub fn summary(cat: &Catalog, t: f64) -> Arbitrations {
     let s = &cat.arbitrations;
     let t = t as i64;
     let Some(now) = s.running(t) else {
-        return json!({"current": null, "upcoming": [], "next": [], "tiers": !s.tiers.is_empty()});
+        return Arbitrations { current: None, upcoming: Vec::new(), next: Vec::new(), tiers: !s.tiers.is_empty() };
     };
     let row = |i: usize| slot(cat, s.slots[i].0, &s.slots[i].1);
     let later = now + 1..s.slots.len();
-    let upcoming: Vec<Value> = later.clone().take(AHEAD).map(row).collect();
+    let upcoming: Vec<Slot> = later.clone().take(AHEAD).map(row).collect();
     let mut next = Vec::new();
     if !s.tiers.is_empty() {
         for tier in ["S", "A", "B"] {
@@ -143,12 +186,18 @@ pub fn summary(cat: &Catalog, t: f64) -> Value {
             }
         }
     }
-    json!({"current": row(now), "upcoming": upcoming, "next": next, "tiers": !s.tiers.is_empty()})
+    Arbitrations { current: Some(row(now)), upcoming, next, tiers: !s.tiers.is_empty() }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Value, json};
+
+    /// The answer as the page receives it.
+    fn summary(cat: &Catalog, t: f64) -> Value {
+        serde_json::to_value(super::summary(cat, t)).unwrap()
+    }
     use crate::gamedata::Node;
 
     #[test]

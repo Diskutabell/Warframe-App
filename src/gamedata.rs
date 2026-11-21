@@ -7,11 +7,13 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, anyhow};
+use futures_util::future::BoxFuture;
 use indexmap::IndexMap;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{config, net, now};
@@ -51,6 +53,11 @@ const DROP_TABLES: [&str; 12] = [
     "blueprintLocations",
     "modLocations",
 ];
+/// How many drop tables an item can drop from (all but the relics' own).
+pub const fn drop_table_count() -> usize {
+    DROP_TABLES.len() - 1
+}
+
 /// A junction gives 1,000 mastery points (wiki.warframe.com/w/Mastery_Rank); the export lists
 /// every junction with 0.
 const JUNCTION_XP: i64 = 1000;
@@ -121,7 +128,8 @@ pub struct Item {
     pub set_slug: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ts_rs::TS)]
+#[ts(export)]
 pub struct PartRelic {
     pub relic: String,
     pub rarity: Option<String>,
@@ -261,89 +269,134 @@ pub fn image_url(image: Option<&str>) -> Option<String> {
     image.filter(|s| !s.is_empty()).map(|s| format!("{IMG_URL}{s}"))
 }
 
-/// Downloads (or revalidates) every file and builds the catalog.
-// One download per source, all side by side; the tuple names what each thread fetched.
-#[allow(clippy::type_complexity)]
-pub fn load(force: bool) -> Result<Catalog> {
-    let names: Vec<&str> = MASTERY_FILES.iter().chain(EXTRA_FILES.iter()).copied().collect();
-    let regions_path = config::dirs().cache.join("regions.json");
-    let (raw, mods, (recipes, de_recipes), regions, syndicates, drops, held, arbitrations): (
-        Vec<Result<Value>>,
-        Result<Value>,
-        (Result<Value>, Result<Vec<Value>>),
-        Result<Value>,
-        Vec<Result<Value>>,
-        Vec<Result<Value>>,
-        Vec<Result<Value>>,
-        crate::arbitration::Schedule,
-    ) = std::thread::scope(|s| {
-        let jobs: Vec<_> = names.iter().map(|n| s.spawn(move || download(n, force))).collect();
-        let mods = s.spawn(|| download("Mods", force));
-        let recipes = s.spawn(|| {
-            download_to(
-                &format!("{EXPORT_URL}ExportRecipes.json"),
-                &config::dirs().cache.join("ExportRecipes.json"),
-                force,
-            )
-        });
-        let de_recipes = s.spawn(|| de_recipes(force));
-        let arbitrations = s.spawn(|| crate::arbitration::download(force));
-        let regions = s.spawn(|| download_to(REGIONS_URL, &regions_path, force));
-        let syndicates: Vec<_> = SYNDICATE_FILES
-            .iter()
-            .map(|f| s.spawn(move || download_to(&format!("{EXPORT_URL}{f}"), &config::dirs().cache.join(f), force)))
-            .collect();
-        let drops: Vec<_> = DROP_TABLES
-            .iter()
-            .map(|t| {
-                s.spawn(move || {
-                    download_to(
-                        &format!("{DROP_URL}{t}.json"),
-                        &config::dirs().cache.join(format!("drops_{t}.json")),
-                        force,
-                    )
-                })
-            })
-            .collect();
-        let held: Vec<_> = crate::inventory::EXPORTS
-            .iter()
-            .map(|f| s.spawn(move || download_to(&format!("{EXPORT_URL}{f}"), &config::dirs().cache.join(f), force)))
-            .collect();
-        let panicked = || Err(anyhow!("download thread panicked"));
-        (
-            jobs.into_iter().map(|j| j.join().unwrap_or_else(|_| panicked())).collect(),
-            mods.join().unwrap_or_else(|_| panicked()),
-            (
-                recipes.join().unwrap_or_else(|_| panicked()),
-                de_recipes.join().unwrap_or_else(|_| Err(anyhow!("download thread panicked"))),
-            ),
-            regions.join().unwrap_or_else(|_| panicked()),
-            syndicates.into_iter().map(|j| j.join().unwrap_or_else(|_| panicked())).collect(),
-            drops.into_iter().map(|j| j.join().unwrap_or_else(|_| panicked())).collect::<Vec<_>>(),
-            held.into_iter().map(|j| j.join().unwrap_or_else(|_| panicked())).collect::<Vec<_>>(),
-            arbitrations.join().unwrap_or_default(),
-        )
-    });
+/// Everything the catalog is built from, as downloaded (or read from the cache).
+struct Sources {
+    /// The WFCD files of `MASTERY_FILES` and `EXTRA_FILES`, by name.
+    wfcd: Vec<(&'static str, Result<Value>)>,
+    mods: Result<Value>,
+    recipes: Result<Value>,
+    de_recipes: Result<Vec<Value>>,
+    regions: Result<Value>,
+    /// `SYNDICATE_FILES`: the syndicate export and the English dictionary.
+    syndicates: Vec<Result<Value>>,
+    /// `DROP_TABLES`, in order.
+    drops: Vec<Result<Value>>,
+    /// `inventory::EXPORTS`, in order.
+    held: Vec<Result<Value>>,
+    /// `RELIC_EXPORTS`, for when WFCD's relics come without their drops.
+    relic_exports: Vec<Result<Value>>,
+    arbitrations: crate::arbitration::Schedule,
+}
+
+/// Builds the catalog: from the prepared data CI publishes once a day (`bundle.rs`, one
+/// download), else from the sources themselves (some forty downloads). The downloads run side
+/// by side; building, which walks every file, runs on the blocking pool.
+pub async fn load(force: bool) -> Result<Catalog> {
+    let prepared = match crate::bundle::fetch(force).await {
+        Ok(prepared) => prepared,
+        Err(e) => {
+            eprintln!("the prepared game data is unavailable, building it from its sources: {e:#}");
+            prepare_from_sources(force).await?
+        }
+    };
+    blocking(move || build_prepared(&prepared)).await
+}
+
+/// Downloads every source and prepares the data from them (what `build-catalog` publishes).
+pub async fn prepare_from_sources(force: bool) -> Result<Prepared> {
+    let sources = fetch_sources(force).await;
+    blocking(move || prepare(sources)).await?
+}
+
+/// What the catalog is built from, once the fixes that need several sources together are done:
+/// DE's recipes laid over the export's, relics given the drop tables WFCD left out. This is what
+/// CI publishes (`bundle.rs`), so every client builds from the same checked data.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Prepared {
+    /// When it was prepared, epoch seconds.
+    pub built: f64,
+    /// WFCD's files by name, "Mods", and the merged "ExportRecipes".
+    pub files: IndexMap<String, Value>,
+    /// The drop tables an item can drop from (`DROP_TABLES` after "relics"), by name.
+    pub drops: IndexMap<String, Value>,
+    /// The star chart export.
+    pub regions: Option<Value>,
+    pub syndicate_export: Option<Value>,
+    /// The game's English names (`dict.en.json`).
+    pub dict: Option<Value>,
+    /// The exports that name what an inventory holds (`inventory::EXPORTS`), by file name.
+    pub held: IndexMap<String, Value>,
+    pub arbitrations: crate::arbitration::Schedule,
+    /// The sources that could not be had when it was prepared. A client building for itself
+    /// does without them; CI publishes nothing then (`bundle::check`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing: Vec<String>,
+}
+
+async fn fetch_sources(force: bool) -> Sources {
+    use futures_util::future::join_all;
+    let cache = config::dirs().cache.clone();
+    let names: Vec<&'static str> = MASTERY_FILES.iter().chain(EXTRA_FILES.iter()).copied().collect();
+    let export = |f: &str| download_to_owned(format!("{EXPORT_URL}{f}"), cache.join(f), force);
+    let (wfcd, mods, recipes, de_recipes, regions, syndicates, drops, held, relic_exports, arbitrations) = tokio::join!(
+        join_all(names.iter().map(|n| download(n, force))),
+        download("Mods", force),
+        export("ExportRecipes.json"),
+        de_recipes(force),
+        download_to_owned(REGIONS_URL.to_string(), cache.join("regions.json"), force),
+        join_all(SYNDICATE_FILES.iter().map(|f| export(f))),
+        join_all(DROP_TABLES.iter().map(|t| {
+            download_to_owned(format!("{DROP_URL}{t}.json"), cache.join(format!("drops_{t}.json")), force)
+        })),
+        join_all(crate::inventory::EXPORTS.iter().map(|f| export(f))),
+        join_all(RELIC_EXPORTS.iter().map(|f| export(f))),
+        crate::arbitration::download(force),
+    );
+    Sources {
+        wfcd: names.into_iter().zip(wfcd).collect(),
+        mods,
+        recipes,
+        de_recipes,
+        regions,
+        syndicates,
+        drops,
+        held,
+        relic_exports,
+        arbitrations,
+    }
+}
+
+/// Merges and repairs the downloaded sources. Fails only without one of WFCD's files; anything
+/// else missing leaves its part of the app empty, as before.
+fn prepare(sources: Sources) -> Result<Prepared> {
+    let Sources { wfcd, mods, recipes, de_recipes, regions, syndicates, drops, held, relic_exports, arbitrations } =
+        sources;
+    // What could not be had: the app does without, CI publishes nothing (`bundle::check`).
+    let mut missing: Vec<String> = Vec::new();
+    let mut lack = |what: String| {
+        eprintln!("{what}");
+        missing.push(what);
+    };
     let mut files = IndexMap::new();
-    for (name, data) in names.into_iter().zip(raw) {
+    for (name, data) in wfcd {
         files.insert(name.to_string(), data.with_context(|| format!("Could not download game data ({name})"))?);
     }
     match mods {
         Ok(data) if data.is_array() => {
             files.insert("Mods".into(), data);
         }
-        Ok(_) => eprintln!("mod catalog has an unexpected format"),
-        Err(e) => eprintln!("mod catalog unavailable: {e:#}"),
+        Ok(_) => lack("mod catalog has an unexpected format".into()),
+        Err(e) => lack(format!("mod catalog unavailable: {e:#}")),
     }
     // Either source alone will do; together they cover old and new content (`merge_recipes`).
     let mut all_recipes = match recipes {
         Ok(Value::Object(map)) => map,
         Ok(_) => {
-            eprintln!("component recipe export has an unexpected format");
+            lack("component recipe export has an unexpected format".into());
             serde_json::Map::new()
         }
         Err(e) => {
-            eprintln!("component recipes unavailable: {e:#}");
+            lack(format!("component recipes unavailable: {e:#}"));
             serde_json::Map::new()
         }
     };
@@ -351,81 +404,90 @@ pub fn load(force: bool) -> Result<Catalog> {
         Ok(list) => {
             merge_recipes(&mut all_recipes, &list);
         }
-        Err(e) => eprintln!("DE's own recipe export unavailable, recipes may lack the newest items: {e:#}"),
+        Err(e) => lack(format!("DE's own recipe export unavailable, recipes may lack the newest items: {e:#}")),
     }
     if !all_recipes.is_empty() {
         files.insert("ExportRecipes".into(), Value::Object(all_recipes));
     }
     if files.get("Relics").is_some_and(crate::relics::lacks_rewards) {
-        repair_relics(&mut files, force, &drops);
+        // The printed names of relic drops come from the relics' drop table, the rest from the
+        // game's export.
+        if let Some(Err(e)) = drops.first() {
+            lack(format!("relic drop names unavailable: {e:#}"));
+        }
+        for (f, r) in RELIC_EXPORTS.iter().zip(&relic_exports) {
+            if let Err(e) = r {
+                lack(format!("{f} unavailable, relics lack their drops: {e:#}"));
+            }
+        }
+        repair_relics(&mut files, &relic_exports, &drops);
     }
-    let mut catalog = build(&files);
-    let mut drop_tables = Vec::new();
-    for (name, data) in DROP_TABLES.iter().zip(&drops).skip(1) {
+    let mut tables = IndexMap::new();
+    for (name, data) in DROP_TABLES.iter().zip(drops).skip(1) {
         match data {
             Ok(data) if data.get(*name).is_some_and(|v| v.is_array() || v.is_object()) => {
-                drop_tables.push((*name, data))
+                let empty = data[*name].as_array().is_some_and(Vec::is_empty)
+                    || data[*name].as_object().is_some_and(serde_json::Map::is_empty);
+                if empty {
+                    lack(format!("drop table {name} is empty"));
+                }
+                tables.insert(name.to_string(), data);
             }
-            Ok(_) => eprintln!("drop table {name} has an unexpected format"),
-            Err(e) => eprintln!("drop table {name} unavailable: {e:#}"),
+            Ok(_) => lack(format!("drop table {name} has an unexpected format")),
+            Err(e) => lack(format!("drop table {name} unavailable: {e:#}")),
         }
     }
-    catalog.drops = crate::drops::Drops::from_tables(&drop_tables, DROP_TABLES.len() - 1);
     // The app works without the star chart: only the mastery total is then short of it, and the
     // arbitration schedule of its node names.
-    match regions {
-        Ok(raw) => {
-            catalog.node_xp = node_xp_table(&raw);
-            if let Some(Ok(dict)) = syndicates.get(1) {
-                catalog.nodes = node_table(&raw, dict);
+    let regions =
+        regions.map_err(|e| lack(format!("star chart data unavailable, mastery will leave it out: {e:#}"))).ok();
+    let [syndicate_export, dict] = <[Result<Value>; 2]>::try_from(syndicates)
+        .map_err(|_| anyhow!("two syndicate files expected"))?
+        .map(|r| r.map_err(|e| lack(format!("syndicate data unavailable: {e:#}"))).ok());
+    let held = crate::inventory::EXPORTS
+        .iter()
+        .zip(held)
+        .filter_map(|(f, r)| match r {
+            Ok(v) => Some((f.to_string(), v)),
+            Err(e) => {
+                lack(format!("{f} unavailable, the inventory page names less: {e:#}"));
+                None
             }
+        })
+        .collect();
+    Ok(Prepared { built: now(), files, drops: tables, regions, syndicate_export, dict, held, arbitrations, missing })
+}
+
+/// The catalog from prepared data: pure work on what is in memory.
+pub fn build_prepared(p: &Prepared) -> Catalog {
+    let mut catalog = build(&p.files);
+    let tables: Vec<(&str, &Value)> = p.drops.iter().map(|(n, v)| (n.as_str(), v)).collect();
+    catalog.drops = crate::drops::Drops::from_tables(&tables, DROP_TABLES.len() - 1);
+    if let Some(raw) = &p.regions {
+        catalog.node_xp = node_xp_table(raw);
+        if let Some(dict) = &p.dict {
+            catalog.nodes = node_table(raw, dict);
         }
-        Err(e) => eprintln!("star chart data unavailable, mastery will leave it out: {e:#}"),
     }
-    catalog.arbitrations = arbitrations;
+    catalog.arbitrations = p.arbitrations.clone().current();
     // Standing works without it too: the page then says the syndicate data is missing.
-    match &syndicates[..] {
-        [Ok(export), Ok(dict)] => catalog.syndicates = crate::standing::build(export, dict),
-        _ => {
-            let why: Vec<String> =
-                syndicates.iter().filter_map(|r| r.as_ref().err()).map(|e| format!("{e:#}")).collect();
-            eprintln!("syndicate data unavailable: {}", why.join("; "));
-        }
+    if let (Some(export), Some(dict)) = (&p.syndicate_export, &p.dict) {
+        catalog.syndicates = crate::standing::build(export, dict);
     }
     // The inventory page names what it can without it.
-    if let Some(Ok(dict)) = syndicates.get(1) {
-        let exports: Vec<(&str, &Value)> = crate::inventory::EXPORTS
-            .iter()
-            .zip(&held)
-            .filter_map(|(f, r)| match r {
-                Ok(v) => Some((*f, v)),
-                Err(e) => {
-                    eprintln!("{f} unavailable, the inventory page names less: {e:#}");
-                    None
-                }
-            })
-            .collect();
-        catalog.inventory = crate::inventory::index(&exports, files.get("ExportRecipes"), dict);
+    if let Some(dict) = &p.dict {
+        let exports: Vec<(&str, &Value)> = p.held.iter().map(|(f, v)| (f.as_str(), v)).collect();
+        catalog.inventory = crate::inventory::index(&exports, p.files.get("ExportRecipes"), dict);
     }
     catalog.loaded_at = Some(now());
-    Ok(catalog)
+    catalog
 }
 
 /// Fills in the drop tables WFCD's relics lack, from the game's export and DE's drop tables (see
-/// `relics.rs`). Every source is downloaded and cached like the WFCD files; without the export the
-/// relics stay empty, without the drop tables the names fall back to the ids' words and "vaulted"
-/// to the export's own dates.
-fn repair_relics(files: &mut IndexMap<String, Value>, force: bool, drops: &[Result<Value>]) {
-    let cache = &config::dirs().cache;
-    let exports: Vec<Result<Value>> = std::thread::scope(|s| {
-        let exports: Vec<_> = RELIC_EXPORTS
-            .iter()
-            .map(|f| s.spawn(move || download_to(&format!("{EXPORT_URL}{f}"), &cache.join(f), force)))
-            .collect();
-        let panicked = || Err(anyhow!("download thread panicked"));
-        exports.into_iter().map(|j| j.join().unwrap_or_else(|_| panicked())).collect()
-    });
-    let [Ok(export_relics), Ok(export_rewards)] = &exports[..] else {
+/// `relics.rs`). Without the export the relics stay empty, without the drop tables the names fall
+/// back to the ids' words and "vaulted" to the export's own dates.
+fn repair_relics(files: &mut IndexMap<String, Value>, exports: &[Result<Value>], drops: &[Result<Value>]) {
+    let [Ok(export_relics), Ok(export_rewards)] = exports else {
         eprintln!("WFCD's relics have no drop tables and the game's export could not be read: relics stay empty");
         return;
     };
@@ -491,23 +553,51 @@ fn cache_path(name: &str) -> PathBuf {
     config::dirs().cache.join(format!("wfcd_{name}.json"))
 }
 
-fn download(name: &str, force: bool) -> Result<Value> {
-    download_to(&format!("{BASE_URL}{name}.json"), &cache_path(name), force)
+async fn download(name: &str, force: bool) -> Result<Value> {
+    download_to_owned(format!("{BASE_URL}{name}.json"), cache_path(name), force).await
 }
 
 /// Fetches a JSON file into the cache. A copy younger than `MAX_AGE` is used as it is, an older
 /// one is revalidated with its ETag, and when the source cannot be reached the old copy will do.
-fn download_to(url: &str, path: &Path, force: bool) -> Result<Value> {
-    download_to_with(url, path, force, net::get)
+async fn download_to_owned(url: String, path: PathBuf, force: bool) -> Result<Value> {
+    fetch_cached(&url, &path, force, &Network, json_reader()).await.map(|(v, _)| v)
 }
 
-fn download_to_with(
-    url: &str,
-    path: &Path,
-    force: bool,
-    get: impl FnOnce(&str, &[(&str, &str)], Duration) -> Result<net::Response>,
-) -> Result<Value> {
-    fetch_cached(url, path, force, get, |bytes| serde_json::from_slice(bytes).context("invalid JSON"))
+/// Turns downloaded bytes into what the caller needs; a download it refuses counts as a failed
+/// one, so it never replaces a good copy.
+pub(crate) type Reader<T> = Arc<dyn Fn(&[u8]) -> Result<T> + Send + Sync>;
+
+fn json_reader() -> Reader<Value> {
+    Arc::new(|bytes: &[u8]| serde_json::from_slice(bytes).context("invalid JSON"))
+}
+
+/// Where downloads come from: the network, or a test's stand-in.
+pub(crate) trait Fetch: Send + Sync {
+    fn get<'a>(
+        &'a self,
+        url: &'a str,
+        headers: &'a [(&'a str, &'a str)],
+        timeout: Duration,
+    ) -> BoxFuture<'a, Result<net::Response>>;
+}
+
+/// The real thing.
+pub(crate) struct Network;
+
+impl Fetch for Network {
+    fn get<'a>(
+        &'a self,
+        url: &'a str,
+        headers: &'a [(&'a str, &'a str)],
+        timeout: Duration,
+    ) -> BoxFuture<'a, Result<net::Response>> {
+        Box::pin(net::get(url, headers, timeout))
+    }
+}
+
+/// Runs file and parsing work on the blocking pool.
+async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T> {
+    tokio::task::spawn_blocking(work).await.map_err(|e| anyhow!("a game data task failed: {e}"))
 }
 
 /// Cap for decompressed LZMA export index output (the real index is a few kilobytes).
@@ -545,29 +635,25 @@ fn unlzma_limit(bytes: &[u8], limit: usize) -> Result<String> {
 
 /// Fetches a content-hashed manifest file into `path`, tracking the manifest name alongside it so
 /// a new hash in the index invalidates the cache immediately without sending the old URL's ETag.
-fn fetch_manifest_json(
+async fn fetch_manifest_json(
     url: &str,
     manifest: &str,
     path: &Path,
     force: bool,
-    get: impl FnOnce(&str, &[(&str, &str)], Duration) -> Result<net::Response>,
+    fetch: &dyn Fetch,
+    read: Reader<Value>,
 ) -> Result<Value> {
     let manifest_path = path.with_extension("manifest");
-    let cached_manifest = fs::read_to_string(&manifest_path).ok();
-    let changed = cached_manifest.as_deref().map(str::trim) != Some(manifest);
-    let mut updated = false;
-    let wrapped_get = |u: &str, headers: &[(&str, &str)], timeout: Duration| -> Result<net::Response> {
-        let resp = get(u, headers, timeout)?;
-        if (200..300).contains(&resp.status) {
-            updated = true;
-        }
-        Ok(resp)
+    let cached_manifest = {
+        let manifest_path = manifest_path.clone();
+        blocking(move || fs::read_to_string(manifest_path).ok()).await?
     };
-    let value = fetch_cached(url, path, force || changed, wrapped_get, |bytes| {
-        serde_json::from_slice(bytes).context("invalid JSON")
-    })?;
-    if updated {
-        if let Err(e) = config::write_atomic(&manifest_path, manifest.as_bytes()) {
+    let changed = cached_manifest.as_deref().map(str::trim) != Some(manifest);
+    let (value, downloaded) = fetch_cached(url, path, force || changed, fetch, read).await?;
+    if downloaded {
+        let manifest = manifest.to_string();
+        let saved = blocking(move || config::write_atomic(&manifest_path, manifest.as_bytes())).await?;
+        if let Err(e) = saved {
             eprintln!("could not save manifest name for {}: {e}", path.display());
         }
     }
@@ -576,9 +662,10 @@ fn fetch_manifest_json(
 
 /// The foundry recipes of DE's own export: `[{uniqueName, resultType, buildPrice, num,
 /// ingredients}, ...]`.
-fn de_recipes(force: bool) -> Result<Vec<Value>> {
-    let cache = &config::dirs().cache;
-    let index = download_file(DE_INDEX_URL, &cache.join("de_index_en.txt.lzma"), force, unlzma)?;
+async fn de_recipes(force: bool) -> Result<Vec<Value>> {
+    let cache = config::dirs().cache.clone();
+    let index =
+        download_file(DE_INDEX_URL, &cache.join("de_index_en.txt.lzma"), force, Arc::new(|b: &[u8]| unlzma(b))).await?;
     // "ExportRecipes_en.json!00_oac+LCAtIyqDxZF8Qe1ZZA"
     let file = index
         .lines()
@@ -590,13 +677,21 @@ fn de_recipes(force: bool) -> Result<Vec<Value>> {
     {
         return Err(anyhow!("DE's export index named an invalid recipe file"));
     }
+    // Only a file with the recipe list counts as one: an error page that happens to be JSON
+    // must not replace the cached copy.
+    let recipes_only: Reader<Value> = Arc::new(|bytes: &[u8]| {
+        let v: Value = serde_json::from_slice(bytes).context("invalid JSON")?;
+        if v.get("ExportRecipes").is_some_and(Value::is_array) { Ok(v) } else { Err(anyhow!("no recipe list in it")) }
+    });
     let raw = fetch_manifest_json(
         &format!("{DE_FILES_URL}{file}"),
         file,
         &cache.join("de_ExportRecipes_en.json"),
         force,
-        net::get,
-    )?;
+        &Network,
+        recipes_only,
+    )
+    .await?;
     match raw.get("ExportRecipes") {
         Some(Value::Array(list)) => Ok(list.clone()),
         _ => Err(anyhow!("DE's recipe export has an unexpected format")),
@@ -626,39 +721,55 @@ fn merge_recipes(into: &mut serde_json::Map<String, Value>, de: &[Value]) -> usi
 
 /// `download_to` for a file of any kind: `read` turns its bytes into what the caller needs. A
 /// download `read` refuses counts as a failed one, so it never replaces a good copy.
-pub(crate) fn download_file<T>(url: &str, path: &Path, force: bool, read: impl Fn(&[u8]) -> Result<T>) -> Result<T> {
-    fetch_cached(url, path, force, net::get, read)
-}
-
-fn fetch_cached<T>(
+pub(crate) async fn download_file<T: Send + 'static>(
     url: &str,
     path: &Path,
     force: bool,
-    get: impl FnOnce(&str, &[(&str, &str)], Duration) -> Result<net::Response>,
-    read: impl Fn(&[u8]) -> Result<T>,
+    read: Reader<T>,
 ) -> Result<T> {
-    let etag_path = path.with_extension("etag");
+    fetch_cached(url, path, force, &Network, read).await.map(|(v, _)| v)
+}
+
+/// What the cache holds for a download, read before asking the source.
+enum Cached<T> {
+    /// Young enough to use as it is.
+    Fresh(T),
+    /// Too old, or a refresh was asked for: `data` is what to fall back on, `etag` revalidates it.
+    Stale { data: Result<T>, etag: Option<String> },
+}
+
+fn read_cache<T>(path: &Path, force: bool, read: &dyn Fn(&[u8]) -> Result<T>) -> Cached<T> {
     let age = fs::metadata(path).and_then(|m| m.modified()).ok().and_then(|t| SystemTime::now().duration_since(t).ok());
     let cached: Result<T> = fs::read(path)
         .with_context(|| format!("reading cached {}", path.display()))
         .and_then(|bytes| read(&bytes).with_context(|| format!("parsing cached {}", path.display())));
-    if !force && age.is_some_and(|a| a < MAX_AGE) {
-        if let Ok(v) = cached {
-            return Ok(v);
+    let young = age.is_some_and(|a| a < MAX_AGE);
+    match cached {
+        Ok(data) if !force && young => Cached::Fresh(data),
+        data => {
+            let etag = if !force && data.is_ok() { fs::read_to_string(path.with_extension("etag")).ok() } else { None };
+            Cached::Stale { data, etag }
         }
     }
-    let etag = if !force && cached.is_ok() { fs::read_to_string(&etag_path).ok() } else { None };
-    let mut headers = Vec::new();
-    if let Some(tag) = &etag {
-        headers.push(("If-None-Match", tag.as_str()));
-    }
-    match get(url, &headers, Duration::from_secs(60)) {
+}
+
+/// Settles a download: the source's answer when it is usable (then cached with its ETag), else
+/// the cached copy. True when the answer was new data.
+fn settle<T>(
+    url: &str,
+    path: &Path,
+    cached: Result<T>,
+    answer: Result<net::Response>,
+    read: &dyn Fn(&[u8]) -> Result<T>,
+) -> Result<(T, bool)> {
+    let etag_path = path.with_extension("etag");
+    match answer {
         Ok(resp) if resp.status == 304 => {
             let data = cached.context("server returned HTTP 304 without a usable cached copy")?;
             if let Ok(f) = fs::File::options().append(true).open(path) {
                 let _ = f.set_modified(SystemTime::now());
             }
-            Ok(data)
+            Ok((data, false))
         }
         Ok(resp) if (200..300).contains(&resp.status) => {
             let data: T = match read(&resp.body) {
@@ -667,7 +778,7 @@ fn fetch_cached<T>(
                     return match cached {
                         Ok(data) => {
                             eprintln!("unusable data from {url}, using cached {}: {e:#}", path.display());
-                            Ok(data)
+                            Ok((data, false))
                         }
                         Err(cache_err) => Err(anyhow!("unusable data from {url}: {e:#}; {cache_err:#}")),
                     };
@@ -684,17 +795,40 @@ fn fetch_cached<T>(
                     eprintln!("could not save ETag for {}: {e}", path.display());
                 }
             }
-            Ok(data)
+            Ok((data, true))
         }
         // Offline or an error upstream: a stale copy beats no data at all.
         other => match cached {
-            Ok(data) => Ok(data),
+            Ok(data) => Ok((data, false)),
             Err(cache_err) => Err(match other {
                 Ok(resp) => anyhow!("HTTP {}; {cache_err:#}", resp.status),
                 Err(e) => e.context(cache_err),
             }),
         },
     }
+}
+
+/// Downloads `url` into the cache file `path` (see `download_to_owned`). True with the data when
+/// the source sent new data.
+pub(crate) async fn fetch_cached<T: Send + 'static>(
+    url: &str,
+    path: &Path,
+    force: bool,
+    fetch: &dyn Fetch,
+    read: Reader<T>,
+) -> Result<(T, bool)> {
+    let cached = {
+        let (path, read) = (path.to_path_buf(), Arc::clone(&read));
+        blocking(move || read_cache(&path, force, &*read)).await?
+    };
+    let (data, etag) = match cached {
+        Cached::Fresh(data) => return Ok((data, false)),
+        Cached::Stale { data, etag } => (data, etag),
+    };
+    let headers: Vec<(&str, &str)> = etag.iter().map(|tag| ("If-None-Match", tag.as_str())).collect();
+    let answer = fetch.get(url, &headers, Duration::from_secs(60)).await;
+    let (url, path) = (url.to_string(), path.to_path_buf());
+    blocking(move || settle(&url, &path, data, answer, &*read)).await?
 }
 
 // Riven base values are per weapon class, not per WFCD category: shotguns sit inside Primary,
@@ -1320,13 +1454,22 @@ impl Catalog {
         if let Some(it) = self.items.get(uid) {
             return it.name.clone();
         }
-        if let Some(p) = self.parts.get(uid) {
+        // A part by either twin: a blueprint crafting in the foundry is the "Hildryn Chassis"
+        // the catalog files under its component, not an "Ironframe Chassis".
+        if let Some(p) = self.parts.get(self.part_alias.get(uid).map_or(uid, String::as_str)) {
             return p.name.clone();
         }
         if let Some((base, refinement)) = self.relic_uids.get(uid) {
             return format!("{base} {refinement}");
         }
-        self.names.get(uid).cloned().unwrap_or_else(|| camel_name(uid))
+        if let Some(name) = self.names.get(uid) {
+            return name.clone();
+        }
+        // The game's own export names what WFCD does not (medallions, syndicate offerings).
+        if let Some(name) = self.inventory.get(uid).and_then(|e| e.name.as_deref()).filter(|n| !n.is_empty()) {
+            return name.to_string();
+        }
+        camel_name(uid)
     }
 
     /// Names the OCR matcher looks for on the reward screen: everything a relic can drop.
@@ -1393,8 +1536,33 @@ mod tests {
         net::Response { status, body: body.as_bytes().to_vec(), etag: etag.map(str::to_owned) }
     }
 
-    #[test]
-    fn cached_download_revalidates_only_usable_data() {
+    /// A source that answers with whatever the test's closure says.
+    struct Mock<F>(std::sync::Mutex<F>);
+
+    impl<F> Fetch for Mock<F>
+    where
+        F: FnMut(&str, &[(&str, &str)], Duration) -> Result<net::Response> + Send,
+    {
+        fn get<'a>(
+            &'a self,
+            url: &'a str,
+            headers: &'a [(&'a str, &'a str)],
+            timeout: Duration,
+        ) -> BoxFuture<'a, Result<net::Response>> {
+            let answer = (self.0.lock().unwrap())(url, headers, timeout);
+            Box::pin(std::future::ready(answer))
+        }
+    }
+
+    async fn download_to_with<F>(url: &str, path: &Path, force: bool, get: F) -> Result<Value>
+    where
+        F: FnMut(&str, &[(&str, &str)], Duration) -> Result<net::Response> + Send,
+    {
+        fetch_cached(url, path, force, &Mock(std::sync::Mutex::new(get)), json_reader()).await.map(|(v, _)| v)
+    }
+
+    #[tokio::test]
+    async fn cached_download_revalidates_only_usable_data() {
         let cache = TestCache::new();
         let path = cache.path();
         fs::write(&path, "broken").unwrap();
@@ -1403,10 +1571,12 @@ mod tests {
             assert!(headers.is_empty(), "a corrupt cache must not send an ETag");
             Ok(response(200, r#"{"updated":true}"#, Some("\"new\"")))
         })
+        .await
         .unwrap();
         assert_eq!(data, json!({"updated": true}));
         assert_eq!(fs::read_to_string(path.with_extension("etag")).unwrap(), "\"new\"");
-        let data = download_to_with("test", &path, false, |_, _, _| panic!("fresh cache should not fetch")).unwrap();
+        let data =
+            download_to_with("test", &path, false, |_, _, _| panic!("fresh cache should not fetch")).await.unwrap();
         assert_eq!(data, json!({"updated": true}));
 
         fs::File::options()
@@ -1419,13 +1589,14 @@ mod tests {
             assert_eq!(headers, &[("If-None-Match", "\"new\"")]);
             Ok(response(304, "", None))
         })
+        .await
         .unwrap();
         assert_eq!(data, json!({"updated": true}));
         assert!(fs::metadata(&path).unwrap().modified().unwrap().elapsed().unwrap() < MAX_AGE);
     }
 
-    #[test]
-    fn cached_download_preserves_valid_data_on_bad_response() {
+    #[tokio::test]
+    async fn cached_download_preserves_valid_data_on_bad_response() {
         let cache = TestCache::new();
         let path = cache.path();
         fs::write(&path, r#"{"cached":true}"#).unwrap();
@@ -1434,22 +1605,24 @@ mod tests {
             assert!(headers.is_empty(), "forced refresh must not send an ETag");
             Ok(response(200, "not json", Some("\"bad\"")))
         })
+        .await
         .unwrap();
         assert_eq!(data, json!({"cached": true}));
         assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"cached":true}"#);
         assert_eq!(fs::read_to_string(path.with_extension("etag")).unwrap(), "\"old\"");
-        let data = download_to_with("test", &path, true, |_, _, _| Ok(response(503, "", None))).unwrap();
+        let data = download_to_with("test", &path, true, |_, _, _| Ok(response(503, "", None))).await.unwrap();
         assert_eq!(data, json!({"cached": true}));
-        let data = download_to_with("test", &path, true, |_, _, _| Err(anyhow!("network unavailable"))).unwrap();
+        let data = download_to_with("test", &path, true, |_, _, _| Err(anyhow!("network unavailable"))).await.unwrap();
         assert_eq!(data, json!({"cached": true}));
         let data =
-            download_to_with("test", &path, true, |_, _, _| Ok(response(200, r#"{"next":true}"#, None))).unwrap();
+            download_to_with("test", &path, true, |_, _, _| Ok(response(200, r#"{"next":true}"#, None))).await.unwrap();
         assert_eq!(data, json!({"next": true}));
         assert!(!path.with_extension("etag").exists());
         fs::write(&path, "broken").unwrap();
-        let err = download_to_with("test", &path, true, |_, _, _| Ok(response(200, "not json", None))).unwrap_err();
+        let err =
+            download_to_with("test", &path, true, |_, _, _| Ok(response(200, "not json", None))).await.unwrap_err();
         assert!(format!("{err:#}").contains("invalid JSON"));
-        let err = download_to_with("test", &path, false, |_, _, _| Ok(response(304, "", None))).unwrap_err();
+        let err = download_to_with("test", &path, false, |_, _, _| Ok(response(304, "", None))).await.unwrap_err();
         assert!(format!("{err:#}").contains("without a usable cached copy"));
     }
 
@@ -1698,8 +1871,8 @@ mod tests {
         assert_eq!(c.reward_names().get("Ash Prime Chassis Blueprint").map(String::as_str), Some(bp));
     }
 
-    #[test]
-    fn hashed_manifest_refetches_when_hash_changes_without_stale_etag() {
+    #[tokio::test]
+    async fn hashed_manifest_refetches_when_hash_changes_without_stale_etag() {
         let dir = std::env::temp_dir().join(format!("wfp-manifest-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -1709,43 +1882,90 @@ mod tests {
         };
 
         // First fetch populates cache, etag, and manifest sidecar.
-        let v1 = fetch_manifest_json("https://example/v1", "ExportRecipes_en.json!00_aaa", &path, false, |_, _, _| {
-            resp("{\"v\":1}", "\"etag-1\"")
-        })
+        let v1 = fetch_manifest_json(
+            "https://example/v1",
+            "ExportRecipes_en.json!00_aaa",
+            &path,
+            false,
+            &Mock(std::sync::Mutex::new(|_: &str, _: &[(&str, &str)], _| resp("{\"v\":1}", "\"etag-1\""))),
+            json_reader(),
+        )
+        .await
         .unwrap();
         assert_eq!(v1["v"], 1);
 
         // Same manifest within MAX_AGE serves directly from cache without calling get.
-        let cached =
-            fetch_manifest_json("https://example/v1", "ExportRecipes_en.json!00_aaa", &path, false, |_, _, _| {
-                panic!("same manifest should stay cached")
-            })
-            .unwrap();
+        let cached = fetch_manifest_json(
+            "https://example/v1",
+            "ExportRecipes_en.json!00_aaa",
+            &path,
+            false,
+            &Mock(std::sync::Mutex::new(|_: &str, _: &[(&str, &str)], _| panic!("same manifest should stay cached"))),
+            json_reader(),
+        )
+        .await
+        .unwrap();
         assert_eq!(cached["v"], 1);
 
         // Changed manifest forces a fresh fetch and must NOT send the old URL's If-None-Match.
         let mut saw_etag = false;
-        let v2 = fetch_manifest_json("https://example/v2", "ExportRecipes_en.json!00_bbb", &path, false, |_, h, _| {
-            saw_etag = h.iter().any(|(k, _)| k.eq_ignore_ascii_case("if-none-match"));
-            resp("{\"v\":2}", "\"etag-2\"")
-        })
+        let v2 = fetch_manifest_json(
+            "https://example/v2",
+            "ExportRecipes_en.json!00_bbb",
+            &path,
+            false,
+            &Mock(std::sync::Mutex::new(|_: &str, h: &[(&str, &str)], _| {
+                saw_etag = h.iter().any(|(k, _)| k.eq_ignore_ascii_case("if-none-match"));
+                resp("{\"v\":2}", "\"etag-2\"")
+            })),
+            json_reader(),
+        )
+        .await
         .unwrap();
         assert!(!saw_etag, "must not send previous manifest's ETag to a new URL");
         assert_eq!(v2["v"], 2);
 
         // Offline after another manifest change falls back to v2 without overwriting the manifest.
-        let offline =
-            fetch_manifest_json("https://example/v3", "ExportRecipes_en.json!00_ccc", &path, false, |_, _, _| {
-                Err(anyhow!("offline"))
-            })
-            .unwrap();
+        let offline = fetch_manifest_json(
+            "https://example/v3",
+            "ExportRecipes_en.json!00_ccc",
+            &path,
+            false,
+            &Mock(std::sync::Mutex::new(|_: &str, _: &[(&str, &str)], _| Err(anyhow!("offline")))),
+            json_reader(),
+        )
+        .await
+        .unwrap();
         assert_eq!(offline["v"], 2);
-        let v3 = fetch_manifest_json("https://example/v3", "ExportRecipes_en.json!00_ccc", &path, false, |_, _, _| {
-            resp("{\"v\":3}", "\"etag-3\"")
-        })
+        let v3 = fetch_manifest_json(
+            "https://example/v3",
+            "ExportRecipes_en.json!00_ccc",
+            &path,
+            false,
+            &Mock(std::sync::Mutex::new(|_: &str, _: &[(&str, &str)], _| resp("{\"v\":3}", "\"etag-3\""))),
+            json_reader(),
+        )
+        .await
         .unwrap();
         assert_eq!(v3["v"], 3);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn an_answer_the_reader_refuses_never_replaces_the_cached_copy() {
+        let cache = TestCache::new();
+        let path = cache.path();
+        fs::write(&path, r#"{"ExportRecipes": [{"uniqueName": "/R"}]}"#).unwrap();
+        let recipes_only: Reader<Value> = Arc::new(|bytes: &[u8]| {
+            let v: Value = serde_json::from_slice(bytes).context("invalid JSON")?;
+            if v.get("ExportRecipes").is_some_and(Value::is_array) { Ok(v) } else { Err(anyhow!("no recipe list")) }
+        });
+        let answer = |_: &str, _: &[(&str, &str)], _| Ok(response(200, r#"{"error": "unavailable"}"#, None));
+        let (v, downloaded) =
+            fetch_cached("test", &path, true, &Mock(std::sync::Mutex::new(answer)), recipes_only).await.unwrap();
+        assert!(!downloaded);
+        assert_eq!(v["ExportRecipes"][0]["uniqueName"], "/R", "the cached copy is kept");
+        assert!(fs::read_to_string(&path).unwrap().contains("/R"), "and stays on disk");
     }
 
     #[test]

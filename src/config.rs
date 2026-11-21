@@ -70,7 +70,8 @@ pub fn settings_file() -> PathBuf {
     dirs().config.join("settings.json")
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
 #[serde(rename_all = "lowercase")]
 pub enum Platform {
     #[default]
@@ -93,7 +94,8 @@ impl Platform {
 
 /// Which program takes screenshots. A fixed list on purpose: the old free-form command setting
 /// could be changed through the local API and was then run as a program.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
 #[serde(rename_all = "kebab-case")]
 pub enum ScreenshotTool {
     #[default]
@@ -107,7 +109,8 @@ pub enum ScreenshotTool {
 }
 
 /// How the overlays stay above the game.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
 #[serde(rename_all = "kebab-case")]
 pub enum OverlayBackend {
     /// Layer shell where the compositor has it (Hyprland, Sway, KDE), X11 otherwise.
@@ -118,7 +121,8 @@ pub enum OverlayBackend {
 }
 
 /// Where the price panels sit on the reward screen.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
 #[serde(rename_all = "kebab-case")]
 pub enum PanelPosition {
     /// Under the cards, over the row of player names.
@@ -128,7 +132,8 @@ pub enum PanelPosition {
     Above,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
 #[serde(default)]
 pub struct Settings {
     pub port: u16,
@@ -215,6 +220,16 @@ impl Settings {
 
     fn from_value(raw: serde_json::Value) -> Result<Settings> {
         let mut merged = serde_json::to_value(Settings::default())?;
+        // Port 0 would bind any free port, which nothing could find again.
+        let raw = match raw {
+            serde_json::Value::Object(mut fields) => {
+                if fields.get("port").and_then(serde_json::Value::as_u64) == Some(0) {
+                    fields.remove("port");
+                }
+                serde_json::Value::Object(fields)
+            }
+            other => other,
+        };
         if let (Some(dst), Some(src)) = (merged.as_object_mut(), raw.as_object()) {
             for (key, value) in src {
                 if let Some(slot) = dst.get_mut(key) {
@@ -244,6 +259,9 @@ impl Settings {
         }
         let updated: Settings = serde_json::from_value(current)
             .map_err(|e| UserError::new(format!("That setting has the wrong type: {e}")))?;
+        if updated.port == 0 {
+            return Err(UserError::new("The port must be between 1 and 65535.").into());
+        }
         for key in [&updated.hotkey_rewards, &updated.hotkey_riven, &updated.hotkey_window] {
             crate::compositor::validate_key(key)?;
         }
@@ -287,11 +305,27 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         let _ = fs::remove_file(&tmp);
         return Err(e);
     }
-    if let Err(e) = fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display())) {
+    if let Err(e) = replace(&tmp, path).with_context(|| format!("replacing {}", path.display())) {
         let _ = fs::remove_file(&tmp);
         return Err(e);
     }
     Ok(())
+}
+
+/// Moves `tmp` over `path`. Windows refuses to replace a file that is being replaced or opened
+/// right then (another writer, a virus scanner, the search indexer) with "access denied", which
+/// passes within milliseconds: try a few times before giving up.
+fn replace(tmp: &Path, path: &Path) -> std::io::Result<()> {
+    let mut tries = 0;
+    loop {
+        match fs::rename(tmp, path) {
+            Err(e) if cfg!(windows) && e.kind() == std::io::ErrorKind::PermissionDenied && tries < 20 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(5 * tries));
+            }
+            done => return done,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -321,6 +355,8 @@ mod tests {
     #[test]
     fn patch_refuses_wrong_types_and_unsafe_hotkeys() {
         let s = Settings::default();
+        assert!(s.patched(&json!({"port": 0})).is_err(), "port 0 binds a port nothing can find");
+        assert_eq!(Settings::from_value(json!({"port": 0})).unwrap().port, 8642, "a saved 0 falls back");
         assert!(s.patched(&json!({"overlay_seconds": "abc"})).is_err());
         assert!(s.patched(&json!({"hotkey_rewards": "F9\nexec-once = rm -rf ~"})).is_err());
         assert!(s.patched(&json!({"hotkey_window": "SUPER+F8, exec, x"})).is_err());

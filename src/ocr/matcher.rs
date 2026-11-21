@@ -295,7 +295,13 @@ pub fn match_rewards(text: &str, names: &Names, limit: usize) -> Vec<RewardMatch
                 best = best.max(sm.ratio());
             }
         }
-        if joined.contains(&target) {
+        // As whole words only: "Ris" (a Requiem mod) is in "Paris" too.
+        let whole_words = joined.match_indices(target.as_str()).any(|(i, _)| {
+            let before = joined[..i].chars().next_back();
+            let after = joined[i + target.len()..].chars().next();
+            before.is_none_or(|c| c == ' ') && after.is_none_or(|c| c == ' ')
+        });
+        if whole_words {
             best = best.max(0.99);
         }
         let need = if name.chars().count() <= 6 { 0.95 } else { 0.78 };
@@ -328,6 +334,16 @@ mod tests {
 
     fn word(t: &str, left: i32, top: i32) -> Word {
         Word { text: t.into(), left, right: left + 10 * t.len() as i32, top, height: 20 }
+    }
+
+    #[test]
+    fn a_short_name_inside_another_word_is_no_reward() {
+        let n = names(&["Paris Prime String", "Ris"]);
+        let found: Vec<String> = match_rewards("Paris Prime String", &n, 4).into_iter().map(|m| m.name).collect();
+        assert_eq!(found, ["Paris Prime String"]);
+        // As a word of its own it still matches.
+        let found: Vec<String> = match_rewards("Ris Forma Blueprint", &n, 4).into_iter().map(|m| m.name).collect();
+        assert_eq!(found, ["Ris"]);
     }
 
     #[test]

@@ -2,220 +2,211 @@
 //! open-world cycles, Baro Ki'Teer, sortie, archon hunt, Steel Path, Nightwave, Darvo, the
 //! Circuit and Archimedea; with what Duviri offers the account, from its log (`eelog.rs`).
 
-use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
-
-use serde_json::{Value, json};
+use serde::Serialize;
+use serde_json::{Number, Value};
+use ts_rs::TS;
 
 use crate::clock;
-use crate::config::Platform;
 use crate::eelog::DuviriOffers;
 use crate::gamedata::{self, Catalog};
+use crate::now;
 use crate::views::View;
-use crate::{net, now};
 
-const API: &str = "https://api.warframestat.us/{platform}?language=en";
-const MAX_AGE: f64 = 60.0;
-const ERROR_RETRY_AFTER: f64 = 15.0;
-
-struct Cache {
-    t: f64,
-    platform: Option<Platform>,
-    raw: Option<Arc<Value>>,
-    error: Option<String>,
-    in_flight: Option<Platform>,
-}
-
-struct WorldCache {
-    state: Mutex<Cache>,
-    done: Condvar,
-}
-
-impl WorldCache {
-    const fn new() -> WorldCache {
-        WorldCache {
-            state: Mutex::new(Cache { t: f64::NEG_INFINITY, platform: None, raw: None, error: None, in_flight: None }),
-            done: Condvar::new(),
-        }
-    }
-
-    fn get(
-        &self,
-        platform: Platform,
-        fetch: impl FnOnce(Platform) -> anyhow::Result<Value>,
-    ) -> (Option<Arc<Value>>, Option<String>) {
-        {
-            let mut c = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            while c.in_flight == Some(platform) {
-                c = self.done.wait(c).unwrap_or_else(|e| e.into_inner());
-            }
-            let fresh = now() - c.t < MAX_AGE && c.platform == Some(platform);
-            if fresh {
-                return (c.raw.clone(), c.error.clone());
-            }
-            if c.platform != Some(platform) {
-                // Another platform's world is no stand-in.
-                c.raw = None;
-                c.error = None;
-            }
-            c.platform = Some(platform);
-            c.in_flight = Some(platform);
-        }
-        // Guarantees waiting threads are woken even if `fetch` unwinds on a panic.
-        struct FlightGuard<'a> {
-            cache: &'a WorldCache,
-            platform: Platform,
-            armed: bool,
-        }
-        impl Drop for FlightGuard<'_> {
-            fn drop(&mut self) {
-                if self.armed {
-                    let mut c = self.cache.state.lock().unwrap_or_else(|e| e.into_inner());
-                    if c.in_flight == Some(self.platform) {
-                        c.in_flight = None;
-                    }
-                    self.cache.done.notify_all();
-                }
-            }
-        }
-        let mut guard = FlightGuard { cache: self, platform, armed: true };
-        let fetched = fetch(platform);
-        let mut c = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        guard.armed = false;
-        if c.in_flight == Some(platform) {
-            c.in_flight = None;
-        }
-        let result = if c.platform == Some(platform) {
-            match fetched {
-                Ok(raw) => {
-                    c.raw = Some(Arc::new(raw));
-                    c.error = None;
-                    c.t = now();
-                }
-                Err(e) => {
-                    c.error = Some(format!("World state unavailable: {e}"));
-                    // Short backoff on failure so a transient outage recovers soon without spinning.
-                    c.t = now() - (MAX_AGE - ERROR_RETRY_AFTER).max(0.0);
-                }
-            }
-            (c.raw.clone(), c.error.clone())
-        } else {
-            // The platform changed while this fetch was in flight: return what we fetched for our
-            // caller without overwriting the newly selected platform's cache.
-            match fetched {
-                Ok(raw) => (Some(Arc::new(raw)), None),
-                Err(e) => (None, Some(format!("World state unavailable: {e}"))),
-            }
-        };
-        self.done.notify_all();
-        result
-    }
-}
-
-static CACHE: WorldCache = WorldCache::new();
-
-/// The whole worldstate, fetched at most once a minute. A failed fetch keeps the last good copy.
-///
-/// The fetch runs with the cache unlocked, while concurrent callers for the same platform wait on
-/// the condition variable instead of observing an empty in-flight cache.
-fn worldstate(platform: Platform) -> (Option<Arc<Value>>, Option<String>) {
-    CACHE.get(platform, |p| net::get_json(&API.replace("{platform}", p.as_str()), &[], Duration::from_secs(20)))
-}
+/// The worldstate of a platform: `{platform}` is `Platform::as_str`.
+pub const API: &str = "https://api.warframestat.us/{platform}?language=en";
 
 /// The syndicate tag of the running Nightwave season, as the profile names it: the API spaces it
 /// out ("Radio Legion Intermission16 Syndicate" for "RadioLegionIntermission16Syndicate").
-pub fn nightwave_tag(platform: Platform) -> Option<String> {
-    let (raw, _) = worldstate(platform);
-    let tag: String = raw.as_deref()?["nightwave"]["tag"].as_str()?.chars().filter(|c| !c.is_whitespace()).collect();
+pub fn nightwave_tag(raw: &Value) -> Option<String> {
+    let tag: String = raw["nightwave"]["tag"].as_str()?.chars().filter(|c| !c.is_whitespace()).collect();
     (!tag.is_empty()).then_some(tag)
 }
 
 /// When the running Duviri spiral began. Duviri's loadout picks are rolled anew with each one.
-pub fn spiral_began(platform: Platform) -> Option<f64> {
-    let (raw, _) = worldstate(platform);
-    raw.as_deref()?["duviriCycle"]["activation"].as_str().and_then(clock::parse_iso)
+pub fn spiral_began(raw: &Value) -> Option<f64> {
+    raw["duviriCycle"]["activation"].as_str().and_then(clock::parse_iso)
 }
 
 /// The game's equipment slots in the order the page lists them.
 const SLOTS: [(u8, &str); 4] = [(3, "Warframes"), (1, "Primary"), (0, "Secondary"), (5, "Melee")];
 
-/// What Duviri offers the account (from its log), named and pictured, by slot. `stale` once a
-/// spiral has begun since they were rolled: then the game has picked new ones.
-pub fn duviri_picks(view: &View, offers: &DuviriOffers, spiral_began: Option<f64>) -> Value {
+/// What Duviri offers the account (from its log), named and pictured, by slot.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct DuviriPicks {
+    pub groups: Vec<DuviriGroup>,
+    pub rolled: Option<f64>,
+    /// A spiral has begun since they were rolled: the game has picked new ones.
+    pub stale: bool,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct DuviriGroup {
+    pub slot: &'static str,
+    pub picks: Vec<DuviriChoice>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct DuviriChoice {
+    pub uid: String,
+    pub name: String,
+    pub owned: bool,
+    pub mastered: bool,
+    pub image: Option<String>,
+}
+
+pub fn duviri_picks(view: &View, offers: &DuviriOffers, spiral_began: Option<f64>) -> DuviriPicks {
     let pick = |p: &crate::eelog::DuviriPick| {
         let item = view.cat.items.get(&p.uid);
-        let mastered = item.is_some_and(|it| view.item_status(it).status == "mastered");
-        json!({"uid": p.uid, "name": view.cat.name_of(&p.uid), "owned": p.owned, "mastered": mastered,
-               "image": item.and_then(|it| gamedata::image_url(it.image.as_deref()))})
+        DuviriChoice {
+            uid: p.uid.clone(),
+            name: view.cat.name_of(&p.uid),
+            owned: p.owned,
+            mastered: item.is_some_and(|it| view.item_status(it).status == "mastered"),
+            image: item.and_then(|it| gamedata::image_url(it.image.as_deref())),
+        }
     };
-    let mut groups: Vec<Value> = SLOTS
+    let mut groups: Vec<DuviriGroup> = SLOTS
         .iter()
-        .map(|(category, slot)| {
-            let picks: Vec<Value> = offers.picks.iter().filter(|p| p.category == *category).map(pick).collect();
-            json!({"slot": slot, "picks": picks})
+        .map(|(category, slot)| DuviriGroup {
+            slot,
+            picks: offers.picks.iter().filter(|p| p.category == *category).map(pick).collect(),
         })
         .collect();
-    let other: Vec<Value> =
-        offers.picks.iter().filter(|p| SLOTS.iter().all(|(c, _)| *c != p.category)).map(pick).collect();
-    groups.push(json!({"slot": "Other", "picks": other}));
-    groups.retain(|g| g["picks"].as_array().is_some_and(|p| !p.is_empty()));
+    let other = offers.picks.iter().filter(|p| SLOTS.iter().all(|(c, _)| *c != p.category)).map(pick).collect();
+    groups.push(DuviriGroup { slot: "Other", picks: other });
+    groups.retain(|g| !g.picks.is_empty());
     let stale = offers.rolled.zip(spiral_began).is_some_and(|(rolled, began)| rolled < began);
-    json!({"groups": groups, "rolled": offers.rolled, "stale": stale})
+    DuviriPicks { groups, rolled: offers.rolled, stale }
+}
+
+/// A string the worldstate gives, as it gives it.
+fn text(v: &Value) -> Option<String> {
+    v.as_str().map(str::to_owned)
+}
+
+/// A number the worldstate gives, exactly as it gives it (an integer stays one).
+fn number(v: &Value) -> Option<Number> {
+    v.as_number().cloned()
+}
+
+/// A void fissure open now.
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct Fissure {
+    pub id: Option<String>,
+    pub tier: Option<String>,
+    pub mission: Option<String>,
+    pub node: Option<String>,
+    pub enemy: Option<String>,
+    pub activation: Option<String>,
+    pub expiry: Option<String>,
+    /// A Railjack void storm.
+    pub storm: bool,
+    /// On the Steel Path.
+    pub hard: bool,
+    #[ts(type = "number | null")]
+    pub tier_num: Option<Number>,
 }
 
 /// The fissures open right now, normal ones first, then by tier and expiry.
-pub fn fissures(platform: Platform) -> (Vec<Value>, Option<String>) {
-    let (raw, err) = worldstate(platform);
-    let mut data: Vec<Value> = raw
-        .as_deref()
+pub fn fissures(raw: Option<&Value>) -> Vec<Fissure> {
+    let t = now();
+    let mut data: Vec<Fissure> = raw
         .and_then(|r| r["fissures"].as_array())
         .into_iter()
         .flatten()
-        .filter(|f| f["expired"] != Value::Bool(true))
-        .map(|f| {
-            json!({"id": f["id"], "tier": f["tier"], "mission": f["missionType"], "node": f["node"],
-                   "enemy": f["enemy"], "activation": f["activation"], "expiry": f["expiry"],
-                   "storm": f["isStorm"] == Value::Bool(true), "hard": f["isHard"] == Value::Bool(true),
-                   "tierNum": f["tierNum"]})
+        // The API's own flag, and the time: a copy kept while the API is unreachable (or answered
+        // while a fresh one is fetched) still lists fissures that have closed since.
+        .filter(|f| {
+            f["expired"] != Value::Bool(true) && f["expiry"].as_str().and_then(clock::parse_iso).is_none_or(|e| e > t)
+        })
+        .map(|f| Fissure {
+            id: text(&f["id"]),
+            tier: text(&f["tier"]),
+            mission: text(&f["missionType"]),
+            node: text(&f["node"]),
+            enemy: text(&f["enemy"]),
+            activation: text(&f["activation"]),
+            expiry: text(&f["expiry"]),
+            storm: f["isStorm"] == Value::Bool(true),
+            hard: f["isHard"] == Value::Bool(true),
+            tier_num: number(&f["tierNum"]),
         })
         .collect();
     data.sort_by(|a, b| {
-        let key = |f: &Value| {
+        let key = |f: &Fissure| {
             (
-                f["storm"].as_bool(),
-                f["hard"].as_bool(),
-                f["tierNum"].as_i64().unwrap_or(9),
-                f["expiry"].as_str().unwrap_or("").to_string(),
+                f.storm,
+                f.hard,
+                f.tier_num.as_ref().and_then(Number::as_i64).unwrap_or(9),
+                f.expiry.clone().unwrap_or_default(),
             )
         };
         key(a).cmp(&key(b))
     });
-    (data, err)
+    data
 }
 
 /// The key a fissure is watched by: tier, mission and kind ("normal", "steel" or "storm").
-pub fn watch_key(f: &Value) -> String {
-    let kind = if f["storm"] == Value::Bool(true) {
+pub fn watch_key(f: &Fissure) -> String {
+    let kind = if f.storm {
         "storm"
-    } else if f["hard"] == Value::Bool(true) {
+    } else if f.hard {
         "steel"
     } else {
         "normal"
     };
-    format!("{}|{}|{kind}", f["tier"].as_str().unwrap_or(""), f["mission"].as_str().unwrap_or(""))
+    format!("{}|{}|{kind}", f.tier.as_deref().unwrap_or(""), f.mission.as_deref().unwrap_or(""))
 }
 
-/// Baro Ki'Teer: here now (activation <= now < expiry), or when he comes next.
-pub fn baro(raw: &Value) -> Value {
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct Baro {
+    /// Here now (activation <= now < expiry).
+    pub active: bool,
+    pub location: Option<String>,
+    pub activation: Option<String>,
+    pub expiry: Option<String>,
+    pub inventory: Vec<BaroItem>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct BaroItem {
+    pub item: Option<String>,
+    #[ts(type = "number | null")]
+    pub ducats: Option<Number>,
+    #[ts(type = "number | null")]
+    pub credits: Option<Number>,
+    pub image: Option<String>,
+}
+
+/// Baro Ki'Teer: here now, or when he comes next.
+pub fn baro(raw: &Value, cat: &Catalog) -> Baro {
     let vt = &raw["voidTrader"];
     let at = |k: &str| vt[k].as_str().and_then(clock::parse_iso);
     let active = matches!((at("activation"), at("expiry")), (Some(a), Some(e)) if a <= now() && now() < e);
-    json!({
-        "active": active, "location": vt["location"], "activation": vt["activation"], "expiry": vt["expiry"],
-        "inventory": vt["inventory"].as_array().into_iter().flatten()
-            .map(|i| json!({"item": i["item"], "ducats": i["ducats"], "credits": i["credits"]}))
-            .collect::<Vec<_>>(),
-    })
+    Baro {
+        active,
+        location: text(&vt["location"]),
+        activation: text(&vt["activation"]),
+        expiry: text(&vt["expiry"]),
+        inventory: vt["inventory"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|i| BaroItem {
+                image: i["item"].as_str().and_then(|n| cat.art_by_name(n)),
+                item: text(&i["item"]),
+                ducats: number(&i["ducats"]),
+                credits: number(&i["credits"]),
+            })
+            .collect(),
+    }
 }
 
 /// "3x Forma, 10,000 credits" from a worldstate reward.
@@ -247,11 +238,46 @@ fn spaced(name: &str) -> String {
     out
 }
 
-/// "Name: what it does" pairs from the worldstate as `{name, description}`. A placeholder the
-/// game itself has not filled in ("[PH] Infected Wounds Desc", 2026-11-10) is no description.
-fn described(v: &Value) -> Value {
+/// A name and what it does, from the worldstate. A placeholder the game itself has not filled
+/// in ("[PH] Infected Wounds Desc", 2026-11-10) is no description.
+#[derive(Clone, Debug, PartialEq, Serialize, TS)]
+#[ts(export)]
+pub struct Described {
+    pub name: Option<String>,
+    pub description: Option<String>,
+}
+
+fn described(v: &Value) -> Described {
     let description = v["description"].as_str().filter(|d| !d.trim().is_empty() && !d.starts_with("[PH]"));
-    json!({"name": v["name"], "description": description})
+    Described { name: text(&v["name"]), description: description.map(str::to_owned) }
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct Archimedea {
+    pub name: &'static str,
+    pub expiry: Option<String>,
+    pub missions: Vec<ArchimedeaMission>,
+    pub modifiers: Vec<Described>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct ArchimedeaMission {
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    pub faction: Option<String>,
+    pub deviation: Described,
+    pub risks: Vec<Risk>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct Risk {
+    #[serde(flatten)]
+    pub described: Described,
+    /// Only in Elite Archimedea.
+    pub elite: bool,
 }
 
 /// A week of Deep or Temporal Archimedea: the three missions with their deviation and risk
@@ -261,7 +287,7 @@ fn described(v: &Value) -> Value {
 /// (`ConquestEquipmentSuggestionsFulfilled`). Checked 2026-11-10: not in DE's world state or the
 /// inventory, no other tool shows them, and a session's EE.log in which the Archimedea screens
 /// were not opened has none.
-fn archimedea(a: &Value) -> Value {
+fn archimedea(a: &Value) -> Archimedea {
     // The type arrives as spaced-out internal text: "C T_ L A B" is the labs, "C T_ H E X" Hollvania.
     let key: String = a["typeKey"].as_str().unwrap_or("").chars().filter(|c| !c.is_whitespace()).collect();
     let name = match key.as_str() {
@@ -270,35 +296,281 @@ fn archimedea(a: &Value) -> Value {
         _ => "Archimedea",
     };
     let list = |v: &Value| v.as_array().cloned().unwrap_or_default();
-    let missions: Vec<Value> = list(&a["missions"])
+    let missions = list(&a["missions"])
         .iter()
-        .map(|m| {
-            let risks: Vec<Value> = list(&m["risks"])
+        .map(|m| ArchimedeaMission {
+            kind: text(&m["missionType"]),
+            faction: text(&m["faction"]),
+            deviation: described(&m["deviation"]),
+            risks: list(&m["risks"])
                 .iter()
-                .map(|r| {
-                    let mut risk = described(r);
-                    risk["elite"] = json!(r["isHard"] == true);
-                    risk
-                })
-                .collect();
-            json!({"type": m["missionType"], "faction": m["faction"], "deviation": described(&m["deviation"]), "risks": risks})
+                .map(|r| Risk { described: described(r), elite: r["isHard"] == true })
+                .collect(),
         })
         .collect();
-    let modifiers: Vec<Value> = list(&a["personalModifiers"]).iter().map(described).collect();
-    json!({"name": name, "expiry": a["expiry"], "missions": missions, "modifiers": modifiers})
+    let modifiers = list(&a["personalModifiers"]).iter().map(described).collect();
+    Archimedea { name, expiry: text(&a["expiry"]), missions, modifiers }
 }
 
-/// Everything the world panel shows.
-pub fn summary(platform: Platform) -> Value {
-    let (raw, err) = worldstate(platform);
+/// The World page: the worldstate, or why there is none, and what does not come with the
+/// worldstate (filled in by the caller).
+#[derive(Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct WorldView {
+    #[serde(flatten)]
+    pub state: WorldStateOrError,
+    /// The schedule is known for years ahead (`arbitration.rs`).
+    pub arbitration: crate::arbitration::Arbitrations,
+    /// What Duviri offers the account shown, as the game last logged it.
+    pub duviri: Option<DuviriPicks>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+#[serde(untagged)]
+pub enum WorldStateOrError {
+    Live(Box<WorldState>),
+    Unavailable { error: Option<String> },
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct WorldState {
+    /// When the worldstate was made.
+    pub fetched: Option<String>,
+    pub cycles: Vec<Cycle>,
+    pub baro: Baro,
+    pub sortie: Sortie,
+    pub archon: Archon,
+    pub steel_path: SteelPath,
+    pub nightwave: Nightwave,
+    pub darvo: Option<Darvo>,
+    pub resets: Resets,
+    pub alerts: Vec<Alert>,
+    pub invasions: Vec<Invasion>,
+    pub bounties: Vec<Bounty>,
+    pub circuit: Vec<CircuitGroup>,
+    pub archimedea: Vec<Archimedea>,
+    pub events: Vec<WorldEvent>,
+    pub varzia: Varzia,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct Cycle {
+    pub name: &'static str,
+    pub place: &'static str,
+    pub state: Option<String>,
+    pub expiry: Option<String>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct Sortie {
+    pub boss: Option<String>,
+    pub faction: Option<String>,
+    pub expiry: Option<String>,
+    pub missions: Vec<SortieMission>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct SortieMission {
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    pub node: Option<String>,
+    pub modifier: Option<String>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct Archon {
+    pub boss: Option<String>,
+    pub expiry: Option<String>,
+    pub missions: Vec<ArchonMission>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct ArchonMission {
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    pub node: Option<String>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct SteelPath {
+    pub reward: Option<String>,
+    #[ts(type = "number | null")]
+    pub cost: Option<Number>,
+    pub expiry: Option<String>,
+    pub image: Option<String>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct Nightwave {
+    #[ts(type = "number | null")]
+    pub season: Option<Number>,
+    pub expiry: Option<String>,
+    pub challenges: Vec<Challenge>,
+    /// Where the account shown stands in the season.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mine: Option<crate::standing::SyndicateRow>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct Challenge {
+    pub title: Option<String>,
+    pub desc: Option<String>,
+    #[ts(type = "number | null")]
+    pub reputation: Option<Number>,
+    pub daily: Option<bool>,
+    pub elite: Option<bool>,
+    pub expiry: Option<String>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct Darvo {
+    pub item: Option<String>,
+    #[ts(type = "number | null")]
+    pub price: Option<Number>,
+    #[ts(type = "number | null")]
+    pub original_price: Option<Number>,
+    #[ts(type = "number | null")]
+    pub discount: Option<Number>,
+    #[ts(type = "number | null")]
+    pub stock: Option<Number>,
+    #[ts(type = "number | null")]
+    pub sold: Option<Number>,
+    pub expiry: Option<String>,
+    pub image: Option<String>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct Resets {
+    pub daily: String,
+    pub weekly: String,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct Alert {
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    pub node: Option<String>,
+    pub faction: Option<String>,
+    pub what: Option<String>,
+    pub reward: String,
+    /// The reward text counted up ("Fieldron, Fieldron" is Fieldron x2), with pictures.
+    pub rewards: Vec<AlertReward>,
+    pub expiry: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Serialize, TS)]
+#[ts(export)]
+pub struct AlertReward {
+    pub name: String,
+    pub count: i64,
+    pub image: Option<String>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct Invasion {
+    pub node: Option<String>,
+    pub what: Option<String>,
+    #[ts(type = "number | null")]
+    pub completion: Option<Number>,
+    pub attacker: Option<String>,
+    pub attacker_reward: String,
+    pub attacker_image: Option<String>,
+    pub defender: Option<String>,
+    pub defender_reward: String,
+    pub defender_image: Option<String>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct Bounty {
+    pub syndicate: Option<String>,
+    pub jobs: usize,
+    pub expiry: Option<String>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct CircuitGroup {
+    /// The Steel Path's choices.
+    pub steel: bool,
+    pub choices: Vec<Named>,
+}
+
+#[derive(Debug, PartialEq, Serialize, TS)]
+#[ts(export)]
+pub struct Named {
+    pub name: String,
+    pub image: Option<String>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct WorldEvent {
+    pub name: Option<String>,
+    pub node: Option<String>,
+    pub expiry: Option<String>,
+    #[ts(type = "number | null")]
+    pub score: Option<Number>,
+    #[ts(type = "number | null")]
+    pub goal: Option<Number>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct Varzia {
+    pub location: Option<String>,
+    pub expiry: Option<String>,
+}
+
+/// "Fieldron, Fieldron, 10000 credits" -> Fieldron x2, 10000 credits, with pictures.
+fn counted_rewards(text: &str, cat: &Catalog) -> Vec<AlertReward> {
+    let mut rewards: Vec<(String, i64)> = Vec::new();
+    for name in text.split(", ").filter(|n| !n.is_empty()) {
+        match rewards.iter_mut().find(|(n, _)| n == name) {
+            Some((_, count)) => *count += 1,
+            None => rewards.push((name.to_string(), 1)),
+        }
+    }
+    rewards.into_iter().map(|(name, count)| AlertReward { image: cat.art_by_name(&name), name, count }).collect()
+}
+
+/// Everything the world panel shows, from the worldstate `raw` (None when there is none, with
+/// `err` saying why), with pictures for what the world state only names (Circuit picks,
+/// rewards, Darvo's deal, Baro's stock). Arbitration and Duviri are filled in by the caller.
+pub fn summary(raw: Option<&Value>, err: Option<String>, cat: &Catalog) -> WorldView {
+    WorldView { state: state(raw, err, cat), arbitration: crate::arbitration::summary(cat, now()), duviri: None }
+}
+
+fn state(raw: Option<&Value>, err: Option<String>, cat: &Catalog) -> WorldStateOrError {
     let Some(raw) = raw else {
-        return json!({"error": err});
+        return WorldStateOrError::Unavailable { error: err };
     };
-    let cycle = |key: &str, name: &str, place: &str| {
+    let art = |name: &Option<String>| name.as_deref().and_then(|n| cat.art_by_name(n));
+    let cycle = |key: &str, name: &'static str, place: &'static str| {
         let c = &raw[key];
-        c["expiry"].as_str().map(|_| json!({"name": name, "place": place, "state": c["state"], "expiry": c["expiry"]}))
+        c["expiry"].as_str().map(|_| Cycle { name, place, state: text(&c["state"]), expiry: text(&c["expiry"]) })
     };
-    let cycles: Vec<Value> = [
+    let cycles: Vec<Cycle> = [
         cycle("cetusCycle", "Cetus", "Plains of Eidolon"),
         cycle("vallisCycle", "Orb Vallis", "Venus"),
         cycle("cambionCycle", "Cambion Drift", "Deimos"),
@@ -309,108 +581,175 @@ pub fn summary(platform: Platform) -> Value {
     .into_iter()
     .flatten()
     .collect();
+    let list = |v: &Value| -> Vec<Value> { v.as_array().cloned().unwrap_or_default() };
     let sortie = &raw["sortie"];
     let archon = &raw["archonHunt"];
     let sp = &raw["steelPath"];
     let nw = &raw["nightwave"];
     let t = now();
-    json!({
-        "fetched": raw["timestamp"],
-        "cycles": cycles,
-        "baro": baro(&raw),
-        "sortie": {"boss": sortie["boss"], "faction": sortie["faction"], "expiry": sortie["expiry"],
-                   "missions": sortie["variants"].as_array().into_iter().flatten()
-                       .map(|m| json!({"type": m["missionType"], "node": m["node"], "modifier": m["modifier"]}))
-                       .collect::<Vec<_>>()},
-        "archon": {"boss": archon["boss"], "expiry": archon["expiry"],
-                   "missions": archon["missions"].as_array().into_iter().flatten()
-                       .map(|m| json!({"type": m["type"], "node": m["node"]}))
-                       .collect::<Vec<_>>()},
-        "steelPath": {"reward": sp["currentReward"]["name"], "cost": sp["currentReward"]["cost"], "expiry": sp["expiry"]},
-        "nightwave": {"season": nw["season"], "expiry": nw["expiry"],
-                      "challenges": nw["activeChallenges"].as_array().into_iter().flatten()
-                          .map(|c| json!({"title": c["title"], "desc": c["desc"], "reputation": c["reputation"],
-                                          "daily": c["isDaily"], "elite": c["isElite"], "expiry": c["expiry"]}))
-                          .collect::<Vec<_>>()},
-        "darvo": raw["dailyDeals"].as_array().and_then(|d| d.first()).map(|d| json!({
-            "item": d["item"], "price": d["salePrice"], "originalPrice": d["originalPrice"], "discount": d["discount"],
-            "stock": d["total"], "sold": d["sold"], "expiry": d["expiry"]})),
-        "resets": {"daily": clock::iso(clock::next_daily_reset(t)), "weekly": clock::iso(clock::next_weekly_reset(t))},
-        "alerts": raw["alerts"].as_array().into_iter().flatten()
-            .map(|a| json!({"type": a["mission"]["type"], "node": a["mission"]["node"], "faction": a["mission"]["faction"],
-                            "what": a["mission"]["description"], "reward": reward_text(&a["mission"]["reward"]),
-                            "expiry": a["expiry"]}))
-            .collect::<Vec<_>>(),
-        "invasions": raw["invasions"].as_array().into_iter().flatten().filter(|i| i["completed"] != true)
-            .map(|i| json!({"node": i["node"], "what": i["desc"], "completion": i["completion"],
-                            "attacker": i["attacker"]["faction"], "attackerReward": reward_text(&i["attacker"]["reward"]),
-                            "defender": i["defender"]["faction"], "defenderReward": reward_text(&i["defender"]["reward"])}))
-            .collect::<Vec<_>>(),
-        // The open worlds' bounty boards rotate together; one timer per board.
-        "bounties": raw["syndicateMissions"].as_array().into_iter().flatten()
-            .filter(|s| s["jobs"].as_array().is_some_and(|j| !j.is_empty()))
-            .map(|s| json!({"syndicate": s["syndicate"], "jobs": s["jobs"].as_array().map_or(0, Vec::len), "expiry": s["expiry"]}))
-            .collect::<Vec<_>>(),
-        "circuit": raw["duviriCycle"]["choices"].as_array().into_iter().flatten()
-            .map(|c| json!({"steel": c["category"] == "hard",
-                            "choices": c["choices"].as_array().into_iter().flatten().filter_map(Value::as_str).map(spaced).collect::<Vec<_>>()}))
-            .collect::<Vec<_>>(),
-        "archimedea": raw["archimedeas"].as_array().into_iter().flatten().map(archimedea).collect::<Vec<_>>(),
-        "events": raw["events"].as_array().into_iter().flatten()
-            .map(|e| json!({"name": e["description"], "node": e["node"], "expiry": e["expiry"],
-                            "score": e["currentScore"], "goal": e["maximumScore"]}))
-            .collect::<Vec<_>>(),
-        "varzia": {"location": raw["vaultTrader"]["location"], "expiry": raw["vaultTrader"]["expiry"]},
-        "error": err,
-    })
-}
-
-/// Adds pictures to a summary for what the world state only names: Circuit picks, rewards,
-/// Darvo's deal, Baro's stock. Changes `circuit[].choices` from names to `{name, image}` and
-/// gives alerts a `rewards` list (`{name, count, image}`) next to the plain text.
-pub fn add_art(w: &mut Value, cat: &Catalog) {
-    // `w[key]` on a mutable value would create the key; these only look.
-    fn list<'a>(w: &'a mut Value, key: &str) -> impl Iterator<Item = &'a mut Value> {
-        w.get_mut(key).and_then(Value::as_array_mut).into_iter().flatten()
-    }
-    let art = |name: &Value| name.as_str().and_then(|n| cat.art_by_name(n));
-    for group in list(w, "circuit") {
-        let choices: Vec<Value> =
-            group["choices"].as_array().into_iter().flatten().map(|n| json!({"name": n, "image": art(n)})).collect();
-        group["choices"] = json!(choices);
-    }
-    for key in ["steelPath", "darvo"] {
-        if w[key].is_object() {
-            let name = if key == "darvo" { w[key]["item"].clone() } else { w[key]["reward"].clone() };
-            w[key]["image"] = json!(art(&name));
-        }
-    }
-    for item in w.get_mut("baro").map(|baro| list(baro, "inventory")).into_iter().flatten() {
-        item["image"] = json!(art(&item["item"]));
-    }
-    for alert in list(w, "alerts") {
-        // "Fieldron, Fieldron, 10000 credits" -> Fieldron x2, 10000 credits.
-        let mut rewards: Vec<(String, i64)> = Vec::new();
-        for name in alert["reward"].as_str().unwrap_or("").split(", ").filter(|n| !n.is_empty()) {
-            match rewards.iter_mut().find(|(n, _)| n == name) {
-                Some((_, count)) => *count += 1,
-                None => rewards.push((name.to_string(), 1)),
+    let steel_reward = text(&sp["currentReward"]["name"]);
+    WorldStateOrError::Live(Box::new(WorldState {
+        fetched: text(&raw["timestamp"]),
+        cycles,
+        baro: baro(raw, cat),
+        sortie: Sortie {
+            boss: text(&sortie["boss"]),
+            faction: text(&sortie["faction"]),
+            expiry: text(&sortie["expiry"]),
+            missions: list(&sortie["variants"])
+                .iter()
+                .map(|m| SortieMission {
+                    kind: text(&m["missionType"]),
+                    node: text(&m["node"]),
+                    modifier: text(&m["modifier"]),
+                })
+                .collect(),
+        },
+        archon: Archon {
+            boss: text(&archon["boss"]),
+            expiry: text(&archon["expiry"]),
+            missions: list(&archon["missions"])
+                .iter()
+                .map(|m| ArchonMission { kind: text(&m["type"]), node: text(&m["node"]) })
+                .collect(),
+        },
+        steel_path: SteelPath {
+            image: art(&steel_reward),
+            reward: steel_reward,
+            cost: number(&sp["currentReward"]["cost"]),
+            expiry: text(&sp["expiry"]),
+        },
+        nightwave: Nightwave {
+            season: number(&nw["season"]),
+            expiry: text(&nw["expiry"]),
+            challenges: list(&nw["activeChallenges"])
+                .iter()
+                .map(|c| Challenge {
+                    title: text(&c["title"]),
+                    desc: text(&c["desc"]),
+                    reputation: number(&c["reputation"]),
+                    daily: c["isDaily"].as_bool(),
+                    elite: c["isElite"].as_bool(),
+                    expiry: text(&c["expiry"]),
+                })
+                .collect(),
+            mine: None,
+        },
+        darvo: raw["dailyDeals"].as_array().and_then(|d| d.first()).map(|d| {
+            let item = text(&d["item"]);
+            Darvo {
+                image: art(&item),
+                item,
+                price: number(&d["salePrice"]),
+                original_price: number(&d["originalPrice"]),
+                discount: number(&d["discount"]),
+                stock: number(&d["total"]),
+                sold: number(&d["sold"]),
+                expiry: text(&d["expiry"]),
             }
-        }
-        alert["rewards"] = rewards
+        }),
+        resets: Resets {
+            daily: clock::iso(clock::next_daily_reset(t)),
+            weekly: clock::iso(clock::next_weekly_reset(t)),
+        },
+        alerts: list(&raw["alerts"])
             .iter()
-            .map(|(name, count)| json!({"name": name, "count": count, "image": cat.art_by_name(name)}))
-            .collect();
-    }
-    for inv in list(w, "invasions") {
-        inv["attackerImage"] = json!(art(&inv["attackerReward"]));
-        inv["defenderImage"] = json!(art(&inv["defenderReward"]));
-    }
+            .map(|a| {
+                let m = &a["mission"];
+                let reward = reward_text(&m["reward"]);
+                Alert {
+                    kind: text(&m["type"]),
+                    node: text(&m["node"]),
+                    faction: text(&m["faction"]),
+                    what: text(&m["description"]),
+                    rewards: counted_rewards(&reward, cat),
+                    reward,
+                    expiry: text(&a["expiry"]),
+                }
+            })
+            .collect(),
+        invasions: list(&raw["invasions"])
+            .iter()
+            .filter(|i| i["completed"] != true)
+            .map(|i| {
+                let attacker_reward = reward_text(&i["attacker"]["reward"]);
+                let defender_reward = reward_text(&i["defender"]["reward"]);
+                Invasion {
+                    node: text(&i["node"]),
+                    what: text(&i["desc"]),
+                    completion: number(&i["completion"]),
+                    attacker: text(&i["attacker"]["faction"]),
+                    attacker_image: cat.art_by_name(&attacker_reward),
+                    attacker_reward,
+                    defender: text(&i["defender"]["faction"]),
+                    defender_image: cat.art_by_name(&defender_reward),
+                    defender_reward,
+                }
+            })
+            .collect(),
+        // The open worlds' bounty boards rotate together; one timer per board.
+        bounties: list(&raw["syndicateMissions"])
+            .iter()
+            .filter(|s| s["jobs"].as_array().is_some_and(|j| !j.is_empty()))
+            .map(|s| Bounty {
+                syndicate: text(&s["syndicate"]),
+                jobs: s["jobs"].as_array().map_or(0, Vec::len),
+                expiry: text(&s["expiry"]),
+            })
+            .collect(),
+        circuit: list(&raw["duviriCycle"]["choices"])
+            .iter()
+            .map(|c| CircuitGroup {
+                steel: c["category"] == "hard",
+                choices: c["choices"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(|n| {
+                        let name = spaced(n);
+                        Named { image: cat.art_by_name(&name), name }
+                    })
+                    .collect(),
+            })
+            .collect(),
+        archimedea: list(&raw["archimedeas"]).iter().map(archimedea).collect(),
+        events: list(&raw["events"])
+            .iter()
+            .map(|e| WorldEvent {
+                name: text(&e["description"]),
+                node: text(&e["node"]),
+                expiry: text(&e["expiry"]),
+                score: number(&e["currentScore"]),
+                goal: number(&e["maximumScore"]),
+            })
+            .collect(),
+        varzia: Varzia { location: text(&raw["vaultTrader"]["location"]), expiry: text(&raw["vaultTrader"]["expiry"]) },
+        error: err,
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    /// An answer as the page receives it.
+    fn json<T: serde::Serialize>(v: T) -> Value {
+        serde_json::to_value(v).unwrap()
+    }
+
+    fn archimedea(a: &Value) -> Value {
+        json(super::archimedea(a))
+    }
+
+    fn duviri_picks(view: &View, offers: &DuviriOffers, spiral_began: Option<f64>) -> Value {
+        json(super::duviri_picks(view, offers, spiral_began))
+    }
+
+    fn baro(raw: &Value) -> Value {
+        json(super::baro(raw, &Catalog::default()))
+    }
 
     #[test]
     fn pictures_are_added_by_name() {
@@ -418,16 +757,16 @@ mod tests {
             art: [("soma", "soma.png"), ("fieldron", "f.png")].map(|(k, v)| (k.to_string(), v.to_string())).into(),
             ..Catalog::default()
         };
-        let mut w = json!({
-            "circuit": [{"steel": true, "choices": ["Soma", "Unknown Thing"]}],
-            "darvo": {"item": "Soma"}, "steelPath": {"reward": "3x Fieldron"},
-            "alerts": [{"reward": "Fieldron, Fieldron, 10000 credits"}],
-            "invasions": [{"attackerReward": "", "defenderReward": "Soma Blueprint"}]});
-        add_art(&mut w, &cat);
+        let raw = json!({
+            "duviriCycle": {"choices": [{"category": "hard", "choices": ["Soma", "UnknownThing"]}]},
+            "dailyDeals": [{"item": "Soma"}], "steelPath": {"currentReward": {"name": "3x Fieldron"}},
+            "alerts": [{"mission": {"reward": {"items": ["Fieldron", "Fieldron"], "credits": 10000}}}],
+            "invasions": [{"attacker": {"reward": {}}, "defender": {"reward": {"items": ["Soma Blueprint"]}}}]});
+        let w = json(summary(Some(&raw), None, &cat));
         let url = |v: &Value| v.as_str().map(|u| u.rsplit('/').next().unwrap_or("").to_string());
         assert_eq!(w["circuit"][0]["choices"][0]["name"], "Soma");
         assert_eq!(url(&w["circuit"][0]["choices"][0]["image"]).as_deref(), Some("soma.png"));
-        assert_eq!(w["circuit"][0]["choices"][1]["image"], Value::Null);
+        assert_eq!(w["circuit"][0]["choices"][1], json!({"name": "Unknown Thing", "image": null}));
         assert_eq!(url(&w["darvo"]["image"]).as_deref(), Some("soma.png"));
         assert_eq!(url(&w["steelPath"]["image"]).as_deref(), Some("f.png"));
         assert_eq!(
@@ -437,10 +776,11 @@ mod tests {
         assert_eq!(w["alerts"][0]["rewards"][1]["name"], "10000 credits");
         assert_eq!(w["invasions"][0]["attackerImage"], Value::Null);
         assert_eq!(url(&w["invasions"][0]["defenderImage"]).as_deref(), Some("soma.png"));
-        // A summary that is only an error stays as it is.
-        let mut failed = json!({"error": "offline"});
-        add_art(&mut failed, &cat);
-        assert_eq!(failed, json!({"error": "offline"}));
+        // Without a worldstate, only the reason.
+        let offline = json(summary(None, Some("offline".into()), &cat));
+        assert_eq!(offline["error"], "offline");
+        assert!(offline["arbitration"].is_object(), "the schedule needs no worldstate");
+        assert!(offline.get("cycles").is_none());
     }
 
     #[test]
@@ -455,7 +795,7 @@ mod tests {
     fn duviri_picks_are_named_and_grouped_by_slot() {
         use crate::eelog::{DuviriOffers, DuviriPick};
         use std::collections::HashSet;
-        use std::sync::{Arc, RwLock};
+        use std::sync::Arc;
         let cat = gamedata::build(&indexmap::IndexMap::from([
             (
                 "Warframes".to_string(),
@@ -468,7 +808,7 @@ mod tests {
             profile: None,
             inv: None,
             manual: Arc::new(crate::accounts::Manual::default()),
-            market: crate::market::Market::new(Arc::new(RwLock::new(crate::config::Settings::default()))),
+            market: crate::market::Market::for_tests(),
             foundry: HashSet::new(),
         };
         let pick = |uid: &str, category, owned| DuviriPick { uid: uid.into(), category, owned };
@@ -528,10 +868,33 @@ mod tests {
 
     #[test]
     fn watch_keys_tell_the_kinds_apart() {
-        let f = |storm, hard| json!({"tier": "Axi", "mission": "Capture", "storm": storm, "hard": hard});
+        let f = |storm, hard| Fissure {
+            id: None,
+            tier: Some("Axi".into()),
+            mission: Some("Capture".into()),
+            node: None,
+            enemy: None,
+            activation: None,
+            expiry: None,
+            storm,
+            hard,
+            tier_num: None,
+        };
         assert_eq!(watch_key(&f(false, false)), "Axi|Capture|normal");
         assert_eq!(watch_key(&f(false, true)), "Axi|Capture|steel");
         assert_eq!(watch_key(&f(true, false)), "Axi|Capture|storm");
+    }
+
+    #[test]
+    fn closed_fissures_are_gone_even_from_an_old_copy() {
+        let raw = json!({"fissures": [
+            {"id": "a", "tier": "Lith", "missionType": "Capture", "expiry": clock::iso(now() - 5.0)},
+            {"id": "b", "tier": "Meso", "missionType": "Survival", "expiry": clock::iso(now() + 600.0)},
+            {"id": "c", "tier": "Neo", "missionType": "Defense", "expiry": clock::iso(now() + 600.0), "expired": true},
+        ]});
+        let open = fissures(Some(&raw));
+        let ids: Vec<&str> = open.iter().filter_map(|f| f.id.as_deref()).collect();
+        assert_eq!(ids, ["b"]);
     }
 
     #[test]
@@ -542,54 +905,5 @@ mod tests {
         assert_eq!(baro(&here)["active"], true);
         let later = json!({"voidTrader": {"activation": future, "expiry": future}});
         assert_eq!(baro(&later)["active"], false);
-    }
-
-    #[test]
-    fn concurrent_cold_fetches_wait_and_platform_switch_does_not_clobber() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let cache = Arc::new(WorldCache::new());
-        let calls = Arc::new(AtomicUsize::new(0));
-        let results: Vec<_> = std::thread::scope(|s| {
-            let handles: Vec<_> = (0..4)
-                .map(|_| {
-                    let cache = Arc::clone(&cache);
-                    let calls = Arc::clone(&calls);
-                    s.spawn(move || {
-                        cache.get(Platform::Pc, |_| {
-                            calls.fetch_add(1, Ordering::SeqCst);
-                            std::thread::sleep(Duration::from_millis(40));
-                            Ok(json!({"platform": "pc"}))
-                        })
-                    })
-                })
-                .collect();
-            handles.into_iter().map(|h| h.join().unwrap()).collect()
-        });
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "only one fetch runs for concurrent cold callers");
-        for (raw, err) in results {
-            assert!(err.is_none());
-            assert_eq!(raw.unwrap()["platform"], "pc");
-        }
-
-        // Switching platforms mid-fetch: the slower old platform fetch must not clobber the new one.
-        let cache = Arc::new(WorldCache::new());
-        let (started_tx, started_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let c1 = Arc::clone(&cache);
-        let t1 = std::thread::spawn(move || {
-            c1.get(Platform::Pc, |_| {
-                let _ = started_tx.send(());
-                let _ = release_rx.recv();
-                Ok(json!({"platform": "pc"}))
-            })
-        });
-        started_rx.recv().unwrap();
-        let (ps4, _) = cache.get(Platform::Ps4, |_| Ok(json!({"platform": "ps4"})));
-        assert_eq!(ps4.unwrap()["platform"], "ps4");
-        let _ = release_tx.send(());
-        let (pc_ret, _) = t1.join().unwrap();
-        assert_eq!(pc_ret.unwrap()["platform"], "pc");
-        let (cached_ps4, _) = cache.get(Platform::Ps4, |_| panic!("ps4 should still be cached"));
-        assert_eq!(cached_ps4.unwrap()["platform"], "ps4");
     }
 }

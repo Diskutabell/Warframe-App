@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::net;
 
@@ -41,31 +41,58 @@ pub fn is_newer(latest: &str, running: &str) -> bool {
     l_pre.is_none() && r_pre.is_some()
 }
 
-/// The latest release, when it is newer than this build: `{version, current, name, url, notes,
-/// published}`. `Ok(None)` when this build is up to date.
-pub fn check() -> Result<Option<Value>> {
-    let release = net::get_json(LATEST, &[], Duration::from_secs(20))?;
+/// A release newer than this build, for the update popup.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct Release {
+    pub version: String,
+    /// This build's version.
+    pub current: String,
+    pub name: Option<String>,
+    /// The release page; only one of this repository's.
+    pub url: Option<String>,
+    pub notes: Option<String>,
+    pub published: Option<String>,
+}
+
+/// The latest release, when it is newer than this build. `Ok(None)` when this build is up to date.
+pub async fn check() -> Result<Option<Release>> {
+    let release = net::get_json(LATEST, &[], Duration::from_secs(20)).await?;
     Ok(newer_release(&release, env!("CARGO_PKG_VERSION")))
 }
 
 /// What the popup needs from GitHub's answer, if its release is newer than `running`.
-fn newer_release(release: &Value, running: &str) -> Option<Value> {
+fn newer_release(release: &Value, running: &str) -> Option<Release> {
     let tag = release["tag_name"].as_str().unwrap_or("");
     let url = release["html_url"]
         .as_str()
         .filter(|u| u.starts_with(REPO_URL) && !u.chars().any(|c| c.is_control() || c.is_whitespace()));
     is_newer(tag, running).then(|| {
-        json!({
-            "version": tag.trim_start_matches(['v', 'V']), "current": running,
-            "name": release["name"], "url": url, "notes": release["body"],
-            "published": release["published_at"],
-        })
+        let text = |key: &str| release[key].as_str().map(str::to_owned);
+        Release {
+            version: tag.trim_start_matches(['v', 'V']).to_string(),
+            current: running.to_string(),
+            name: text("name"),
+            url: url.map(str::to_owned),
+            notes: text("body"),
+            published: text("published_at"),
+        }
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Value, json};
+
+    /// An answer as the page receives it.
+    fn json<T: serde::Serialize>(v: T) -> Value {
+        serde_json::to_value(v).unwrap()
+    }
+
+    fn newer_release(release: &Value, running: &str) -> Option<Value> {
+        super::newer_release(release, running).map(json)
+    }
 
     #[test]
     fn versions_compare_number_by_number() {

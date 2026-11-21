@@ -194,6 +194,12 @@ This is the part most likely to be against the ToS. See the disclaimer above.
 
 ## Data sources
 
+The game data below is prepared once a day by this repository's CI and published on its
+[`catalog` release](https://github.com/Diskutabell/Warframe-App/releases/tag/catalog): the app
+downloads that one file (about 2 MB, checked against its SHA-256) when it changes, and only
+asks the sources themselves when it cannot be had. `warframeproject build-catalog` makes the
+same file locally.
+
 - [WFCD warframe-items](https://github.com/WFCD/warframe-items) and its
   [drop data](https://drops.warframestat.us): items, parts, relics, drop tables
 - [warframe-public-export-plus](https://github.com/calamity-inc/warframe-public-export-plus):
@@ -203,7 +209,7 @@ This is the part most likely to be against the ToS. See the disclaimer above.
 - [warframe.market](https://warframe.market): prices and item art (at most 3 requests a second)
 - [browse.wf](https://browse.wf): the game's own interface art, the arbitration schedule and the
   [arbi.guide](https://arbi.guide) tiers
-- GitHub: the latest release of this app, once at startup
+- GitHub: the latest release of this app, once at startup, and the prepared game data
 - DE's public profile: mastery XP, star chart, intrinsics, standing
 - `EE.log`, reward screen OCR, your own counts, an imported inventory, or the memory scan
 
@@ -235,9 +241,11 @@ Nothing else is sent anywhere.
 ## Development
 
 ```sh
-nix-shell                                        # toolchain, libraries, tesseract, grim
-cargo test
+nix-shell                                        # toolchain, Node, libraries, tesseract, grim
+(cd web && npm ci && npm run build)              # the interface, embedded by the engine
+cargo test                                       # also writes web/src/types (the API's types)
 cargo run -- --headless --offline --port 8650    # engine only, no network
+(cd web && WFP_PORT=8650 npm run dev)            # the interface with live reload, against that engine
 ```
 
 On Windows, `cargo build --release` with the MSVC toolchain builds the app; it then uses an
@@ -248,8 +256,9 @@ picked in `main.rs`). GitHub Actions builds the Windows exe on every push, has i
 screen, and attaches it to each release.
 
 `--browser` opens the interface in your web browser instead of a window. The interface in `web/`
-is plain HTML, CSS and JavaScript modules with no build step; debug builds read it from disk, so a
-reload picks up changes.
+is Svelte 5 and TypeScript, built by Vite into `web/dist`; debug builds read that folder from disk,
+release builds embed it. Every answer of the engine's API is a Rust type whose TypeScript twin
+`cargo test` writes to `web/src/types`, and `npm run check` type-checks the interface against them.
 
 Known limitations: part and relic counts need manual tracking, an import or the memory scan; the
 reward reader has been checked on the Fortuna and Stalker interface themes (1080p to 4K, 70-100%

@@ -14,14 +14,52 @@ permissions:
 
 jobs:
   build:
+    # The `catalog` pre-release holds game data, not the app (catalog.yml).
+    if: github.event_name != 'release' || github.event.release.tag_name != 'catalog'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # The engine embeds the built UI (web/dist).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build the UI
+        working-directory: web
+        run: |
+          npm ci
+          npm run check
+          npm run build
 
       - name: Test
         run: cargo test
+
+      # Makes real overlay windows (ignored in ordinary test runs): styles, placement, drawing
+      # through UpdateLayeredWindow, and no focus taken.
+      - name: Test the overlay windows
+        run: cargo test overlay_window -- --ignored
+
+      # `cargo test` writes the API's TypeScript types; the committed ones must be the same.
+      - name: Check the UI's API types
+        shell: bash
+        run: |
+          changed=$(git status --porcelain -- web/src/types)
+          if [ -n "$changed" ]; then echo "$changed"; echo "web/src/types is out of date: run cargo test and commit it"; exit 1; fi
+
+      # A build without the memory scan must not be able to open or read another process: none of
+      # those calls may be among the exe's imports.
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Build without the memory scan
+        shell: powershell
+        run: |
+          cargo build --release --no-default-features --target-dir target-nomemscan
+          $imports = dumpbin /imports target-nomemscan\release\warframeproject.exe | Out-String
+          $found = @("OpenProcess", "ReadProcessMemory", "VirtualQueryEx", "CreateToolhelp32Snapshot", "Process32FirstW") |
+            Where-Object { $imports -match "\b$_\b" }
+          if ($found) { throw "a build without the memory scan imports: $($found -join ', ')" }
 
       # The OCR program goes into the exe, so Windows users have nothing to install.
       - uses: msys2/setup-msys2@v2

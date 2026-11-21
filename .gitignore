@@ -13,3 +13,5 @@
 *.key
 *.ppm
 /frames/
+/target-win/
+/target-win-nomem/

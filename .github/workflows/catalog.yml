@@ -1,0 +1,64 @@
+# Prepares the game data once a day and publishes it on the `catalog` pre-release, so the app
+# downloads one checked file instead of some forty from five hosts (src/bundle.rs). A check that
+# fails (an upstream file gone empty, say) fails the job and nothing is published: the app keeps
+# the last good data.
+name: Catalog
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: catalog
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The engine embeds the built UI (web/dist).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build the UI
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Prepare and check the game data
+        run: cargo run --release --no-default-features -- build-catalog --out catalog
+
+      - name: Publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # jq.exe writes CRLF on Windows: a \r left in a name breaks every use of it.
+          file=$(jq -r .file catalog/manifest.json | tr -d '\r')
+          if ! gh release view catalog > /dev/null 2>&1; then
+            gh release create catalog --prerelease --title "Game data" \
+              --notes "Prepared game data for the app, rebuilt daily. Not a release of the app."
+          fi
+          # The bundle the app has now stays until the next run: a client between reading the
+          # manifest and downloading must still find it.
+          previous=$( (gh release download catalog -p manifest.json -O - 2> /dev/null || true) | jq -r '.file // empty' | tr -d '\r')
+          gh release upload catalog "catalog/$file" --clobber
+          gh release upload catalog catalog/manifest.json --clobber
+          # Older bundles go; no grep in a pipeline, which would fail the step when none is left.
+          gh release view catalog --json assets -q '.assets[].name' | tr -d '\r' > assets.txt
+          while IFS= read -r old; do
+            [[ $old =~ ^catalog-[0-9a-f]{16}\.json\.zst$ ]] || continue
+            [[ $old == "$file" || $old == "$previous" ]] && continue
+            gh release delete-asset catalog "$old" -y
+          done < assets.txt

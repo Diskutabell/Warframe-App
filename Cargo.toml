@@ -12,6 +12,9 @@ anyhow = "1"
 async-channel = "2"
 clap = { version = "4", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png", "pnm", "webp"] }
+# The overlays are drawn by the app itself on both platforms: shapes, and text in the bundled fonts.
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd", "png-format"] }
+ab_glyph = "0.2"
 indexmap = { version = "2", features = ["serde"] }
 # DE's Public Export lists its files in an LZMA-packed index.
 lzma-rs = "0.3"
@@ -20,8 +23,30 @@ regex = "1"
 rust-embed = "8"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
-tiny_http = "0.12"
-ureq = "3"
+# The API's answers as TypeScript types for the UI (written by `cargo test`, see .cargo/config.toml).
+ts-rs = { version = "12", features = ["indexmap-impl", "serde-json-impl", "no-serde-warnings"] }
+# File change notifications (inotify on Linux, ReadDirectoryChangesW on Windows) for EE.log and
+# a watched inventory file.
+notify = { version = "8", default-features = false }
+# Outgoing HTTPS: reqwest on rustls with ring and the bundled Mozilla roots (no system TLS library,
+# the same on Linux and Windows).
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# SHA-256 of the prepared game data (the same ring rustls uses).
+ring = "0.17"
+# The prepared game data CI publishes is one zstd-packed file.
+zstd = { version = "0.13", default-features = false }
+webpki-roots = "1"
+# The app's own data (accounts, hand-set counts, reward history, prices) in one SQLite file;
+# SQLite is compiled in, so nothing has to be installed.
+rusqlite = { version = "0.43", default-features = false, features = ["bundled", "cache"] }
+# The engine: async runtime, the loopback HTTP server and its event stream.
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net", "fs", "io-util"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tower-http = { version = "0.7", default-features = false, features = ["catch-panic"] }
 
 # Linux: the window and overlays are GTK, the page runs in WebKitGTK.
 [target.'cfg(unix)'.dependencies]
@@ -31,6 +56,9 @@ gtk = "0.18"
 # v0_6: keyboard modes and is_supported(); nixpkgs ships gtk-layer-shell 0.10.
 gtk-layer-shell = { version = "0.8", features = ["v0_6"] }
 libc = "0.2"
+# Screen capture straight from the compositor (wlr-screencopy), without starting grim.
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
 
 # Windows: tao for the windows, wry for the page (in Edge's WebView2), the Win32 API for the rest.
@@ -44,9 +72,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_System_Console",
-    "Win32_System_Diagnostics_Debug",
-    "Win32_System_Diagnostics_ToolHelp",
-    "Win32_System_Memory",
     "Win32_System_Threading",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
@@ -55,6 +80,14 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [features]
+default = ["memscan"]
+# Reading the inventory from the game's memory (off unless switched on in Settings). A build
+# without it has no code that opens or reads another process at all.
+memscan = [
+    "windows-sys/Win32_System_Diagnostics_Debug",
+    "windows-sys/Win32_System_Diagnostics_ToolHelp",
+    "windows-sys/Win32_System_Memory",
+]
 # The Windows release exe carries tesseract inside it, so nothing has to be installed. The release
 # workflow builds the zip (.github/bundle-tesseract.sh) and points WFP_TESSERACT_ZIP at it.
 bundled-tesseract = ["dep:zip"]
@@ -62,3 +95,7 @@ bundled-tesseract = ["dep:zip"]
 [profile.release]
 lto = "thin"
 strip = true
+
+[dev-dependencies]
+# Paused clocks in tests of timed behaviour (the summary's coalescing).
+tokio = { version = "1.54", features = ["test-util"] }

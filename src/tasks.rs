@@ -14,10 +14,12 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use indexmap::IndexMap;
-use serde_json::{Value, json};
+use serde::Serialize;
+use ts_rs::TS;
 
 use crate::accounts::Task;
 use crate::gamedata::{self, ComponentKind, Item, PartRecipe};
+use crate::sources::Delta;
 use crate::views::{View, match_rank};
 
 /// What a task can be about.
@@ -207,6 +209,80 @@ fn final_recipe<'a>(view: &'a View, it: &Item) -> Option<&'a PartRecipe> {
     })
 }
 
+/// What marking an item built changes: the inventory's changes, and the parts counted by hand
+/// with their new counts.
+pub struct Built {
+    pub deltas: Vec<Delta>,
+    pub hand_counts: Vec<(String, i64)>,
+}
+
+/// Marking `uid` built at `t`. Built in the foundry: its entry there is collected (the game took
+/// the parts when the build started). Otherwise every part, consumed item and resource the build
+/// takes is taken from what is held - crafted parts before blueprints, never below zero - and
+/// the item is owned once more.
+pub fn built(view: &View, uid: &str, t: f64) -> Result<Built, String> {
+    let it = view.cat.items.get(uid).ok_or_else(|| "Only equipment can be marked built.".to_string())?;
+    let change = |kind: &str, uid: &str, change: i64, equipment: bool| Delta {
+        t,
+        kind: kind.into(),
+        uid: uid.into(),
+        change,
+        equipment,
+        reward: None,
+    };
+    let mut out = Built { deltas: vec![change("built", &it.uid, 1, true)], hand_counts: Vec::new() };
+    let in_foundry = |u: &str| view.inv.iter().flat_map(|i| &i.foundry).any(|f| f.recipe.as_deref() == Some(u));
+    // The main blueprint: the one whose recipe makes the item, or, without the recipe data, the
+    // one named "<item> Blueprint" (as `View::item_status` tells a build in the foundry).
+    let parts = || it.components.iter().filter(|c| c.kind == ComponentKind::Part);
+    let by_recipe = parts().find_map(|c| {
+        view.twins(&c.uid).into_iter().find(|u| view.cat.part_recipes.get(*u).is_some_and(|r| r.result == it.uid))
+    });
+    let main_name = format!("{} Blueprint", it.name);
+    let by_name =
+        || parts().filter(|c| c.name.ends_with(&main_name)).flat_map(|c| view.twins(&c.uid)).find(|u| in_foundry(u));
+    if let Some(main) = by_recipe.filter(|m| in_foundry(m)).or_else(by_name) {
+        out.deltas.push(change("claimed", main, -1, false));
+        return Ok(out);
+    }
+    for c in &it.components {
+        match c.kind {
+            ComponentKind::Part if view.hand_counted(&c.uid) => {
+                out.hand_counts.push((c.uid.clone(), (view.count(&c.uid) - c.count).max(0)));
+            }
+            ComponentKind::Part => {
+                // The crafted part first: that is what a build consumes.
+                let mut twins = view.twins(&c.uid);
+                twins.sort_by_key(|u| !u.ends_with("Component"));
+                let mut left = c.count;
+                for u in twins {
+                    let take = left.min(view.held_stack(u));
+                    if take > 0 {
+                        out.deltas.push(change("built", u, -take, false));
+                        left -= take;
+                    }
+                }
+            }
+            ComponentKind::Item => {
+                let take = c.count.min(view.owned(&c.uid).unwrap_or(0));
+                if take > 0 {
+                    out.deltas.push(change("built", &c.uid, -take, true));
+                }
+            }
+            ComponentKind::Resource if view.hand_counted(&c.uid) => {
+                out.hand_counts.push((c.uid.clone(), (view.count(&c.uid) - c.count).max(0)));
+            }
+            ComponentKind::Resource => {
+                let take = c.count.min(view.held_stack(&c.uid));
+                if take > 0 {
+                    out.deltas.push(change("built", &c.uid, -take, false));
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// The crafted half of a part that drops as a blueprint: of a part and its twin, the one named
 /// "...Component" (`gamedata::alt_uid`). A prime weapon part drops ready-made and has none.
 fn crafted_half<'a>(view: &'a View, uid: &'a str) -> Option<&'a str> {
@@ -238,7 +314,7 @@ fn plan(view: &View, it: &Item) -> Plan {
         // Only the inventory tells crafted parts from blueprints; a count set by hand does not,
         // so then every part is taken to need crafting.
         let crafted = |result: &str| {
-            let held = if view.hand_count(&c.uid).is_some() { 0 } else { view.held_stack(result) };
+            let held = if view.hand_counted(&c.uid) { 0 } else { view.held_stack(result) };
             held + crafting
         };
         let mut builds = 0;
@@ -381,93 +457,229 @@ fn count_progress(kind: Kind, held: &Held, target: i64) -> Progress {
 }
 
 /// A task as the board shows it.
-pub fn row(view: &View, task: &Task) -> Value {
+#[derive(Clone, Serialize, TS)]
+#[ts(export)]
+pub struct TaskRow {
+    pub uid: String,
+    /// "item", "mod", "arcane", "resource", or "unknown" for what the loaded data does not know.
+    pub kind: &'static str,
+    pub name: String,
+    pub image: Option<String>,
+    pub sub: String,
+    /// "done" (green), "resources" (yellow) or "missing" (red).
+    pub state: &'static str,
+    pub note: String,
+    pub have: i64,
+    pub need: i64,
+}
+
+pub fn row(view: &View, task: &Task) -> TaskRow {
     let Some(t) = thing(view, &task.uid) else {
-        return json!({"uid": task.uid, "kind": "unknown", "name": view.cat.name_of(&task.uid), "image": null,
-                      "sub": "Unknown", "state": "missing", "note": "Not in the loaded game data", "have": 0, "need": 1});
+        return TaskRow {
+            uid: task.uid.clone(),
+            kind: "unknown",
+            name: view.cat.name_of(&task.uid),
+            image: None,
+            sub: "Unknown".into(),
+            state: "missing",
+            note: "Not in the loaded game data".into(),
+            have: 0,
+            need: 1,
+        };
     };
     let p = match (t.kind, view.cat.items.get(&task.uid)) {
         (Kind::Item, Some(it)) => item_progress(view, it, &plan(view, it)),
         _ => count_progress(t.kind, &held(view, &task.uid, t.kind), task.target.unwrap_or_else(|| default_target(&t))),
     };
-    json!({"uid": task.uid, "kind": t.kind.name(), "name": t.name, "image": t.image, "sub": t.sub,
-           "state": p.state, "note": p.note, "have": p.have, "need": p.need})
+    TaskRow {
+        uid: task.uid.clone(),
+        kind: t.kind.name(),
+        name: t.name,
+        image: t.image,
+        sub: t.sub,
+        state: p.state,
+        note: p.note,
+        have: p.have,
+        need: p.need,
+    }
 }
 
-fn signature(rows: &[Value]) -> String {
+fn signature(rows: &[TaskRow]) -> String {
     let mut h = DefaultHasher::new();
     for r in rows {
-        r.to_string().hash(&mut h);
+        serde_json::to_string(r).unwrap_or_default().hash(&mut h);
     }
     format!("{:016x}", h.finish())
 }
 
-/// The board of the account shown, in the order the tasks were added. `sig` changes whenever
-/// a card would.
-pub fn board(view: &View) -> Value {
-    let rows: Vec<Value> = view.manual.tasks.iter().map(|t| row(view, t)).collect();
-    let done = rows.iter().filter(|r| r["state"] == "done").count();
-    json!({"tasks": rows, "done": done, "sig": signature(&rows), "inventoryKnown": view.inv.is_some(),
-           "ranksKnown": view.inv.as_ref().is_some_and(|i| i.upgrades.is_some())})
+#[derive(Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct Board {
+    pub tasks: Vec<TaskRow>,
+    pub done: usize,
+    /// Changes whenever a card would.
+    pub sig: String,
+    pub inventory_known: bool,
+    /// Ranked mod and arcane copies are known (inventories before 0.8.0 lack them).
+    pub ranks_known: bool,
+}
+
+/// The board of the account shown, in the order the tasks were added.
+pub fn board(view: &View) -> Board {
+    let rows: Vec<TaskRow> = view.manual.tasks.iter().map(|t| row(view, t)).collect();
+    let done = rows.iter().filter(|r| r.state == "done").count();
+    Board {
+        done,
+        sig: signature(&rows),
+        tasks: rows,
+        inventory_known: view.inv.is_some(),
+        ranks_known: view.inv.as_ref().is_some_and(|i| i.upgrades.is_some()),
+    }
 }
 
 /// For the sidebar: how many tasks there are and how many are done, and the board's `sig`.
-pub fn summary(view: &View) -> Value {
-    let rows: Vec<Value> = view.manual.tasks.iter().map(|t| row(view, t)).collect();
-    let done = rows.iter().filter(|r| r["state"] == "done").count();
-    json!({"total": rows.len(), "done": done, "sig": signature(&rows)})
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct TaskCount {
+    pub total: usize,
+    pub done: usize,
+    pub sig: String,
+}
+
+pub fn summary(view: &View) -> TaskCount {
+    let rows: Vec<TaskRow> = view.manual.tasks.iter().map(|t| row(view, t)).collect();
+    let done = rows.iter().filter(|r| r.state == "done").count();
+    TaskCount { total: rows.len(), done, sig: signature(&rows) }
 }
 
 /// The uids of the tasks that are done.
 pub fn done(view: &View) -> HashSet<String> {
-    view.manual.tasks.iter().filter(|t| row(view, t)["state"] == "done").map(|t| t.uid.clone()).collect()
+    view.manual.tasks.iter().filter(|t| row(view, t).state == "done").map(|t| t.uid.clone()).collect()
 }
 
-/// Everything the details panel shows for a task, on the board or not. `open_eras` as for
-/// `View::detail`.
-pub fn detail(view: &View, uid: &str, open_eras: &HashSet<String>) -> Option<Value> {
+/// Everything the details panel shows for a task, on the board or not: for equipment what the
+/// builds still take, for the rest what is held against the target.
+#[derive(Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskDetail {
+    #[serde(flatten)]
+    pub row: TaskRow,
+    pub on_board: bool,
+    pub inventory_known: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub item: Option<crate::views::Detail>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub materials: Option<Vec<crate::views::Ingredient>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub credits: Option<Credits>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub held: Option<HeldView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub target: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub target_default: Option<i64>,
+    /// A mod's or arcane's top rank (null for a resource).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub top_rank: Option<Option<i64>>,
+    /// An arcane's rank the copies held make.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub rank: Option<Option<i64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub drops: Option<Vec<crate::drops::Drop>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub drop_coverage: Option<crate::views::DropCoverage>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct Credits {
+    pub need: i64,
+    pub have: Option<i64>,
+}
+
+#[derive(Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct HeldView {
+    pub count: i64,
+    pub ranks: Option<Vec<i64>>,
+    pub by_hand: bool,
+}
+
+pub fn detail(view: &View, uid: &str, open_eras: &HashSet<String>) -> Option<TaskDetail> {
     let t = thing(view, uid)?;
     let on_board = view.manual.tasks.iter().find(|x| x.uid == uid).cloned();
     let task = on_board.clone().unwrap_or_else(|| Task { uid: uid.to_string(), ..Task::default() });
-    let mut v = row(view, &task);
-    v["onBoard"] = json!(on_board.is_some());
-    v["inventoryKnown"] = json!(view.inv.is_some());
+    let mut v = TaskDetail {
+        row: row(view, &task),
+        on_board: on_board.is_some(),
+        inventory_known: view.inv.is_some(),
+        item: None,
+        materials: None,
+        credits: None,
+        held: None,
+        target: None,
+        target_default: None,
+        top_rank: None,
+        rank: None,
+        drops: None,
+        drop_coverage: None,
+    };
     if let (Kind::Item, Some(it)) = (t.kind, view.cat.items.get(uid)) {
         let plan = plan(view, it);
         let mut item = view.detail(uid, open_eras)?;
-        for p in item["parts"].as_array_mut().into_iter().flatten() {
-            if let Some(pp) = plan.parts.iter().find(|pp| p["uid"] == pp.uid.as_str()) {
-                p["have"] = json!(pp.have);
-                p["crafting"] = json!(pp.crafting);
-                p["builds"] = json!(pp.builds);
-                p["recipeUnknown"] = json!(pp.recipe_unknown);
+        if let crate::views::Detail::Item(item) = &mut item {
+            for p in &mut item.parts {
+                if let Some(pp) = plan.parts.iter().find(|pp| p.uid == pp.uid) {
+                    p.have = pp.have;
+                    p.crafting = Some(pp.crafting);
+                    p.builds = Some(pp.builds);
+                    p.recipe_unknown = Some(pp.recipe_unknown);
+                }
             }
         }
-        v["item"] = item;
+        v.item = Some(item);
         let known = |uid: &str| view.inv.is_some() || view.manual.counts.contains_key(uid);
-        v["materials"] = plan
-            .materials
-            .iter()
-            .map(|(uid, (name, count))| {
-                json!({"uid": uid, "name": name, "count": count,
-                       "have": if known(uid) { Some(view.count(uid)) } else { None },
-                       "image": view.icon_of(uid, name), "drops": view.cat.drops.for_name(name, false)})
-            })
-            .collect();
-        v["credits"] = json!({"need": plan.credits, "have": credits_held(view)});
+        v.materials = Some(
+            plan.materials
+                .iter()
+                .map(|(uid, (name, count))| crate::views::Ingredient {
+                    uid: uid.clone(),
+                    name: name.clone(),
+                    count: *count,
+                    have: known(uid).then(|| view.count(uid)),
+                    image: view.icon_of(uid, name),
+                    drops: view.cat.drops.for_name(name, false).into_iter().cloned().collect(),
+                })
+                .collect(),
+        );
+        v.credits = Some(Credits { need: plan.credits, have: credits_held(view) });
         return Some(v);
     }
     let held = held(view, uid, t.kind);
     let target = task.target.unwrap_or_else(|| default_target(&t));
-    v["held"] = json!({"count": held.count, "ranks": held.ranks, "byHand": held.by_hand});
-    v["target"] = json!(target);
-    v["targetDefault"] = json!(default_target(&t));
-    v["topRank"] = json!(t.top_rank);
+    v.target = Some(target);
+    v.target_default = Some(default_target(&t));
+    v.top_rank = Some(t.top_rank);
     if t.kind == Kind::Arcane {
-        v["rank"] = json!(arcane_rank(held.count, t.top_rank.unwrap_or(0)));
+        v.rank = Some(arcane_rank(held.count, t.top_rank.unwrap_or(0)));
     }
-    v["drops"] = json!(view.cat.drops.for_name(&t.name, false));
-    v["dropCoverage"] = json!({"available": view.cat.drops.available, "total": view.cat.drops.total});
+    v.held = Some(HeldView { count: held.count, ranks: held.ranks, by_hand: held.by_hand });
+    v.drops = Some(view.cat.drops.for_name(&t.name, false).into_iter().cloned().collect());
+    v.drop_coverage =
+        Some(crate::views::DropCoverage { available: view.cat.drops.available, total: view.cat.drops.total });
     Some(v)
 }
 
@@ -499,10 +711,23 @@ pub fn uid_by_name(view: &View, name: &str) -> Option<String> {
 
 /// Equipment, mods, arcanes and resources matching `q`, best matches first, for adding to the
 /// board. A mod or arcane name the game uses more than once is offered once.
-pub fn find(view: &View, q: &str) -> Value {
+/// Something that could go on the board, as the add-search lists it.
+#[derive(Serialize, TS)]
+#[ts(export)]
+pub struct TaskHit {
+    pub key: String,
+    pub kind: &'static str,
+    pub name: String,
+    pub sub: String,
+    pub image: Option<String>,
+    /// Already on the board.
+    pub added: bool,
+}
+
+pub fn find(view: &View, q: &str) -> Vec<TaskHit> {
     let q = q.trim().to_lowercase();
     if q.chars().count() < 2 {
-        return json!([]);
+        return Vec::new();
     }
     let tokens: Vec<&str> = q.split_whitespace().collect();
     let cat = &view.cat;
@@ -538,33 +763,60 @@ pub fn find(view: &View, q: &str) -> Value {
     // A resource could also be a mod; each uid once.
     let mut seen = HashSet::new();
     found.retain(|(_, uid)| seen.insert(*uid));
-    let mut hits: Vec<(u8, Value)> = found
+    let mut hits: Vec<(u8, TaskHit)> = found
         .into_iter()
         .filter_map(|(rank, uid)| {
             let t = thing(view, uid)?;
             Some((
                 rank,
-                json!({"key": uid, "kind": t.kind.name(), "name": t.name, "sub": t.sub, "image": t.image,
-                               "added": view.manual.has_task(uid)}),
+                TaskHit {
+                    key: uid.to_string(),
+                    kind: t.kind.name(),
+                    name: t.name,
+                    sub: t.sub,
+                    image: t.image,
+                    added: view.manual.has_task(uid),
+                },
             ))
         })
         .collect();
-    let name_of = |v: &Value| v["name"].as_str().unwrap_or("").to_string();
-    hits.sort_by(|a, b| {
-        let (na, nb) = (name_of(&a.1), name_of(&b.1));
-        (a.0, na.len(), &na).cmp(&(b.0, nb.len(), &nb))
-    });
-    Value::Array(hits.into_iter().take(30).map(|(_, v)| v).collect())
+    hits.sort_by(|a, b| (a.0, a.1.name.len(), &a.1.name).cmp(&(b.0, b.1.name.len(), &b.1.name)));
+    hits.into_iter().take(30).map(|(_, v)| v).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Value, json};
+
+    /// An answer as the page receives it.
+    fn json<T: serde::Serialize>(v: T) -> Value {
+        serde_json::to_value(v).unwrap()
+    }
+
+    fn row(view: &View, task: &Task) -> Value {
+        json(super::row(view, task))
+    }
+
+    fn board(view: &View) -> Value {
+        json(super::board(view))
+    }
+
+    fn summary(view: &View) -> Value {
+        json(super::summary(view))
+    }
+
+    fn detail(view: &View, uid: &str, open_eras: &HashSet<String>) -> Option<Value> {
+        super::detail(view, uid, open_eras).map(json)
+    }
+
+    fn find(view: &View, q: &str) -> Value {
+        json(super::find(view, q))
+    }
     use std::sync::Arc;
 
     use crate::accounts::Manual;
     use crate::inventory::Entry;
-    use crate::market::Market;
     use crate::sources::{FoundryEntry, Inventory};
 
     const ASH: &str = "/Lotus/Powersuits/Ninja/AshPrime";
@@ -630,7 +882,7 @@ mod tests {
             profile: None,
             inv: inv.map(Arc::new),
             manual: Arc::new(manual),
-            market: Market::new(Arc::new(std::sync::RwLock::new(crate::config::Settings::default()))),
+            market: crate::market::Market::for_tests(),
             foundry: HashSet::new(),
         }
     }
@@ -655,6 +907,72 @@ mod tests {
         let cat = catalog();
         assert_eq!(cat.resources.keys().collect::<Vec<_>>(), [CELL, RUBEDO], "sorted by name; parts are not resources");
         assert_eq!(cat.part_alias.get(CHASSIS_BP).map(String::as_str), Some(CHASSIS));
+    }
+
+    #[test]
+    fn a_count_set_by_hand_is_the_whole_part() {
+        // Two chassis blueprints held (the component's twin): the page shows 2, and the user
+        // steps the part down to 1 (a newer hand-set count on the part's own uid).
+        let mut v = view(Some(inventory(&[(CHASSIS_BP, 2)])), &[]);
+        assert_eq!(v.count(CHASSIS), 2);
+        let mut manual = Manual::default();
+        manual.counts.insert(CHASSIS.into(), (1, 20.0));
+        v.manual = Arc::new(manual);
+        assert_eq!(v.count(CHASSIS), 1, "it replaces both twins, not just one");
+        assert_eq!(v.count(CHASSIS_BP), 1, "whichever twin asks");
+        assert!(v.hand_counted(CHASSIS_BP));
+        // An inventory read after it wins again.
+        let mut fresh = inventory(&[(CHASSIS_BP, 2)]);
+        fresh.imported = 30.0;
+        v.inv = Some(Arc::new(fresh));
+        assert_eq!(v.count(CHASSIS), 2);
+    }
+
+    #[test]
+    fn marking_a_build_done_takes_its_parts_or_collects_it_from_the_foundry() {
+        // A crafted chassis and a chassis blueprint: the crafted one goes, the blueprint stays.
+        let held = inventory(&[(BP, 1), (CHASSIS, 1), (CHASSIS_BP, 1), (CELL, 3)]);
+        let v = view(Some(held.clone()), &[]);
+        let b = built(&v, ASH, 50.0).unwrap();
+        let after = held.with_deltas(&b.deltas);
+        assert_eq!(after.equipment.get(ASH).map(|e| e.count), Some(1));
+        assert_eq!(after.counts.get(CHASSIS), None);
+        assert_eq!(after.counts.get(CHASSIS_BP), Some(&1));
+        assert_eq!(after.counts.get(BP), None);
+        assert_eq!(after.counts.get(CELL), Some(&1));
+        // Short of cells: what is there goes, nothing below zero.
+        let held = inventory(&[(BP, 1), (CHASSIS, 1), (CELL, 1)]);
+        let after = held.with_deltas(&built(&view(Some(held.clone()), &[]), ASH, 50.0).unwrap().deltas);
+        assert_eq!(after.counts.get(CELL), None);
+        // Building in the foundry: only collected - the game took the parts when it started.
+        let mut held = inventory(&[(CELL, 3)]);
+        held.foundry.push(FoundryEntry { recipe: Some(BP.into()), done: None });
+        let b = built(&view(Some(held.clone()), &[]), ASH, 50.0).unwrap();
+        let after = held.with_deltas(&b.deltas);
+        assert!(after.foundry.is_empty());
+        assert_eq!(after.counts.get(CELL), Some(&3));
+        assert_eq!(after.equipment.get(ASH).map(|e| e.count), Some(1));
+        // A part counted by hand is counted down by hand.
+        let mut v = view(Some(inventory(&[(BP, 1)])), &[]);
+        let mut manual = Manual::default();
+        manual.counts.insert(CHASSIS.into(), (2, 20.0));
+        v.manual = Arc::new(manual);
+        assert_eq!(built(&v, ASH, 50.0).unwrap().hand_counts, [(CHASSIS.to_string(), 1)]);
+        assert!(built(&v, CELL, 50.0).is_err(), "only equipment is built");
+        // A resource counted by hand, too.
+        let mut v = view(Some(inventory(&[(BP, 1), (CHASSIS, 1)])), &[]);
+        let mut manual = Manual::default();
+        manual.counts.insert(CELL.into(), (5, 20.0));
+        v.manual = Arc::new(manual);
+        assert!(built(&v, ASH, 50.0).unwrap().hand_counts.contains(&(CELL.to_string(), 3)));
+        // In the foundry without the recipe data: still only collected, by the blueprint's name.
+        let mut cat = catalog();
+        cat.part_recipes.clear();
+        let mut held = inventory(&[(CELL, 3)]);
+        held.foundry.push(FoundryEntry { recipe: Some(BP.into()), done: None });
+        let v = view_of(cat, Some(held), &[]);
+        let b = built(&v, ASH, 50.0).unwrap();
+        assert_eq!(b.deltas.iter().map(|d| d.kind.as_str()).collect::<Vec<_>>(), ["built", "claimed"]);
     }
 
     #[test]

@@ -1,6 +1,5 @@
 //! The desktop shell: the main window (the web UI in WebKitGTK) and the overlays over the game.
 
-mod fonts;
 mod overlay;
 mod tray;
 
@@ -16,9 +15,10 @@ use webkit2gtk::{
     URIRequestExt, WebContext, WebView, WebViewExt,
 };
 
+use crate::app::App;
 use crate::compositor;
 use crate::config::{OverlayBackend, Settings};
-use crate::state::{State, UiEvent};
+use crate::services::shell::UiEvent;
 
 /// How the overlays stay above the game.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,11 +121,9 @@ fn hide_main_window(window: &gtk::Window, tray: &RefCell<tray::Tray>) {
 }
 
 /// Runs the GTK main loop until the main window closes.
-pub fn run(state: Arc<State>, url: &str, backend: Backend) -> Result<()> {
+pub fn run(state: Arc<App>, url: &str, backend: Backend) -> Result<()> {
     glib::set_prgname(Some("warframeproject"));
     glib::set_application_name("warframeproject");
-    // Before GTK starts: Pango builds its font list once, and fonts added later are not in it.
-    fonts::register();
     gtk::init().map_err(|e| anyhow!("GTK could not start: {e}"))?;
 
     let backend = if backend == Backend::LayerShell && !gtk_layer_shell::is_supported() {
@@ -156,9 +154,13 @@ pub fn run(state: Arc<State>, url: &str, backend: Backend) -> Result<()> {
     }
     window.show_all();
 
-    let overlays = Rc::new(overlay::Overlays::new(backend, Arc::clone(&state)));
+    let overlays = Rc::new(overlay::overlays(backend, Arc::clone(&state)));
     let (tx, rx) = async_channel::unbounded::<UiEvent>();
-    state.set_ui(tx);
+    if !state.set_ui(tx) {
+        // Told to quit while the window was being made.
+        tray.borrow_mut().set_enabled(false, false);
+        return Ok(());
+    }
     let event_tray = Rc::clone(&tray);
     glib::MainContext::default().spawn_local(async move {
         while let Ok(ev) = rx.recv().await {
