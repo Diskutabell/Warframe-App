@@ -11,7 +11,7 @@
 //! while a page is listening.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -94,6 +94,9 @@ pub struct Bus {
 struct Inner {
     tx: broadcast::Sender<Arc<Message>>,
     summary_dirty: Notify,
+    /// Set by every change, taken by the summary computed after it: a change during the wait
+    /// before computing is in that summary and needs no second one.
+    dirty: AtomicBool,
     next_id: AtomicU64,
 }
 
@@ -106,7 +109,14 @@ impl Default for Bus {
 impl Bus {
     pub fn new() -> Bus {
         let (tx, _) = broadcast::channel(CAPACITY);
-        Bus { inner: Arc::new(Inner { tx, summary_dirty: Notify::new(), next_id: AtomicU64::new(1) }) }
+        Bus {
+            inner: Arc::new(Inner {
+                tx,
+                summary_dirty: Notify::new(),
+                dirty: AtomicBool::new(false),
+                next_id: AtomicU64::new(1),
+            }),
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<Message>> {
@@ -144,6 +154,7 @@ impl Bus {
 
     /// Marks the summary dirty; `run_summary` pushes a fresh one shortly.
     pub fn state_changed(&self) {
+        self.inner.dirty.store(true, Ordering::Release);
         self.inner.summary_dirty.notify_one();
     }
 
@@ -156,15 +167,19 @@ impl Bus {
     {
         let compute = Arc::new(compute);
         loop {
-            tokio::select! {
+            let heartbeat = tokio::select! {
                 _ = stop.cancelled() => return,
-                _ = self.inner.summary_dirty.notified() => {}
-                _ = tokio::time::sleep(SUMMARY_HEARTBEAT) => {}
-            }
+                _ = self.inner.summary_dirty.notified() => false,
+                _ = tokio::time::sleep(SUMMARY_HEARTBEAT) => true,
+            };
             // Let the rest of a burst arrive before computing once for all of it.
             tokio::select! {
                 _ = stop.cancelled() => return,
                 _ = tokio::time::sleep(SUMMARY_COALESCE) => {}
+            }
+            // A wake-up left over from a change the last summary already held: nothing to do.
+            if !self.inner.dirty.swap(false, Ordering::AcqRel) && !heartbeat {
+                continue;
             }
             if !self.has_listeners() {
                 continue;
@@ -225,10 +240,18 @@ mod tests {
         for _ in 0..50 {
             bus.state_changed();
         }
+        // More of the burst while the first wake-up waits for the rest of it.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        bus.state_changed();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        bus.state_changed();
         let msg = rx.recv().await.unwrap();
         assert_eq!((msg.topic, msg.data.as_str()), (Topic::State, r#"{"n":1}"#));
         tokio::time::sleep(Duration::from_secs(1)).await;
         assert_eq!(computed.load(Ordering::Relaxed), 1, "the burst was computed once");
+        // A change after it is a new summary.
+        bus.state_changed();
+        assert_eq!(rx.recv().await.unwrap().data, r#"{"n":2}"#);
         stop.cancel();
         task.await.unwrap();
     }

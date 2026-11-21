@@ -40,7 +40,14 @@ impl Notifications {
             if !(s.notify_fissures || s.notify_baro || s.notify_foundry) {
                 continue;
             }
-            let (raw, err) = if s.notify_fissures || s.notify_baro { self.world.get().await } else { (None, None) };
+            let (raw, err) = if s.notify_fissures || s.notify_baro {
+                tokio::select! {
+                    _ = stop.cancelled() => return,
+                    snapshot = self.world.get() => snapshot,
+                }
+            } else {
+                (None, None)
+            };
             let me = Arc::clone(&self);
             // Building the list of builds walks every account's inventory: off the async threads.
             let _ = tokio::task::spawn_blocking(move || {

@@ -139,12 +139,18 @@ impl WorldService {
     /// own. Nobody listening, nothing is fetched.
     pub async fn run(self: Arc<Self>, stop: CancellationToken) {
         loop {
+            // Until the copy held is due: a minute after it was fetched (sooner after an error).
+            let due = (lock(&self.cache).t + MAX_AGE - now()).clamp(1.0, MAX_AGE);
             tokio::select! {
                 _ = stop.cancelled() => return,
-                _ = tokio::time::sleep(Duration::from_secs(MAX_AGE as u64)) => {}
+                _ = tokio::time::sleep(Duration::from_secs_f64(due)) => {}
             }
             if self.bus.has_listeners() {
-                self.get().await;
+                let platform = self.settings.get().platform;
+                tokio::select! {
+                    _ = stop.cancelled() => return,
+                    _ = self.refresh(platform) => {}
+                }
             }
         }
     }

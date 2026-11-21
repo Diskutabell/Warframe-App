@@ -13,6 +13,7 @@ use anyhow::anyhow;
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use super::accounts::AccountService;
 use super::settings::SettingsStore;
@@ -75,6 +76,8 @@ impl MemscanStatus {
 }
 
 pub struct MemscanService {
+    /// The app's background tasks: shutdown waits for a capture being applied.
+    tasks: TaskTracker,
     status: Watched<MemscanStatus>,
     settings: Arc<SettingsStore>,
     accounts: Arc<AccountService>,
@@ -93,8 +96,10 @@ impl MemscanService {
         accounts: Arc<AccountService>,
         bus: &Bus,
         stop: CancellationToken,
+        tasks: TaskTracker,
     ) -> MemscanService {
         MemscanService {
+            tasks,
             status: Watched::new(
                 MemscanStatus { state: "idle", last_attempt: f64::NEG_INFINITY, ..Default::default() },
                 bus,
@@ -130,7 +135,7 @@ impl MemscanService {
             return;
         }
         let me = Arc::clone(self);
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             // Looking at the process list reads /proc: off the async threads.
             let denied = me.status.read().denied_pid;
             let pid = blocking(Self::game_pid).await.ok().flatten();
@@ -295,7 +300,7 @@ impl MemscanService {
             st.last_attempt = f64::NEG_INFINITY;
         }
         let me = Arc::clone(self);
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             if blocking(Self::game_pid).await.ok().flatten().is_some() {
                 me.schedule(Duration::from_secs(3), 1);
             }
@@ -308,7 +313,7 @@ impl MemscanService {
             return;
         }
         let me = Arc::clone(self);
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             if blocking(Self::game_pid).await.ok().flatten().is_some() {
                 me.schedule(Duration::from_secs(20), 1);
             }
@@ -321,7 +326,7 @@ impl MemscanService {
             return;
         }
         let me = Arc::clone(self);
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             if blocking(Self::game_pid).await.ok().flatten().is_some() {
                 me.schedule(Duration::from_secs(3), 2);
             }

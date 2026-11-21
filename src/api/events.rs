@@ -2,12 +2,14 @@
 //!
 //! The first event is the summary as it is now, so a page that connects (or reconnects after the
 //! engine restarted) is current at once. After that every bus message follows in order. A page
-//! that falls too far behind is sent `resync` and fetches everything again.
+//! that falls too far behind is sent `resync` and fetches everything again, as is one that
+//! reconnects (the browser says so with `Last-Event-ID`): what was sent while it was away is lost.
 
 use std::convert::Infallible;
 use std::time::Duration;
 
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures_util::{Stream, StreamExt, stream};
 use tokio_stream::wrappers::BroadcastStream;
@@ -24,6 +26,7 @@ const KEEP_ALIVE: Duration = Duration::from_secs(15);
 
 pub async fn stream(
     State(engine): State<Engine>,
+    headers: HeaderMap,
     stop: CancellationToken,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     // Subscribe before computing the first summary: a change made meanwhile is then sent too,
@@ -33,7 +36,13 @@ pub async fn stream(
         let engine = engine.clone();
         tokio::task::spawn_blocking(move || engine.summary()).await.ok()
     };
-    let first = summary.map(|s| Event::default().event(Topic::State.name()).retry(RETRY).data(s.to_string()));
+    let mut first = vec![match summary {
+        Some(s) => Event::default().event(Topic::State.name()).retry(RETRY).data(s.to_string()),
+        None => Event::default().retry(RETRY).comment("no summary"),
+    }];
+    if headers.contains_key("last-event-id") {
+        first.push(Event::default().event(Topic::Resync.name()).data("{}"));
+    }
     let rest = BroadcastStream::new(rx).map(|msg| match msg {
         Ok(msg) => Event::default().event(msg.topic.name()).id(msg.id.to_string()).data(&msg.data),
         Err(BroadcastStreamRecvError::Lagged(_)) => Event::default().event(Topic::Resync.name()).data("{}"),

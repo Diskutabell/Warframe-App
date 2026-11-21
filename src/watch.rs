@@ -13,6 +13,15 @@ use std::time::Duration;
 
 use notify::{EventKind, RecursiveMode, Watcher};
 
+/// Whether two file names are the same file's: on Windows regardless of case, as its file
+/// systems treat them (a setting may say `ee.log` for the game's `EE.log`).
+fn same_name(a: Option<&std::ffi::OsStr>, b: Option<&std::ffi::OsStr>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) if cfg!(windows) => a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase(),
+        (a, b) => a == b,
+    }
+}
+
 pub struct Wakeups {
     /// Kept alive for as long as the wakeups are wanted; None when the folder could not be
     /// watched.
@@ -25,14 +34,16 @@ impl Wakeups {
     pub fn new(file: &Path) -> Wakeups {
         let (tx, rx) = channel();
         let name: Option<OsString> = file.file_name().map(|n| n.to_os_string());
-        let watcher = file.parent().and_then(|dir| {
+        // A bare file name is in the current folder.
+        let dir = file.parent().map(|d| if d.as_os_str().is_empty() { Path::new(".") } else { d });
+        let watcher = dir.and_then(|dir| {
             let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
                 let wanted = match &res {
                     // The folder's other files (EE.cfg, older logs) are not of interest.
                     Ok(ev) => {
                         !matches!(ev.kind, EventKind::Access(_))
                             && (ev.paths.is_empty()
-                                || ev.paths.iter().any(|p| p.file_name().map(|n| n.to_os_string()) == name))
+                                || ev.paths.iter().any(|p| same_name(p.file_name(), name.as_deref())))
                     }
                     // An error (the event queue overflowed, say): look, to be safe.
                     Err(_) => true,
@@ -76,6 +87,14 @@ impl Wakeups {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bare_file_name_is_watched_in_the_current_folder() {
+        assert!(Wakeups::new(Path::new("inventory.json")).watching());
+        let (a, b) = (std::ffi::OsStr::new("EE.log"), std::ffi::OsStr::new("ee.log"));
+        assert_eq!(same_name(Some(a), Some(b)), cfg!(windows));
+        assert!(same_name(Some(a), Some(a)));
+    }
 
     #[test]
     fn writes_to_the_file_wake_and_other_files_do_not() {

@@ -172,7 +172,17 @@ impl<S: Send + Sync, const MAX: usize> FromRequest<S> for JsonBody<MAX> {
         if raw.iter().all(u8::is_ascii_whitespace) {
             return Ok(JsonBody(json!({})));
         }
-        serde_json::from_slice(&raw)
+        let large = raw.len() > 64 * 1024;
+        let parse = move || serde_json::from_slice::<Value>(&raw);
+        // An imported inventory runs to megabytes: parse it off the async threads.
+        let parsed = if large {
+            tokio::task::spawn_blocking(parse)
+                .await
+                .map_err(|_| json_response(StatusCode::INTERNAL_SERVER_ERROR, &json!({"error": BUG})))?
+        } else {
+            parse()
+        };
+        parsed
             .map(JsonBody)
             .map_err(|e| json_response(StatusCode::BAD_REQUEST, &json!({"error": format!("Not JSON: {e}")})))
     }

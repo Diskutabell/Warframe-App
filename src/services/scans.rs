@@ -11,6 +11,8 @@ use anyhow::{Result, anyhow};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use super::accounts::AccountService;
 use super::catalog::CatalogStore;
@@ -34,8 +36,9 @@ const COALESCE: f64 = 5.0;
 /// 5 s pause showing the relics, or at once; the hotkey is pressed with them in view.
 const REWARD_WAIT: Duration = Duration::from_secs(12);
 const HOTKEY_WAIT: Duration = Duration::from_secs(1);
-/// A caller joining a running scan waits for it this long at most.
-const JOIN_WAIT: Duration = Duration::from_secs(15);
+/// A caller joining a running scan waits for it this long at most: longer than a scan can take
+/// (looking for the cards, then their prices), so a waiting caller never starts a second one.
+const JOIN_WAIT: Duration = Duration::from_secs(REWARD_WAIT.as_secs() + PRICES_WAIT.as_secs() + 4);
 /// Between two looks at the screen while waiting for the cards. A capture with grim takes 20-40 ms;
 /// the other screenshot tools start a whole program each time.
 const REWARD_POLL: Duration = Duration::from_millis(120);
@@ -190,7 +193,10 @@ impl RewardScan {
     /// one that just read its cards; anything else belongs to an older screen and is called off.
     fn new_screen(&mut self, t: f64) -> u64 {
         let read_cards = self.result.as_ref().is_some_and(|r| r.cards.is_some());
-        if !self.done || (t - self.started < COALESCE && read_cards) {
+        // The hotkey reading this screen was pressed moments before the line reached the disk;
+        // a scan started longer ago is an older screen's.
+        let recent = t - self.started < COALESCE;
+        if recent && (!self.done || read_cards) {
             self.screen_generation = self.screen_generation.wrapping_add(1);
         } else {
             self.invalidate();
@@ -207,13 +213,26 @@ impl RewardScan {
         }
         let recent = t - self.started < COALESCE;
         if self.done && (joined || recent) {
-            // The log's screen wants the cards read; a hotkey caller takes whatever was read.
-            if let Some(r) = self.result.as_ref().filter(|r| screen.is_none() || r.cards.is_some()) {
+            // The log's screen wants the cards read; a hotkey caller takes whatever was read -
+            // but a new press is not handed an earlier one's failure (pressed before the cards
+            // turned over): it reads the screen again.
+            let usable = |r: &&Arc<RewardResult>| {
+                if screen.is_some() { r.cards.is_some() } else { joined || (r.error.is_none() && !r.items.is_empty()) }
+            };
+            if let Some(r) = self.result.as_ref().filter(usable) {
                 return Turn::Share(Arc::clone(r));
             }
         }
-        if !self.done && may_wait {
-            return Turn::Wait;
+        if !self.done {
+            if may_wait {
+                return Turn::Wait;
+            }
+            // Waited as long as a scan takes and it still runs: take what it has published, never
+            // start a second one that would call it off.
+            return match &self.result {
+                Some(r) => Turn::Share(Arc::clone(r)),
+                None => Turn::Cancelled,
+            };
         }
         self.started = t;
         self.done = false;
@@ -249,6 +268,10 @@ pub struct ScanService {
     reward_done: watch::Sender<u64>,
     /// The interface scale the reward cards were last found at when it was not EE.cfg's.
     found_scale: Mutex<Option<f64>>,
+    /// The app's background tasks, which shutdown waits for: a scan still running then records
+    /// what it read.
+    tasks: TaskTracker,
+    stop: CancellationToken,
 }
 
 /// Runs blocking work (screen capture, OCR, files) on the blocking pool.
@@ -290,8 +313,12 @@ impl ScanService {
         shell: Arc<Shell>,
         log: Arc<LogService>,
         bus: &Bus,
+        tasks: TaskTracker,
+        stop: CancellationToken,
     ) -> ScanService {
         ScanService {
+            tasks,
+            stop,
             db,
             settings,
             catalog,
@@ -347,9 +374,15 @@ impl ScanService {
         let screen = lock(&self.reward_scan).new_screen(now());
         self.reward_done.send_modify(|n| *n = n.wrapping_add(1));
         let me = Arc::clone(self);
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             me.scan_rewards_for(REWARD_WAIT, Some(screen)).await;
         });
+    }
+
+    /// The app is quitting: a scan still looking for cards, or watching them, gives up.
+    pub fn stop_scans(&self) {
+        lock(&self.reward_scan).invalidate();
+        self.reward_done.send_modify(|n| *n = n.wrapping_add(1));
     }
 
     /// The log closed the reward screen: its prices go, and a scan still looking gives up.
@@ -528,7 +561,9 @@ impl ScanService {
                     format!("{star}{}: {price}p{need}", i.name)
                 })
                 .collect();
-            notifier::send("Relic rewards", &lines.join("\n"));
+            // A Windows toast is a synchronous COM call.
+            let text = lines.join("\n");
+            let _ = blocking(move || notifier::send("Relic rewards", &text)).await;
         }
         Some(self.publish_rewards(RewardResult { items, best, ..base }, false, generation))
     }
@@ -680,7 +715,7 @@ impl ScanService {
             return;
         }
         let me = Arc::clone(self);
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             let until = Instant::now() + Duration::from_secs(40);
             let mut misses = 0;
             let layout = Arc::new(layout);
@@ -794,13 +829,17 @@ impl ScanService {
             r.stats.iter().filter(|g| !g.negative).filter_map(|g| rivens::market_slug(g.stat)).collect();
         let (Some(weapon), false) = (r.weapon.clone(), positives.is_empty()) else { return };
         let (me, r) = (Arc::clone(self), Arc::clone(r));
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             // The panel shows the weapon's picture only from the art cache.
             if let Some(url) = r.image.clone() {
                 let _ = crate::art::get(&url, 128).await;
             }
             let mut updated = (*r).clone();
-            match me.market.riven_listings(&uid, &weapon, &positives).await {
+            let listings = tokio::select! {
+                _ = me.stop.cancelled() => return,
+                listings = me.market.riven_listings(&uid, &weapon, &positives) => listings,
+            };
+            match listings {
                 Ok(found) => updated.market = Some(found),
                 Err(e) => updated.market_error = Some(format!("{e:#}")),
             }
@@ -875,6 +914,58 @@ mod tests {
         old.finish(g);
         let screen = old.new_screen(400.0);
         assert!(matches!(old.turn(Some(screen), false, true, 400.0), Turn::Scan(_)));
+    }
+
+    #[test]
+    fn a_scan_still_running_from_long_ago_is_an_older_screens() {
+        let mut scan = idle();
+        let Turn::Scan(old) = scan.turn(None, false, true, 100.0) else { panic!() };
+        // Its screen's close line was missed; the next screen opens 30 s later.
+        let screen = scan.new_screen(130.0);
+        assert!(!scan.is_current(old), "called off");
+        assert!(matches!(scan.turn(Some(screen), false, true, 130.0), Turn::Scan(_)), "the new screen is read");
+    }
+
+    #[test]
+    fn a_caller_that_waited_long_enough_never_starts_a_second_scan() {
+        let mut scan = idle();
+        let Turn::Scan(first) = scan.turn(Some(scan.screen_generation), false, true, 100.0) else { panic!() };
+        // The names are published, the prices still load; the waiting hotkey runs out of time.
+        scan.result = Some(found(Some(4)));
+        assert!(matches!(scan.turn(None, true, false, 120.0), Turn::Share(r) if r.cards == Some(4)));
+        assert!(scan.is_current(first), "the running scan carries on");
+        let mut scan = idle();
+        let Turn::Scan(first) = scan.turn(None, false, true, 100.0) else { panic!() };
+        assert!(matches!(scan.turn(None, true, false, 120.0), Turn::Cancelled));
+        assert!(scan.is_current(first));
+    }
+
+    #[test]
+    fn a_new_hotkey_press_reads_again_after_one_that_found_nothing() {
+        let mut scan = idle();
+        let Turn::Scan(g) = scan.turn(None, false, true, 100.0) else { panic!() };
+        scan.result =
+            Some(Arc::new(RewardResult { error: Some("No reward names recognized.".into()), ..Default::default() }));
+        scan.finish(g);
+        assert!(matches!(scan.turn(None, false, true, 102.0), Turn::Scan(_)), "pressed again once the cards are up");
+        // One that read names is shared with a second press moments later.
+        let mut scan = idle();
+        let Turn::Scan(g) = scan.turn(None, false, true, 100.0) else { panic!() };
+        let item = RewardItem {
+            name: "Forma Blueprint".into(),
+            uid: String::new(),
+            score: 1.0,
+            slug: None,
+            have: 0,
+            needed: 0,
+            vaulted: None,
+            ducats: None,
+            price: None,
+            slot: Some(0),
+        };
+        scan.result = Some(Arc::new(RewardResult { items: vec![item], ..Default::default() }));
+        scan.finish(g);
+        assert!(matches!(scan.turn(None, false, true, 102.0), Turn::Share(_)));
     }
 
     #[test]

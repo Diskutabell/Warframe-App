@@ -229,6 +229,7 @@ impl Db {
                 profile_requests: ProfileTimes {
                     requested: number("profile_requested")?,
                     paused_until: number("profile_paused_until")?,
+                    unanswered: meta("profile_unanswered")?.is_some(),
                 },
                 accounts,
             })
@@ -251,6 +252,7 @@ impl Db {
             set_meta(tx, "switched", Some(&switched.to_string()))?;
             set_meta(tx, "profile_requested", Some(&times.requested.to_string()))?;
             set_meta(tx, "profile_paused_until", Some(&times.paused_until.to_string()))?;
+            set_meta(tx, "profile_unanswered", times.unanswered.then_some("1"))?;
             for (position, acc) in accounts.iter().enumerate() {
                 save_account_row(tx, position, acc)?;
             }
@@ -663,7 +665,7 @@ mod tests {
         acc.badge = Some((16, Some(18)));
         acc.seen = Some(5.0);
         let other = Account::new("second".into(), "Second".into());
-        let times = ProfileTimes { requested: 100.0, paused_until: 3700.0 };
+        let times = ProfileTimes { requested: 100.0, paused_until: 3700.0, unanswered: true };
         db.save_registry(&Some("tenno".into()), 9.0, times, &[acc.clone(), other]).unwrap();
         let profile = Profile { name: Some("Tennoplayer".into()), fetched: 42.0, ..Profile::default() };
         db.save_profile("tenno", &profile).unwrap();
@@ -681,6 +683,7 @@ mod tests {
         assert_eq!(back.active.as_deref(), Some("tenno"));
         assert_eq!(back.switched, 9.0);
         assert_eq!((back.profile_requests.requested, back.profile_requests.paused_until), (100.0, 3700.0));
+        assert!(back.profile_requests.unanswered, "a request still waiting for its answer is remembered");
         let keys: Vec<&str> = back.accounts.iter().map(|a| a.key.as_str()).collect();
         assert_eq!(keys, ["tenno", "second"], "in their order");
         let a = &back.accounts[0];

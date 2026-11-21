@@ -11,11 +11,12 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use indexmap::IndexMap;
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use super::catalog::CatalogStore;
 use super::settings::SettingsStore;
@@ -268,6 +269,23 @@ pub struct AccountService {
     market: Arc<Market>,
     bus: Bus,
     stop: CancellationToken,
+    /// The app's background tasks: profile requests run on it, so that neither a closed page nor
+    /// shutdown drops one between sending it and recording its answer.
+    tasks: TaskTracker,
+}
+
+/// The rate limit's times as saved, at startup `now`. Never in the future: a clock set back must
+/// not hold requests up for longer than the cooldown or the pause themselves. A request whose
+/// answer was never recorded may have been refused: the service is left alone as after one.
+fn restored(times: accounts::ProfileTimes, now: f64) -> accounts::ProfileTimes {
+    let requested = times.requested.min(now);
+    let paused_until =
+        if times.unanswered { times.paused_until.max(requested + PROFILE_PAUSE) } else { times.paused_until };
+    accounts::ProfileTimes {
+        requested,
+        paused_until: paused_until.min(now + PROFILE_PAUSE),
+        unanswered: times.unanswered,
+    }
 }
 
 /// Runs file work (the accounts' JSON files) on the blocking pool from async code.
@@ -278,6 +296,7 @@ async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) 
 impl AccountService {
     /// The accounts kept in `db`; `notes` (what opening the database had to say) go to the
     /// activity list.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         db: Arc<Db>,
         notes: Vec<String>,
@@ -286,6 +305,7 @@ impl AccountService {
         market: Arc<Market>,
         bus: &Bus,
         stop: CancellationToken,
+        tasks: TaskTracker,
     ) -> anyhow::Result<Arc<AccountService>> {
         let registry = db.load_accounts()?;
         let mut data = Data {
@@ -294,10 +314,7 @@ impl AccountService {
             switched: registry.switched,
             // Never in the future: a clock set back must not hold requests up for longer than
             // the cooldown or the pause themselves.
-            profile_requests: accounts::ProfileTimes {
-                requested: registry.profile_requests.requested.min(now()),
-                paused_until: registry.profile_requests.paused_until.min(now() + PROFILE_PAUSE),
-            },
+            profile_requests: restored(registry.profile_requests, now()),
             ..Data::default()
         };
         // A shown account that is gone (its folder deleted by hand): show the first one instead.
@@ -315,6 +332,7 @@ impl AccountService {
             market,
             bus: bus.clone(),
             stop,
+            tasks,
         }))
     }
 
@@ -681,7 +699,7 @@ impl AccountService {
             }
             d.profile_worker = true;
         }
-        tokio::spawn(Arc::clone(self).profile_worker());
+        self.tasks.spawn(Arc::clone(self).profile_worker());
     }
 
     async fn profile_worker(self: Arc<Self>) {
@@ -725,7 +743,7 @@ impl AccountService {
                 }
                 d.get(&key).is_some_and(|a| a.id.is_some() && self.profile_stale(a))
             };
-            if due {
+            if due && !self.stop.is_cancelled() {
                 let _ = self.refresh_profile(&key, true).await;
             }
         }
@@ -749,8 +767,18 @@ impl AccountService {
             return Err(UserError::new(format!("{why} Try again in {minutes}:{seconds:02}.")).into());
         }
         d.profile_requests.requested = now();
-        d.save(&self.db);
+        d.profile_requests.unanswered = true;
+        // Not saved, not sent: a restart would not know of it.
+        self.db
+            .save_registry(&d.active, d.switched, d.profile_requests, &d.accounts)
+            .context("could not save the time of the profile request, so none is made")?;
         Ok(())
+    }
+
+    /// The answer to the last profile request is recorded (with the account it went to).
+    fn profile_answered(d: &mut Data, db: &Db) {
+        d.profile_requests.unanswered = false;
+        d.save(db);
     }
 
     /// Loads the profile of the account `key` from DE (within the rate limit).
@@ -768,25 +796,37 @@ impl AccountService {
         }
         let me = Arc::clone(self);
         blocking(move || me.take_profile_slot()).await??;
-        let fetched = sources::fetch_profile(&id, self.settings.get().platform).await;
+        // From here on the request and the recording of its answer are one task of their own: a
+        // caller that goes away (a page closed) must not leave a refusal unrecorded.
         let me = Arc::clone(self);
         let key = key.to_string();
-        let prof = match fetched {
-            Ok(p) => p,
-            Err(e) => {
-                let msg = e.to_string();
-                let refused = e.downcast_ref::<sources::ProfileRefused>().is_some_and(|r| r.status == 403);
-                let record = msg.clone();
-                blocking(move || me.profile_failed(&key, record, refused)).await?;
-                if !quiet {
-                    return Err(e);
+        let platform = self.settings.get().platform;
+        let request = self.tasks.spawn(async move {
+            let fetched = sources::fetch_profile(&id, platform).await;
+            let me2 = Arc::clone(&me);
+            match fetched {
+                Ok(prof) => blocking(move || {
+                    let attached = me2.attach_profile(&key, Some(&id), prof, "DE public profile");
+                    Self::profile_answered(&mut me2.data.write(), &me2.db);
+                    attached
+                })
+                .await
+                .map(Ok),
+                Err(e) => {
+                    let refused = e.downcast_ref::<sources::ProfileRefused>().is_some_and(|r| r.status == 403);
+                    let record = e.to_string();
+                    blocking(move || me2.profile_failed(&key, record, refused)).await.map(|_| Err(e))
                 }
-                self.event(&msg, "warn");
-                return Ok(None);
             }
-        };
-        let attached = blocking(move || me.attach_profile(&key, Some(&id), prof, "DE public profile")).await?;
-        Ok(Some(attached))
+        });
+        match request.await.context("the profile request stopped")?? {
+            Ok(attached) => Ok(Some(attached)),
+            Err(e) if quiet => {
+                self.event(&e.to_string(), "warn");
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Records a failed profile request. A 403 is the service rate-limiting this address: leave
@@ -803,8 +843,8 @@ impl AccountService {
                 "DE's profile service refused a request; no profile is asked for during the next hour".into(),
                 "warn",
             );
-            d.save(&self.db);
         }
+        Self::profile_answered(&mut d, &self.db);
     }
 
     /// Files a profile under the account it names. Its display name decides: an id linked to the
@@ -1316,5 +1356,17 @@ mod tests {
         assert!(d.profile_wait() > PROFILE_COOLDOWN, "a refusal holds requests up for longer than the cooldown");
         d.profile_requests.requested = 0.0;
         assert!(d.profile_wait() > PROFILE_PAUSE - 2.0, "the pause counts on its own");
+    }
+
+    #[test]
+    fn a_request_whose_answer_was_never_recorded_counts_as_refused() {
+        let at = |requested, unanswered| accounts::ProfileTimes { requested, paused_until: 0.0, unanswered };
+        // Asked at 1000, the app stopped before the answer came: no request until 1000 + an hour.
+        assert_eq!(restored(at(1000.0, true), 1100.0).paused_until, 1000.0 + PROFILE_PAUSE);
+        // Answered: only the cooldown applies.
+        assert_eq!(restored(at(1000.0, false), 1100.0).paused_until, 0.0);
+        // A clock set back holds nothing up for longer than the pause.
+        assert_eq!(restored(at(9000.0, true), 1100.0).requested, 1100.0);
+        assert_eq!(restored(at(9000.0, true), 1100.0).paused_until, 1100.0 + PROFILE_PAUSE);
     }
 }

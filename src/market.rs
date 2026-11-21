@@ -284,12 +284,26 @@ impl Market {
             }
             p.platform
         };
-        self.save_if_dirty();
         let loaded: HashMap<String, Price> = self.db.load_prices(current).unwrap_or_default();
-        let mut p = self.prices.lock().unwrap_or_else(|e| e.into_inner());
-        if p.platform == old && current == self.platform() {
+        // The swap and taking the old platform's unsaved prices are one step (prices, then dirty,
+        // as everywhere): a price fetched for the old platform meanwhile is saved with it.
+        let _guard = self.save_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let unsaved = {
+            let mut p = self.prices.lock().unwrap_or_else(|e| e.into_inner());
+            if p.platform != old || current != self.platform() {
+                return current;
+            }
+            let slugs = std::mem::take(&mut *self.dirty.lock().unwrap_or_else(|e| e.into_inner()));
+            let unsaved: Vec<(String, Price)> =
+                slugs.iter().filter_map(|s| p.entries.get(s).map(|e| (s.clone(), e.clone()))).collect();
             p.platform = current;
             p.entries = loaded;
+            unsaved
+        };
+        if !unsaved.is_empty() {
+            if let Err(e) = self.db.save_prices(old, &unsaved) {
+                eprintln!("could not save market prices: {e:#}");
+            }
         }
         current
     }

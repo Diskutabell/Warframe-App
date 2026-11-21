@@ -641,6 +641,15 @@ impl LogWatcher {
         while !stop.is_cancelled() {
             let path = (self.path_of)().filter(|p| p.is_file());
             let Some(path) = path else {
+                // Gone for a moment while the game replaces it: wait for it to come back where
+                // it was, and follow the new one from its start, as a live log.
+                if let (Some(w), Some(was)) = (&wakeups, &current) {
+                    if w.watching() && (self.path_of)().as_ref() == Some(was) {
+                        w.wait(LOOK_MISSING, SETTLE);
+                        (pos, inode) = (0, 0);
+                        continue;
+                    }
+                }
                 current = None;
                 wakeups = None;
                 self.status().path = None;
@@ -688,6 +697,10 @@ impl LogWatcher {
                     pos += chunk.len() as u64;
                     for line in lines.push(&chunk) {
                         self.handle(&line);
+                    }
+                    if chunk.len() == 4_000_000 {
+                        // More is waiting: read it now.
+                        continue;
                     }
                 }
             }

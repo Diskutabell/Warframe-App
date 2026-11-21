@@ -370,18 +370,6 @@ impl Overlays {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn overlays_stay_inside_the_game_on_small_and_offset_screens() {
-        let game = Rect { x: -1600, y: 200, width: 400, height: 300 };
-        assert_eq!(fit_rect(game, 1000, 168, -2000, 500), Rect { x: -1600, y: 332, width: 400, height: 168 });
-        assert_eq!(fit_rect(game, 470, 600, 0, -100), Rect { x: -1600, y: 200, width: 400, height: 300 });
-    }
-}
-
 /// Runs the event loop until the main window closes or the app is told to quit.
 pub fn run(state: Arc<App>, url: &str, _backend: Backend) -> Result<()> {
     let mut event_loop = EventLoopBuilder::<Event>::with_user_event().build();
@@ -496,4 +484,16 @@ pub fn run(state: Arc<App>, url: &str, _backend: Backend) -> Result<()> {
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlays_stay_inside_the_game_on_small_and_offset_screens() {
+        let game = Rect { x: -1600, y: 200, width: 400, height: 300 };
+        assert_eq!(fit_rect(game, 1000, 168, -2000, 500), Rect { x: -1600, y: 332, width: 400, height: 168 });
+        assert_eq!(fit_rect(game, 470, 600, 0, -100), Rect { x: -1600, y: 200, width: 400, height: 300 });
+    }
 }

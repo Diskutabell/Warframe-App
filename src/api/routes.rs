@@ -54,7 +54,12 @@ pub fn api(engine: Engine, stop: CancellationToken) -> Router<Engine> {
         .route("/api/rewards", get(|s: State<Engine>| view(s, |e| Ok(result_json(e.rewards())))))
         .route("/api/riven/result", get(|s: State<Engine>| view(s, |e| Ok(result_json(e.riven())))))
         .route("/api/art", get(super::art::serve))
-        .route("/api/events", get(move |s: State<Engine>| super::events::stream(s, events_stop.clone())))
+        .route(
+            "/api/events",
+            get(move |s: State<Engine>, headers: axum::http::HeaderMap| {
+                super::events::stream(s, headers, events_stop.clone())
+            }),
+        )
         // Changes.
         .route(
             "/api/settings",

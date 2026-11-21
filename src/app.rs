@@ -97,6 +97,7 @@ impl App {
         let shell = Arc::new(Shell::default());
         let catalog = Arc::new(CatalogStore::new(&bus));
         let market = Market::new(Arc::clone(&settings), Arc::clone(&db), bus.clone());
+        let tasks = TaskTracker::new();
         let accounts = AccountService::new(
             Arc::clone(&db),
             notes,
@@ -105,6 +106,7 @@ impl App {
             Arc::clone(&market),
             &bus,
             stop.clone(),
+            tasks.clone(),
         )?;
         let world = Arc::new(WorldService::new(Arc::clone(&settings), &bus));
         let log = Arc::new(LogService::new(Arc::clone(&settings)));
@@ -117,8 +119,16 @@ impl App {
             Arc::clone(&shell),
             Arc::clone(&log),
             &bus,
+            tasks.clone(),
+            stop.clone(),
         ));
-        let memscan = Arc::new(MemscanService::new(Arc::clone(&settings), Arc::clone(&accounts), &bus, stop.clone()));
+        let memscan = Arc::new(MemscanService::new(
+            Arc::clone(&settings),
+            Arc::clone(&accounts),
+            &bus,
+            stop.clone(),
+            tasks.clone(),
+        ));
         let notifications =
             Arc::new(Notifications::new(Arc::clone(&settings), Arc::clone(&world), Arc::clone(&accounts)));
         Ok(Arc::new(App {
@@ -135,7 +145,7 @@ impl App {
             scans,
             memscan,
             notifications,
-            tasks: TaskTracker::new(),
+            tasks,
             runtime: Handle::current(),
             update: Mutex::new(None),
             tools: Mutex::new((f64::NEG_INFINITY, Value::Null)),
@@ -207,6 +217,7 @@ impl App {
     /// Stops the background work and waits (briefly) for it to write what it holds.
     pub async fn shutdown(&self, grace: Duration) {
         self.stop.cancel();
+        self.scans.stop_scans();
         self.tasks.close();
         if tokio::time::timeout(grace, self.tasks.wait()).await.is_err() {
             eprintln!("background work did not stop in time");
@@ -305,16 +316,28 @@ impl App {
         *current = Some(stop.clone());
         let accounts = Arc::clone(&self.accounts);
         let watch = move || {
-            std::thread::sleep(delay);
+            // The first look waits (for the log to be read back), but not past a quit or a
+            // change of the setting.
+            let start = std::time::Instant::now();
+            while start.elapsed() < delay && !stop.is_cancelled() {
+                std::thread::sleep(Duration::from_millis(200));
+            }
             let path = PathBuf::from(path);
-            let wakeups = Wakeups::new(&path);
-            let mut seen: Option<SystemTime> = None;
+            let mut wakeups = Wakeups::new(&path);
+            // The file as last looked at: its time and length. A tool that writes it in pieces
+            // within one tick of the clock still changes the length.
+            let mut seen: Option<(SystemTime, u64)> = None;
             while !stop.is_cancelled() {
-                if let Ok(modified) = std::fs::metadata(&path).and_then(|m| m.modified()) {
-                    if seen.is_none_or(|s| modified > s) {
-                        seen = Some(modified);
+                if let Ok(meta) = std::fs::metadata(&path) {
+                    let now = meta.modified().ok().map(|m| (m, meta.len()));
+                    if now.is_some() && now != seen {
+                        seen = now;
                         accounts.import_inventory_file(&path);
                     }
+                }
+                if !wakeups.watching() {
+                    // Its folder may exist by now.
+                    wakeups = Wakeups::new(&path);
                 }
                 // A tool may write the file in several pieces: wait for the last one.
                 wakeups.wait(INVENTORY_FILE_LOOK, Duration::from_millis(500));

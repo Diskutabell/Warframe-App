@@ -172,6 +172,11 @@ pub struct ProfileTimes {
     /// Epoch seconds until which no request is made (after a refusal); 0 when not paused.
     #[serde(default)]
     pub paused_until: f64,
+    /// A request was sent and its answer not yet recorded. Still set at the next start (the app
+    /// was stopped or crashed meanwhile), the answer may have been a refusal: the service is
+    /// then left alone as after one.
+    #[serde(default, skip_serializing)]
+    pub unanswered: bool,
 }
 
 /// The account list: `accounts.json` as older versions wrote it, and as the database keeps it.
@@ -330,7 +335,7 @@ fn rebuild(data: &Path) -> Registry {
     Registry {
         active: accounts.first().map(|a| a.key.clone()),
         switched: 0.0,
-        profile_requests: ProfileTimes { requested: crate::now(), paused_until: 0.0 },
+        profile_requests: ProfileTimes { requested: crate::now(), ..ProfileTimes::default() },
         accounts,
     }
 }
@@ -516,7 +521,7 @@ mod tests {
         // Written by a build before the times were kept.
         let old: Registry = serde_json::from_str(r#"{"active": "tenno", "switched": 1.0, "accounts": []}"#).unwrap();
         assert_eq!((old.profile_requests.requested, old.profile_requests.paused_until), (0.0, 0.0));
-        let times = ProfileTimes { requested: 100.0, paused_until: 3700.0 };
+        let times = ProfileTimes { requested: 100.0, paused_until: 3700.0, unanswered: false };
         let written = RegistryRef { active: &None, switched: 0.0, profile_requests: times, accounts: &[] };
         let back: Registry = serde_json::from_str(&serde_json::to_string(&written).unwrap()).unwrap();
         assert_eq!((back.profile_requests.requested, back.profile_requests.paused_until), (100.0, 3700.0));
