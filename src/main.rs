@@ -45,6 +45,8 @@ mod world;
 // `desktop::run()` without caring which system it runs on.
 #[cfg(unix)]
 mod compositor;
+#[cfg(unix)]
+mod ipc;
 #[cfg(windows)]
 #[path = "windows/compositor.rs"]
 mod compositor;

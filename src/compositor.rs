@@ -3,13 +3,11 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Duration;
 
 use anyhow::{Result, bail};
 use serde_json::Value;
 
-use crate::{UserError, process};
+use crate::{UserError, ipc};
 
 /// Warframe under Proton: the window class is stable, the title is not localised.
 const GAME_CLASSES: [&str; 3] = ["steam_app_230410", "Warframe.x64.exe", "Warframe.exe"];
@@ -26,13 +24,14 @@ pub fn which(program: &str) -> Option<PathBuf> {
     })
 }
 
-const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Hyprland's answer to a JSON query (`clients`, `monitors`); None on any failure.
+fn hypr_json(what: &str) -> Option<Value> {
+    ipc::hyprland_json(&format!("j/{what}")).ok()
+}
 
-/// Runs a query command and parses its stdout as JSON; None on any failure.
-fn query_json(cmd: &str, args: &[&str]) -> Option<Value> {
-    which(cmd)?;
-    let out = process::run(Command::new(cmd).args(args), None, QUERY_TIMEOUT).ok()?;
-    serde_json::from_slice(&out.stdout).ok()
+/// Sway's answer to a query; None on any failure.
+fn sway_json(kind: ipc::SwayMessage) -> Option<Value> {
+    ipc::sway(kind, "").ok()
 }
 
 /// The compositor this session runs, from the environment it gives its clients. Asking which
@@ -105,7 +104,7 @@ fn sway_game<'a>(n: &'a Value, output: Option<&'a str>) -> Option<(&'a Value, Op
 pub fn game_rect() -> Option<Rect> {
     let at = |v: &Value, i: usize| v[i].as_i64().unwrap_or(0) as i32;
     if running()? == Running::Hyprland {
-        let clients = query_json("hyprctl", &["clients", "-j"])?;
+        let clients = hypr_json("clients")?;
         let c = hypr_game(&clients)?;
         return Some(Rect {
             x: at(&c["at"], 0),
@@ -114,7 +113,7 @@ pub fn game_rect() -> Option<Rect> {
             height: at(&c["size"], 1),
         });
     }
-    let tree = query_json("swaymsg", &["-t", "get_tree"])?;
+    let tree = sway_json(ipc::SwayMessage::GetTree)?;
     let (n, _) = sway_game(&tree, None)?;
     let g = &n["rect"];
     Some(Rect {
@@ -131,9 +130,9 @@ pub fn game_rect() -> Option<Rect> {
 /// centred-16:9 crop lands hundreds of pixels off. Capturing only the game's output avoids that.
 pub fn game_output() -> Option<String> {
     if running()? == Running::Hyprland {
-        let clients = query_json("hyprctl", &["clients", "-j"])?;
+        let clients = hypr_json("clients")?;
         let hit = hypr_game(&clients)?;
-        let monitors = query_json("hyprctl", &["monitors", "-j"])?;
+        let monitors = hypr_json("monitors")?;
         return monitors
             .as_array()
             .into_iter()
@@ -141,7 +140,7 @@ pub fn game_output() -> Option<String> {
             .find(|m| m["id"] == hit["monitor"])
             .and_then(|m| m["name"].as_str().map(str::to_owned));
     }
-    let tree = query_json("swaymsg", &["-t", "get_tree"])?;
+    let tree = sway_json(ipc::SwayMessage::GetTree)?;
     sway_game(&tree, None).and_then(|(_, output)| output.map(str::to_owned))
 }
 
@@ -156,7 +155,7 @@ pub struct Monitor {
 pub fn monitors() -> Vec<Monitor> {
     let Some(compositor) = running() else { return Vec::new() };
     if compositor == Running::Hyprland {
-        let Some(list) = query_json("hyprctl", &["monitors", "-j"]) else { return Vec::new() };
+        let Some(list) = hypr_json("monitors") else { return Vec::new() };
         return list
             .as_array()
             .into_iter()
@@ -170,7 +169,7 @@ pub fn monitors() -> Vec<Monitor> {
             })
             .collect();
     }
-    if let Some(list) = query_json("swaymsg", &["-t", "get_outputs"]) {
+    if let Some(list) = sway_json(ipc::SwayMessage::GetOutputs) {
         return list
             .as_array()
             .into_iter()
@@ -280,8 +279,7 @@ impl Flavour {
 /// Hyprland can be configured by hyprland.conf or by Lua, and the bind syntax differs. A
 /// Lua-driven Hyprland never reads hyprland.conf, and refuses `hyprctl keyword bind`.
 fn hyprland_uses_lua() -> bool {
-    process::run(Command::new("hyprctl").arg("systeminfo"), None, QUERY_TIMEOUT)
-        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("configProvider: lua"))
+    ipc::hyprland("/systeminfo").is_ok_and(|o| o.contains("configProvider: lua"))
 }
 
 pub fn detect_flavour() -> Option<Flavour> {
@@ -298,23 +296,15 @@ const MAIN_WINDOW_CLASS: &str = "(?i)^warframeproject$";
 /// The command that makes the compositor float the main window from the moment it opens. The
 /// syntax is Hyprland 0.56's (checked with `Hyprland --verify-config`); older releases spell
 /// rules differently and refuse this one.
-fn float_rule(flavour: Flavour, pid: u32) -> (&'static str, Vec<String>) {
+/// Hyprland takes it as a request on its socket, Sway as a command.
+fn float_rule(flavour: Flavour, pid: u32) -> String {
     match flavour {
-        Flavour::HyprlandLua => (
-            "hyprctl",
-            vec![
-                "eval".into(),
-                format!(
-                    "hl.window_rule({{ name = \"warframeproject-float\", match = {{ class = \"{MAIN_WINDOW_CLASS}\" }}, float = true }})"
-                ),
-            ],
+        Flavour::HyprlandLua => format!(
+            "/eval hl.window_rule({{ name = \"warframeproject-float\", match = {{ class = \"{MAIN_WINDOW_CLASS}\" }}, float = true }})"
         ),
-        Flavour::Hyprland => (
-            "hyprctl",
-            vec!["keyword".into(), "windowrule".into(), format!("match:class {MAIN_WINDOW_CLASS}, float on")],
-        ),
+        Flavour::Hyprland => format!("/keyword windowrule match:class {MAIN_WINDOW_CLASS}, float on"),
         // Sway's criteria can name the process, which covers an XWayland window as well.
-        Flavour::Sway => ("swaymsg", vec![format!("for_window [pid={pid}] floating enable")]),
+        Flavour::Sway => format!("for_window [pid={pid}] floating enable"),
     }
 }
 
@@ -325,13 +315,14 @@ fn float_rule(flavour: Flavour, pid: u32) -> (&'static str, Vec<String>) {
 /// compositor's config drops it, so every start sets it again. Other desktops float windows anyway.
 pub fn float_main_window() -> Result<()> {
     let Some(flavour) = detect_flavour() else { return Ok(()) };
-    let (cmd, args) = float_rule(flavour, std::process::id());
-    let out = process::run(Command::new(cmd).args(&args), None, QUERY_TIMEOUT)?;
-    let said =
-        String::from_utf8_lossy(if out.stdout.is_empty() { &out.stderr } else { &out.stdout }).trim().to_string();
-    // hyprctl answers "ok", and reports a refusal on stdout with status 0.
-    if !out.success || (cmd == "hyprctl" && said != "ok") {
-        bail!("{cmd} refused the rule: {}", said.chars().take(160).collect::<String>());
+    let rule = float_rule(flavour, std::process::id());
+    if flavour == Flavour::Sway {
+        return ipc::sway_command(&rule);
+    }
+    // Hyprland answers "ok", and anything else is a refusal.
+    let said = ipc::hyprland(&rule)?;
+    if said.trim() != "ok" {
+        bail!("Hyprland refused the rule: {}", said.trim().chars().take(160).collect::<String>());
     }
     Ok(())
 }
@@ -394,21 +385,20 @@ pub struct Installed {
     pub sourced: bool,
 }
 
-fn reload(cmd: &str) -> Result<()> {
-    let out = process::run(Command::new(cmd).arg("reload"), None, Duration::from_secs(15))?;
-    if !out.success {
-        let msg =
-            String::from_utf8_lossy(if out.stderr.is_empty() { &out.stdout } else { &out.stderr }).trim().to_string();
-        return Err(
-            UserError::new(format!("{cmd} reload failed: {}", msg.chars().take(160).collect::<String>())).into()
-        );
+/// Has the compositor read its config again.
+fn reload(running: Running) -> Result<()> {
+    let failed = |e: String| UserError::new(format!("Reloading the compositor's config failed: {e}"));
+    match running {
+        Running::Sway => ipc::sway_command("reload").map_err(|e| failed(format!("{e:#}")).into()),
+        Running::Hyprland => {
+            let said = ipc::hyprland("/reload").map_err(|e| failed(format!("{e:#}")))?;
+            // Hyprland answers "ok"; a config error comes back as text.
+            if said.to_lowercase().contains("error") {
+                return Err(failed(said.trim().chars().take(160).collect()).into());
+            }
+            Ok(())
+        }
     }
-    // hyprctl reports some failures on stdout with status 0.
-    let said = String::from_utf8_lossy(&out.stdout).to_lowercase();
-    if said.contains("error") {
-        return Err(UserError::new(format!("{cmd} reload reported: {}", said.trim())).into());
-    }
-    Ok(())
 }
 
 /// Writes the binds to the compositor config and reloads it. Nothing of the user's own config is
@@ -450,14 +440,14 @@ pub fn install_hotkeys(flavour: Option<Flavour>, lines: &[String]) -> Result<Ins
                 _ => (format!("{}\n\n{block}\n", text.trim_end_matches('\n')), true),
             };
             write_config(&target, &text)?;
-            reload("hyprctl")?;
+            reload(Running::Hyprland)?;
             Ok(Installed { file: target, sourced: added })
         }
         Some(f @ (Flavour::Hyprland | Flavour::Sway)) => {
-            let (dir, main, sub, reload_cmd) = if f == Flavour::Hyprland {
-                (home.join(".config/hypr"), "hyprland.conf", "config", "hyprctl")
+            let (dir, main, sub, running) = if f == Flavour::Hyprland {
+                (home.join(".config/hypr"), "hyprland.conf", "config", Running::Hyprland)
             } else {
-                (home.join(".config/sway"), "config", "config.d", "swaymsg")
+                (home.join(".config/sway"), "config", "config.d", Running::Sway)
             };
             let main = dir.join(main);
             if !main.is_file() {
@@ -478,10 +468,10 @@ pub fn install_hotkeys(flavour: Option<Flavour>, lines: &[String]) -> Result<Ins
                     &format!("{}\n\n# warframeproject hotkeys\n{include}\n", text.trim_end_matches('\n')),
                 )?;
             }
-            reload(reload_cmd)?;
+            reload(running)?;
             Ok(Installed { file: target, sourced: added })
         }
-        None => Err(UserError::new("No supported compositor found (hyprctl or swaymsg).").into()),
+        None => Err(UserError::new("No supported compositor found (Hyprland or Sway).").into()),
     }
 }
 
@@ -585,19 +575,13 @@ mod tests {
 
     #[test]
     fn float_rules_per_flavour() {
-        let rule = |f| {
-            let (cmd, args) = float_rule(f, 4242);
-            format!("{cmd} {}", args.join(" | "))
-        };
+        let rule = |f| float_rule(f, 4242);
         assert_eq!(
             rule(Flavour::HyprlandLua),
-            "hyprctl eval | hl.window_rule({ name = \"warframeproject-float\", \
+            "/eval hl.window_rule({ name = \"warframeproject-float\", \
              match = { class = \"(?i)^warframeproject$\" }, float = true })"
         );
-        assert_eq!(
-            rule(Flavour::Hyprland),
-            "hyprctl keyword | windowrule | match:class (?i)^warframeproject$, float on"
-        );
-        assert_eq!(rule(Flavour::Sway), "swaymsg for_window [pid=4242] floating enable");
+        assert_eq!(rule(Flavour::Hyprland), "/keyword windowrule match:class (?i)^warframeproject$, float on");
+        assert_eq!(rule(Flavour::Sway), "for_window [pid=4242] floating enable");
     }
 }
