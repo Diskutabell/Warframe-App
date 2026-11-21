@@ -3,6 +3,10 @@
   import { artUrl } from "../lib/format";
   let { src, px, cls = "", title = "", alt = "" }: { src: string | null | undefined; px: number; cls?: string; title?: string; alt?: string } = $props();
   let gone = $state(false);
+  $effect(() => {
+    void src;
+    gone = false;
+  });
 </script>
 
 {#if src && !gone}

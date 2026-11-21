@@ -85,11 +85,17 @@
   }
 
   // Accounts: a second press of Forget within five seconds deletes the account's data.
-  let forgetting = $state<{ key: string; t: number } | null>(null);
-  const confirming = (key: string) => forgetting?.key === key && Date.now() - forgetting.t < 5000;
+  let forgetting = $state<string | null>(null);
+  const confirming = (key: string) => forgetting === key;
+  // The question goes away by itself.
+  $effect(() => {
+    if (!forgetting) return;
+    const t = setTimeout(() => (forgetting = null), 5000);
+    return () => clearTimeout(t);
+  });
   async function forget(a: AccountRow) {
     if (!confirming(a.key)) {
-      forgetting = { key: a.key, t: Date.now() };
+      forgetting = a.key;
       return;
     }
     forgetting = null;

@@ -10,29 +10,22 @@
   import GameImg from "./GameImg.svelte";
   import Icon from "./Icon.svelte";
 
-  let menu = $state(false);
   const S = $derived(app.state);
   const current = $derived(S?.accounts.find((a) => a.active) ?? null);
   const badge = (a: AccountRow) => (a.masteryRank == null ? ICON.mastery : mrBadge(a.masteryRankMax ?? a.masteryRank));
 
   async function choose(a: AccountRow) {
-    menu = false;
+    ui.accountMenu = false;
     if (!a.active && (await act("account/switch", { key: a.key }))) await changed();
   }
+  // The menu closes on a click elsewhere; Escape is the app's (App.svelte), one layer at a time.
   $effect(() => {
-    if (!menu) return;
+    if (!ui.accountMenu) return;
     const close = (e: MouseEvent) => {
-      if (!(e.target as HTMLElement).closest("#acct")) menu = false;
-    };
-    const esc = (e: KeyboardEvent) => {
-      if (e.key === "Escape") menu = false;
+      if (!(e.target as HTMLElement).closest("#acct")) ui.accountMenu = false;
     };
     document.addEventListener("click", close);
-    document.addEventListener("keydown", esc);
-    return () => {
-      document.removeEventListener("click", close);
-      document.removeEventListener("keydown", esc);
-    };
+    return () => document.removeEventListener("click", close);
   });
 </script>
 
@@ -42,18 +35,18 @@
       <a class="acct-btn empty" href="#settings"><Icon name="mastery" /><div class="acct-txt"><b>No account yet</b><span>Start the game once</span></div></a>
     {:else}
       {@const list = S?.accounts ?? []}
-      <button class="acct-btn" type="button" aria-haspopup="true" aria-expanded={menu} title={list.length > 1 ? "Switch account" : "Account"} onclick={(e) => { e.stopPropagation(); menu = !menu; }}>
+      <button class="acct-btn" type="button" aria-haspopup="true" aria-expanded={ui.accountMenu} title={list.length > 1 ? "Switch account" : "Account"} onclick={(e) => { e.stopPropagation(); ui.accountMenu = !ui.accountMenu; }}>
         <GameImg path={badge(current)} px={30} />
         <div class="acct-txt"><b class="ellipsis">{current.name}</b><span>{rankText(current)}{#if current.playing}{" "}· <span class="lotus">in game</span>{/if}</span></div>
         {#if list.length > 1}<Icon name="down" />{/if}
       </button>
-      {#if menu}
+      {#if ui.accountMenu}
         <div class="acct-menu" role="menu">
           {#each list as a (a.key)}
             <button type="button" role="menuitem" class:on={a.active} onclick={() => choose(a)}><GameImg path={badge(a)} px={24} />
               <div class="acct-txt"><b class="ellipsis">{a.name}</b><span>{rankText(a)}{#if a.playing}{" "}· <span class="lotus">in game</span>{/if}</span></div></button>
           {/each}
-          <a href="#settings" class="acct-manage" onclick={() => (menu = false)}>Manage accounts</a>
+          <a href="#settings" class="acct-manage" onclick={() => (ui.accountMenu = false)}>Manage accounts</a>
         </div>
       {/if}
     {/if}
@@ -74,7 +67,8 @@
   </nav>
   <div class="rail-status">
     {#if !S}
-      <div class="rail-stat"><span class="dot warn"></span><span>Engine not responding</span></div>
+      {#if app.connected}<div class="rail-stat"><span class="dot"></span><span>Connecting…</span></div>
+      {:else}<div class="rail-stat"><span class="dot warn"></span><span>Engine not responding</span></div>{/if}
     {:else}
       {@const src = S.sources}
       <div class="rail-stat"><span class="dot" class:on={src.eeLog.active}></span><span>{src.eeLog.active ? "Game running" : "Game offline"}{#if src.eeLog.active && S.account.logName && !S.account.playing}<span class="faint"> ({S.account.logName})</span>{/if}</span></div>

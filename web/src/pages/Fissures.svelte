@@ -30,18 +30,25 @@
 
   // The watch list as shown: the engine's, with a change on its way already in (and taken back
   // if the engine refuses it).
+  // Quick clicks are saved one after another, each with every click before it.
   let pending = $state<string[] | null>(null);
   const watch = $derived(new Set(pending ?? page.data?.watch ?? []));
-  async function toggle(key: string) {
+  let saving = 0;
+  let saves: Promise<unknown> = Promise.resolve();
+  function toggle(key: string) {
     const next = new Set(watch);
     const on = !next.has(key);
     if (on) next.add(key);
     else next.delete(key);
-    pending = [...next];
-    await act("settings", { fissure_watch: pending }, on ? "Watching" : "Stopped watching");
-    // Either way the engine's list is what counts.
-    page.refresh();
-    pending = null;
+    const list = (pending = [...next]);
+    saving++;
+    saves = saves.then(async () => {
+      await act("settings", { fissure_watch: list }, on ? "Watching" : "Stopped watching");
+      if (--saving) return;
+      // Either way the engine's list is what counts.
+      await page.refresh();
+      if (!saving) pending = null;
+    });
   }
   let missing = $state(new Set<string>());
 </script>
@@ -63,7 +70,7 @@
       <div class="card flush">
         {#if rows.length}
           <div class="fis-head"><span>Tier</span><span>Mission</span><span>Faction</span><span>Expires</span><span>Best relic</span><span></span></div>
-          {#each rows as f (f.id)}
+          {#each rows as f, i (f.id ?? `row-${i}`)}
             {@const scene = missionScene(f.mission)}
             <div class="fis">
               <div class="tier"><GameImg path={relicIcon(f.tier)} px={30} /><Era era={f.tier ?? ""} /></div>

@@ -66,7 +66,7 @@
     else openDetails(r.key);
   }
   function keydown(e: KeyboardEvent) {
-    if (e.key === "ArrowDown") { e.preventDefault(); sel = Math.min(sel + 1, results.length - 1); }
+    if (e.key === "ArrowDown") { e.preventDefault(); sel = Math.max(0, Math.min(sel + 1, results.length - 1)); }
     else if (e.key === "ArrowUp") { e.preventDefault(); sel = Math.max(sel - 1, 0); }
     else if (e.key === "Enter" && results[sel]) { e.preventDefault(); choose(results[sel]); }
     else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); ui.palette = false; }

@@ -14,7 +14,9 @@
   import { fmt } from "../lib/format";
   import { ICON, PORTRAIT, archonPortrait, factionColor, factionIcon, foeName, syndicateIcon } from "../lib/game";
   import { every, loader } from "../lib/loader.svelte";
+  import type { Arbitrations } from "../types/Arbitrations";
   import type { Challenge } from "../types/Challenge";
+  import type { DuviriPicks } from "../types/DuviriPicks";
   import type { Slot } from "../types/Slot";
   import type { WorldView } from "../types/WorldView";
 
@@ -55,14 +57,72 @@
     <ArbTier tier={x.tier} /></div>
 {/snippet}
 
+{#snippet arbitrationCard(arbitration: Arbitrations)}
+  <div class="card"><div class="card-head"><h2>Arbitration</h2></div>
+    {#if !arbitration.current}<div class="muted">The schedule is not loaded yet.</div>
+    {:else}
+      {@const c = arbitration.current}
+      {@const soon = arbitration.upcoming.slice(0, 5)}
+      {#snippet arbPic()}<Emblem path={factionIcon(c.faction)} />{/snippet}
+      {#snippet arbTitle()}{c.mission} <ArbTier tier={c.tier} />{/snippet}
+      {@render lead(arbPic, arbTitle, `${where(c)} · ${foeName(c.faction)}${c.bonus ? ` · +${c.bonus}% resources` : ""}`, "ends in", c.end)}
+      {#if soon.length}<div class="sublabel">Next hours</div><div class="list">{#each soon as x}{@render arbRow(x)}{/each}</div>{/if}
+      {#if arbitration.next.length}
+        <div class="sublabel" style="margin-top:12px">Next by tier</div>
+        <div class="list">
+          {#each arbitration.next as x}
+            <div class="list-row"><ArbTier tier={x.tier} /><div class="main"><div class="t">{x.mission} · {where(x)}</div><div class="s">{at(x.start)}</div></div>
+              <span class="muted">in <Countdown until={x.start} /></span></div>
+          {/each}
+        </div>
+      {/if}
+      {#if arbitration.upcoming.length > soon.length}
+        <details class="more"><summary>The next {arbitration.upcoming.length} hours</summary>
+          <div class="list">{#each arbitration.upcoming as x}{@render arbRow(x)}{/each}</div></details>
+      {/if}
+    {/if}
+  </div>
+{/snippet}
+
+<!-- Read from the game's log, so there with or without a world state. -->
+{#snippet duviriPicks(duviri: DuviriPicks | null)}
+  <div class="duviri-head">Your picks in Teshin's Cave</div>
+  {#if duviri?.groups.length}
+    {#each duviri.groups as g}
+      <div class="sublabel">{g.slot}</div>
+      <div class="picks compact">
+        {#each g.picks as x}
+          <div class="pick" class:unowned={!x.owned}><Art src={x.image} /><span>{x.name}</span>
+            {#if !x.owned}<em class="warn-text">not owned</em>{:else if x.mastered}<em class="good">mastered</em>{/if}</div>
+        {/each}
+      </div>
+    {/each}
+    {#if duviri.stale}
+      <p class="callout" style="margin-top:0">A new spiral has begun since the game listed these, so it offers new ones now. Open the star chart in game to see them here.</p>
+    {:else}
+      <p class="faint arch-note" style="margin-top:0">What the game listed{duviri.rolled ? ` at ${rolledAt(duviri.rolled)}` : ""}. New picks come with every spiral and after each extraction.</p>
+    {/if}
+  {:else}
+    <p class="muted">Open the star chart or Duviri in game once: the game then writes the Warframes and weapons it offers you
+      into its log, and they show here. Seeing them in the star chart takes Opportunity rank 4.</p>
+  {/if}
+{/snippet}
+
 <Page title="World" {page}>
   {#snippet children(data)}
     <div class="page">
       <div class="page-head"><div><h1>World</h1><p>Cycles, vendors and rotations. Times update live.</p></div></div>
       {#if !("cycles" in data)}
         <div class="callout">{data.error || "World state unavailable."}</div>
+        <!-- The arbitration schedule and the Duviri picks need no world state. -->
+        <div class="grid cols-even" style="margin-top:16px">
+          {@render arbitrationCard(data.arbitration)}
+          <div class="card"><div class="card-head"><h2>Duviri</h2></div>{@render duviriPicks(data.duviri)}</div>
+        </div>
       {:else}
         {@const w = data}
+        <!-- The last world state, kept while a newer one could not be had. -->
+        {#if w.error}<div class="callout" style="margin-bottom:16px">{w.error}</div>{/if}
         <div class="cycles scenic" style="margin-bottom:16px">{#each w.cycles as c (c.name)}<CycleTile {c} />{/each}</div>
 
         <div class="grid cols-3">
@@ -99,30 +159,7 @@
         </div>
 
         <div class="grid cols-even" style="margin-top:16px">
-          <div class="card"><div class="card-head"><h2>Arbitration</h2></div>
-            {#if !w.arbitration.current}<div class="muted">The schedule is not loaded yet.</div>
-            {:else}
-              {@const c = w.arbitration.current}
-              {@const soon = w.arbitration.upcoming.slice(0, 5)}
-              {#snippet arbPic()}<Emblem path={factionIcon(c.faction)} />{/snippet}
-              {#snippet arbTitle()}{c.mission} <ArbTier tier={c.tier} />{/snippet}
-              {@render lead(arbPic, arbTitle, `${where(c)} · ${foeName(c.faction)}${c.bonus ? ` · +${c.bonus}% resources` : ""}`, "ends in", c.end)}
-              {#if soon.length}<div class="sublabel">Next hours</div><div class="list">{#each soon as x}{@render arbRow(x)}{/each}</div>{/if}
-              {#if w.arbitration.next.length}
-                <div class="sublabel" style="margin-top:12px">Next by tier</div>
-                <div class="list">
-                  {#each w.arbitration.next as x}
-                    <div class="list-row"><ArbTier tier={x.tier} /><div class="main"><div class="t">{x.mission} · {where(x)}</div><div class="s">{at(x.start)}</div></div>
-                      <span class="muted">in <Countdown until={x.start} /></span></div>
-                  {/each}
-                </div>
-              {/if}
-              {#if w.arbitration.upcoming.length > soon.length}
-                <details class="more"><summary>The next {w.arbitration.upcoming.length} hours</summary>
-                  <div class="list">{#each w.arbitration.upcoming as x}{@render arbRow(x)}{/each}</div></details>
-              {/if}
-            {/if}
-          </div>
+          {@render arbitrationCard(w.arbitration)}
 
           <div class="card"><div class="card-head"><h2>Bounties and events</h2></div>
             <div class="list">
@@ -150,26 +187,7 @@
 
         <div class="grid cols-3" style="margin-top:16px">
           <div class="card"><div class="card-head"><h2>Duviri</h2></div>
-            <div class="duviri-head">Your picks in Teshin's Cave</div>
-            {#if w.duviri?.groups.length}
-              {#each w.duviri.groups as g}
-                <div class="sublabel">{g.slot}</div>
-                <div class="picks compact">
-                  {#each g.picks as x}
-                    <div class="pick" class:unowned={!x.owned}><Art src={x.image} /><span>{x.name}</span>
-                      {#if !x.owned}<em class="warn-text">not owned</em>{:else if x.mastered}<em class="good">mastered</em>{/if}</div>
-                  {/each}
-                </div>
-              {/each}
-              {#if w.duviri.stale}
-                <p class="callout" style="margin-top:0">A new spiral has begun since the game listed these, so it offers new ones now. Open the star chart in game to see them here.</p>
-              {:else}
-                <p class="faint arch-note" style="margin-top:0">What the game listed{w.duviri.rolled ? ` at ${rolledAt(w.duviri.rolled)}` : ""}. New picks come with every spiral and after each extraction.</p>
-              {/if}
-            {:else}
-              <p class="muted">Open the star chart or Duviri in game once: the game then writes the Warframes and weapons it offers you
-                into its log, and they show here. Seeing them in the star chart takes Opportunity rank 4.</p>
-            {/if}
+            {@render duviriPicks(w.duviri)}
             {#if w.circuit.length}
               <div class="duviri-circuit"><div class="row duviri-head"><span class="grow">The Circuit's rewards this week</span>
                 <span class="muted"><Countdown until={w.resets.weekly} /></span></div>

@@ -23,8 +23,8 @@
 
   let { S }: { S: Summary } = $props();
 
-  const fissures = loader<Fissures>("fissures", ["world", "inventory"]);
-  const world = loader<WorldView>("world", ["world"]);
+  const fissures = loader<Fissures>("fissures", ["catalog", "world", "inventory"]);
+  const world = loader<WorldView>("world", ["catalog", "world"]);
   const standing = loader<StandingView>("standing", ["inventory"]);
   const history = loader<History>("history", ["history", "rewards"]);
   // Fissures open and close and the world moves on without telling: look again each minute.
@@ -92,6 +92,16 @@
     if (game && (await act("account/switch", { key: game.key }))) await changed();
   }
 </script>
+
+<!-- The arbitration schedule needs no world state. -->
+{#snippet arbitration()}
+  {#if world.data?.arbitration.current}
+    {@const arb = world.data.arbitration.current}
+    <a class="list-row click plain" href="#world"><GameImg path={factionIcon(arb.faction)} px={22} title={foeName(arb.faction)} />
+      <span class="grow">Arbitration <span class="muted">· {arb.mission}, {arb.node}</span></span>
+      <ArbTier tier={arb.tier} /><span class="muted"><Countdown until={arb.end} /></span></a>
+  {/if}
+{/snippet}
 
 <div class="page">
   {#if S.dataError}<div class="callout" style="margin-bottom:16px">{S.dataError}</div>{/if}
@@ -245,18 +255,14 @@
       <Card title="World" link="world">
         {#if !w}
           <div class="empty"><b>World state unavailable</b>{world.data?.error || world.error || ""}</div>
+          <div class="list">{@render arbitration()}</div>
         {:else}
           <div class="cycles scenic small">{#each w.cycles as c}<CycleTile {c} withPlace={false} />{/each}</div>
           <div class="list" style="margin-top:8px">
             <div class="list-row"><GameImg path={PORTRAIT.baro} px={30} cls="portrait mini" />
               <span class="grow">Baro Ki'Teer{#if w.baro.location}<span class="muted"> · {w.baro.location}</span>{/if}</span>
               <span class={w.baro.active ? "lotus" : "muted"}>{#if w.baro.active}here for <Countdown until={w.baro.expiry} done="leaving" />{:else}arrives in <Countdown until={w.baro.activation} />{/if}</span></div>
-            {#if w.arbitration.current}
-              {@const arb = w.arbitration.current}
-              <a class="list-row click plain" href="#world"><GameImg path={factionIcon(arb.faction)} px={22} title={foeName(arb.faction)} />
-                <span class="grow">Arbitration <span class="muted">· {arb.mission}, {arb.node}</span></span>
-                <ArbTier tier={arb.tier} /><span class="muted"><Countdown until={arb.end} /></span></a>
-            {/if}
+            {@render arbitration()}
             <div class="list-row"><span class="grow">Daily reset</span><span class="muted"><Countdown until={w.resets.daily} /></span></div>
             <div class="list-row"><span class="grow">Weekly reset</span><span class="muted"><Countdown until={w.resets.weekly} /></span></div>
           </div>

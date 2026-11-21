@@ -34,14 +34,16 @@
 
   function keydown(e: KeyboardEvent) {
     // A dialog has the keyboard to itself.
-    if (ui.modal) return;
+    if (ui.modals) return;
     const el = document.activeElement as HTMLElement | null;
     const typing = !!el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName);
     if ((e.ctrlKey && e.key.toLowerCase() === "k") || (e.key === "/" && !typing)) {
       e.preventDefault();
       ui.palette = true;
+      ui.accountMenu = false;
     } else if (e.key === "Escape") {
       if (ui.palette) ui.palette = false;
+      else if (ui.accountMenu) ui.accountMenu = false;
       else if (ui.drawer.length) closeDetails();
     } else if (!typing && !e.ctrlKey && !e.altKey && !e.metaKey && /^[0-9]$/.test(e.key) && !ui.palette) {
       const p = PAGES.find((pg, i) => pageKey(pg, i) === e.key);

@@ -20,7 +20,7 @@
 
   // "Only mine" asks the engine for the relics held only.
   const page = loader<RelicView[]>((signal) => api("relics" + (st.owned ? "?owned=1" : ""), undefined, signal), ["inventory", "catalog", "prices"]);
-  const fissures = loader<Fissures>("fissures", ["world"]);
+  const fissures = loader<Fissures>("fissures", ["catalog", "world"]);
   const ERAS = [["", "All"], ["Lith", "Lith"], ["Meso", "Meso"], ["Neo", "Neo"], ["Axi", "Axi"], ["Requiem", "Requiem"]] as const;
   const SORTS = [["ev", "Value"], ["need", "Needed drops"], ["name", "Name"]] as const;
 

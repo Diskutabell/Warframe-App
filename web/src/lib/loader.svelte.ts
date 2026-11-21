@@ -10,7 +10,7 @@ export type Loaded<T> = {
   readonly error: string | null;
   /** The game data is still downloading (with its error, if the download failed). */
   readonly downloading: string | true | null;
-  refresh(): void;
+  refresh(): Promise<void>;
 };
 
 export function loader<T>(fetch: string | ((signal: AbortSignal) => Promise<T>), topics: Topic[] = []): Loaded<T> {
@@ -57,10 +57,19 @@ export function loader<T>(fetch: string | ((signal: AbortSignal) => Promise<T>),
   $effect(() => {
     alive = true;
     run();
-    const off = on([...topics, "resync", "account"], soon);
+    const off = on([...topics, "resync"], soon);
+    // Another account: what the page shows is not its, so it goes at once, and nothing of the
+    // last account's request may land.
+    const offAccount = on("account", () => {
+      s.data = null;
+      s.error = null;
+      s.downloading = null;
+      run();
+    });
     return () => {
       alive = false;
       off();
+      offAccount();
       ctl?.abort();
       clearTimeout(retry);
       clearTimeout(later);

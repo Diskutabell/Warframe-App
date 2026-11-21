@@ -49,11 +49,12 @@
   });
 
   let adding = $state(new Set<string>());
+  // What is on the board now: a task taken off it, or another account, shows in the search too.
+  const onBoard = $derived(new Set((page.data?.tasks ?? []).map((t) => t.uid)));
   async function add(hit: TaskHit) {
     adding = new Set([...adding, hit.key]);
     const ok = await act("manual/task", { uid: hit.key, onBoard: true }, "Added to the farming board");
     if (ok) {
-      hit.added = true;
       await changed();
       // A resource is farmed to an amount: ask for it right away.
       if (hit.kind === "resource") openDetails("task:" + hit.key, { focusTarget: true });
@@ -87,7 +88,7 @@
           <div class="list task-results">
             {#each found as r (r.key)}
               <div class="list-row"><Art src={r.image} cls="sm" /><div class="main"><div class="t">{r.name}</div><div class="s">{r.sub}</div></div>
-                <button disabled={r.added || adding.has(r.key)} onclick={() => add(r)}>{r.added ? "On the board" : "Add"}</button></div>
+                <button disabled={onBoard.has(r.key) || adding.has(r.key)} onclick={() => add(r)}>{onBoard.has(r.key) ? "On the board" : "Add"}</button></div>
             {/each}
           </div>
         {:else}

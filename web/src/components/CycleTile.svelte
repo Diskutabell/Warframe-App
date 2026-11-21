@@ -8,6 +8,10 @@
   const phase = $derived(String(c.state || "").toLowerCase());
   const scene = $derived(placeScene(c.name));
   let sceneGone = $state(false);
+  $effect(() => {
+    void scene;
+    sceneGone = false;
+  });
 </script>
 
 <div class="cycle scenic" class:dim={DARK.has(phase)}>

@@ -3,9 +3,14 @@
   import { act, changed } from "../lib/stepper";
   let { uid, n, onchange }: { uid: string; n: number; onchange?: () => void } = $props();
   let busy = $state(false);
+  // The count saved last: the page's own copy of `n` is reloaded only a moment later, and a quick
+  // second click must step on from what the first one saved.
+  let shown = $derived(n);
   async function set(count: number) {
     busy = true;
-    if (await act("manual/count", { uid, count: Math.max(0, count) })) {
+    count = Math.max(0, count);
+    if (await act("manual/count", { uid, count })) {
+      shown = count;
       await changed();
       onchange?.();
     }
@@ -14,6 +19,6 @@
 </script>
 
 <span class="stepper">
-  <button type="button" aria-label="One fewer" disabled={busy} onclick={(e) => { e.stopPropagation(); set(n - 1); }}>−</button><b>{n}</b><button
-    type="button" aria-label="One more" disabled={busy} onclick={(e) => { e.stopPropagation(); set(n + 1); }}>+</button>
+  <button type="button" aria-label="One fewer" disabled={busy} onclick={(e) => { e.stopPropagation(); set(shown - 1); }}>−</button><b>{shown}</b><button
+    type="button" aria-label="One more" disabled={busy} onclick={(e) => { e.stopPropagation(); set(shown + 1); }}>+</button>
 </span>

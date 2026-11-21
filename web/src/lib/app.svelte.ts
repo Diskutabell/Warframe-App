@@ -4,7 +4,8 @@
 import { api } from "./api";
 import type { Summary } from "../types/Summary";
 
-export const app = $state<{ state: Summary | null; connected: boolean }>({ state: null, connected: false });
+// `connected` starts true: until the engine has failed to answer, the page waits for it.
+export const app = $state<{ state: Summary | null; connected: boolean }>({ state: null, connected: true });
 
 // ------------------------------------------------------------------ topics
 // The engine names what changed (`bus.rs`): pages subscribe to the topics they show.
@@ -35,11 +36,19 @@ export async function changed() {
   emit("resync", {});
 }
 
+// Every summary that arrives, asked for or pushed, counts up: an answer to an older request that
+// arrives after a newer summary (an account switch in between) is dropped.
+let summaries = 0;
+
 export async function poll() {
+  const mine = ++summaries;
   try {
-    app.state = await api<Summary>("state");
+    const s = await api<Summary>("state");
+    if (mine !== summaries) return;
+    app.state = s;
     app.connected = true;
   } catch {
+    if (mine !== summaries) return;
     app.state = null;
     app.connected = false;
   }
@@ -55,6 +64,7 @@ export function connect() {
     if (downTimer) clearTimeout(downTimer);
     downTimer = null;
     const wasDown = !app.connected;
+    summaries++;
     app.state = JSON.parse((e as MessageEvent).data);
     app.connected = true;
     // Back after the engine was gone: what the page shows may be old.
@@ -73,6 +83,7 @@ export function connect() {
   es.onerror = () => {
     if (downTimer) return;
     downTimer = setTimeout(() => {
+      downTimer = null;
       if (es.readyState !== EventSource.OPEN) {
         app.connected = false;
         app.state = null;
@@ -94,16 +105,18 @@ window.addEventListener("hashchange", () => Object.assign(route, parse()));
 
 // ------------------------------------------------------------------ the details drawer and the palette
 
-export const ui = $state<{ drawer: string[]; drawerFocusTarget: boolean; palette: boolean; modal: boolean }>({
+export const ui = $state<{ drawer: string[]; drawerFocusTarget: boolean; palette: boolean; modals: number; accountMenu: boolean }>({
   drawer: [],
   drawerFocusTarget: false,
   palette: false,
-  modal: false,
+  modals: 0,
+  accountMenu: false,
 });
 
 /** Opens the details of `key` (an item, part, relic, `task:`, `syndicate:`, `lookup:` or
  *  `drop:` key) on top of what the drawer shows. */
 export function openDetails(key: string, opts: { focusTarget?: boolean } = {}) {
+  ui.accountMenu = false;
   ui.drawer.push(key);
   ui.drawerFocusTarget = !!opts.focusTarget;
 }

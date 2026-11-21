@@ -460,7 +460,9 @@ pub struct Ally {
     pub name: String,
 }
 
-pub fn summary(view: &View, mastery_rank: Option<i64>, nightwave: Option<&str>) -> StandingView {
+/// `shown` is a syndicate that is listed even when it otherwise would not be: the current
+/// Nightwave season on the Standing page, the one whose details are asked for in `detail`.
+pub fn summary(view: &View, mastery_rank: Option<i64>, shown: Option<&str>) -> StandingView {
     let cat = &view.cat;
     let mut readings = Vec::new();
     if let Some(st) = view.profile.as_ref().and_then(|p| p.standing.as_ref().map(|s| (s, p.fetched))) {
@@ -479,11 +481,11 @@ pub fn summary(view: &View, mastery_rank: Option<i64>, nightwave: Option<&str>) 
     let mut rows = Vec::new();
     for s in cat.syndicates.list.values() {
         let mine = merged.syndicates.get(&s.tag).copied();
-        let current_season = nightwave.is_some_and(|t| t == s.tag);
+        let wanted = shown.is_some_and(|t| t == s.tag);
         match s.kind {
-            Kind::Nightwave if !current_season => continue,
+            Kind::Nightwave if !wanted => continue,
             // Events come and go: show one only while the account has standing there.
-            Kind::Other if s.tag == "EventSyndicate" && mine.is_none() => continue,
+            Kind::Other if s.tag == "EventSyndicate" && mine.is_none() && !wanted => continue,
             _ => {}
         }
         rows.push(syndicate_row(view, s, mine, &held));
@@ -804,6 +806,24 @@ mod tests {
             progress(kahl, Affiliation { standing: 0, title: 0 }),
             Progress { value: 0, size: 5, at_cap: false, full: false }
         );
+    }
+
+    #[test]
+    fn the_event_syndicate_opens_without_standing_in_it() {
+        let mut ex = export();
+        ex["EventSyndicate"] = json!({"name": "/Ev", "dailyLimitBin": "STANDING_LIMIT_BIN_NONE"});
+        let cat = crate::gamedata::Catalog { syndicates: build(&ex, &dict()), ..Default::default() };
+        let view = View {
+            cat: std::sync::Arc::new(cat),
+            profile: None,
+            inv: None,
+            manual: std::sync::Arc::new(crate::accounts::Manual::default()),
+            market: crate::market::Market::for_tests(),
+            foundry: Default::default(),
+        };
+        let listed = |s: StandingView| s.syndicates.iter().any(|r| r.core.tag == "EventSyndicate");
+        assert!(!listed(summary(&view, None, None)), "not on the page without standing");
+        assert!(detail(&view, "EventSyndicate", None).is_some(), "but the search's hit opens");
     }
 
     #[test]

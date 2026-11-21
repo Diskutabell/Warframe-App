@@ -7,10 +7,18 @@
   const PX: Record<string, number> = { sm: 30, lg: 70, xl: 102 };
   let attempt = $state(0);
   let hidden = $state(false);
+  let retry: ReturnType<typeof setTimeout> | undefined;
   const url = $derived(src ? artUrl(src, PX[cls] || 42) + (attempt ? `&_r=${attempt}` : "") : "");
+  // Another picture in the same slot (a list that changed) starts over.
+  $effect(() => {
+    void src;
+    attempt = 0;
+    hidden = false;
+    return () => clearTimeout(retry);
+  });
   function failed() {
     if (attempt >= 2) hidden = true;
-    else setTimeout(() => attempt++, 400 * (attempt + 1));
+    else retry = setTimeout(() => attempt++, 400 * (attempt + 1));
   }
 </script>
 
@@ -23,7 +31,7 @@
     src={url}
     style:visibility={hidden ? "hidden" : null}
     onerror={failed}
-    onload={(e) => { if (!(e.currentTarget as HTMLImageElement).naturalWidth) hidden = true; }}
+    onload={(e) => (hidden = !(e.currentTarget as HTMLImageElement).naturalWidth)}
   />
 {:else}
   <div class="art {cls}"></div>
