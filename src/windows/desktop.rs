@@ -184,19 +184,26 @@ impl Overlay {
                     SourceConstantAlpha: 255,
                     AlphaFormat: AC_SRC_ALPHA as u8,
                 };
-                if UpdateLayeredWindow(self.hwnd(), screen, &at, &size, dc, &from, 0, &blend, ULW_ALPHA) == 0 {
-                    eprintln!("could not draw the overlay: {}", std::io::Error::last_os_error());
+                let shown = !old.is_null()
+                    && UpdateLayeredWindow(self.hwnd(), screen, &at, &size, dc, &from, 0, &blend, ULW_ALPHA) != 0;
+                if !old.is_null() {
+                    SelectObject(dc, old);
                 }
-                SelectObject(dc, old);
-                SetWindowPos(
-                    self.hwnd(),
-                    HWND_TOPMOST,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
-                );
+                if shown {
+                    SetWindowPos(
+                        self.hwnd(),
+                        HWND_TOPMOST,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                    );
+                } else {
+                    // Not the last scan's pixels instead: the panel stays hidden.
+                    eprintln!("could not draw the overlay: {}", std::io::Error::last_os_error());
+                    ShowWindow(self.hwnd(), SW_HIDE);
+                }
             }
             if !bitmap.is_null() {
                 DeleteObject(bitmap);

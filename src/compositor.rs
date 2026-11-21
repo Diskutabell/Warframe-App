@@ -392,9 +392,11 @@ fn reload(running: Running) -> Result<()> {
         Running::Sway => ipc::sway_command("reload").map_err(|e| failed(format!("{e:#}")).into()),
         Running::Hyprland => {
             let said = ipc::hyprland("/reload").map_err(|e| failed(format!("{e:#}")))?;
-            // Hyprland answers "ok"; a config error comes back as text.
-            if said.to_lowercase().contains("error") {
-                return Err(failed(said.trim().chars().take(160).collect()).into());
+            // Hyprland answers "ok"; anything else (a config error, nothing at all) is a failure.
+            let said = said.trim();
+            if said != "ok" {
+                let why = if said.is_empty() { "no answer".to_string() } else { said.chars().take(160).collect() };
+                return Err(failed(why).into());
             }
             Ok(())
         }

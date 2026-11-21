@@ -14,12 +14,14 @@
   $effect(() => {
     const before = document.activeElement as HTMLElement | null;
     open.push(me);
-    ui.modals++;
+    // Written, never read here: reading it would make every open dialog's effect depend on it.
+    ui.modals = open.length;
     const first = box.querySelector<HTMLElement>("input, button, a[href]");
     (first ?? box).focus();
     return () => {
-      open.splice(open.indexOf(me), 1);
-      ui.modals--;
+      const i = open.indexOf(me);
+      if (i >= 0) open.splice(i, 1);
+      ui.modals = open.length;
       before?.focus?.({ preventScroll: true });
     };
   });

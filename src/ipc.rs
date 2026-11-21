@@ -97,7 +97,8 @@ pub fn sway(kind: SwayMessage, payload: &str) -> Result<serde_json::Value> {
     let mut stream = connect(&path)?;
     stream.write_all(&sway_frame(kind, payload))?;
     let body = read_sway_answer(&mut stream)?;
-    serde_json::from_slice(&body).context("Sway's answer is not JSON")
+    // Window titles are passed on as the windows set them, not always as UTF-8.
+    serde_json::from_str(&String::from_utf8_lossy(&body)).context("Sway's answer is not JSON")
 }
 
 /// Runs Sway commands; an error names the first one Sway refused.

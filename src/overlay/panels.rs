@@ -89,42 +89,65 @@ fn item_panel(c: &mut Canvas, b: [f32; 4], u: f32, it: &RewardItem, best: bool) 
     }
     y += h;
 
-    // Platinum on the left, ducats on the right.
-    let price = Style::new(Face::Display, 27.0 * u, if it.price.is_some() { PLAT } else { NONE });
+    // Platinum on the left, ducats on the right. In a narrow panel the price gets smaller
+    // before the two can meet, and the ducats give way if even that is not enough.
+    let price_text = it.price.map_or("–".to_string(), |p| p.to_string());
     let plat_px = (20.0 * u).round() as u32;
-    let h = price.line().max(plat_px as f32);
-    let mut px = x;
-    if let Some(icon) = canvas::icon("platinum", plat_px) {
-        c.picture(&icon, px, y + (h - icon.height() as f32) / 2.0);
-        px += icon.width() as f32 + 4.0 * u;
+    let plat = canvas::icon("platinum", plat_px);
+    let plat_w = plat.as_ref().map_or(0.0, |i| i.width() as f32 + 4.0 * u);
+    let ducat_style = Style::new(Face::Label, 16.0 * u, DUCATS);
+    let ducat_text = it.ducats.filter(|d| *d > 0).map(|d| d.to_string());
+    let ducat_icon = ducat_text.as_ref().and_then(|_| canvas::icon("ducats", (16.0 * u).round() as u32));
+    let ducats_w = ducat_text.as_ref().map_or(0.0, |t| {
+        ducat_style.width(t) + ducat_icon.as_ref().map_or(0.0, |i| i.width() as f32 + 3.0 * u) + 6.0 * u
+    });
+    let colour = if it.price.is_some() { PLAT } else { NONE };
+    let mut price = Style::new(Face::Display, 27.0 * u, colour);
+    let room = w - plat_w - ducats_w;
+    if price.width(&price_text) > room {
+        let px = (price.px * room / price.width(&price_text).max(1.0)).max(16.0 * u);
+        price = Style::new(Face::Display, px, colour);
     }
-    c.text(price, px, baseline(price, y, h), &it.price.map_or("–".to_string(), |p| p.to_string()));
-    if let Some(d) = it.ducats.filter(|d| *d > 0) {
-        let style = Style::new(Face::Label, 16.0 * u, DUCATS);
-        let text = d.to_string();
-        let mut dx = x + w - style.width(&text);
-        c.text(style, dx, baseline(style, y, h), &text);
-        if let Some(icon) = canvas::icon("ducats", (16.0 * u).round() as u32) {
+    let show_ducats = plat_w + price.width(&price_text) + ducats_w <= w;
+    let h = Style::new(Face::Display, 27.0 * u, colour).line().max(plat_px as f32);
+    let mut px = x;
+    if let Some(icon) = &plat {
+        c.picture(icon, px, y + (h - icon.height() as f32) / 2.0);
+        px += plat_w;
+    }
+    c.text(price, px, baseline(price, y, h), &price.fit(&price_text, w - plat_w));
+    if let (Some(text), true) = (&ducat_text, show_ducats) {
+        let mut dx = x + w - ducat_style.width(text);
+        c.text(ducat_style, dx, baseline(ducat_style, y, h), text);
+        if let Some(icon) = &ducat_icon {
             dx -= icon.width() as f32 + 3.0 * u;
-            c.picture(&icon, dx, y + (h - icon.height() as f32) / 2.0);
+            c.picture(icon, dx, y + (h - icon.height() as f32) / 2.0);
         }
     }
     y += h;
 
-    // owned N · needed · vaulted
+    // owned N · needed · vaulted; in a narrow panel "N owned · need · vault", still in colour.
     let plain = Style::new(Face::Text, 13.0 * u, MUTED);
-    let mut runs = vec![(plain, format!("owned {}", it.have))];
-    if it.needed > it.have {
-        runs.push((plain, "  ·  ".into()));
-        runs.push((Style::new(Face::TextBold, 13.0 * u, NEEDED), "needed".into()));
-    }
-    if it.vaulted == Some(true) {
-        runs.push((plain, "  ·  ".into()));
-        runs.push((Style::new(Face::Text, 13.0 * u, VAULTED), "vaulted".into()));
+    let status = |short: bool| {
+        let sep = if short { " · " } else { "  ·  " };
+        let mut runs = vec![(plain, if short { format!("{} owned", it.have) } else { format!("owned {}", it.have) })];
+        if it.needed > it.have {
+            runs.push((plain, sep.into()));
+            runs.push((Style::new(Face::TextBold, 13.0 * u, NEEDED), if short { "need" } else { "needed" }.into()));
+        }
+        if it.vaulted == Some(true) {
+            runs.push((plain, sep.into()));
+            runs.push((Style::new(Face::Text, 13.0 * u, VAULTED), if short { "vault" } else { "vaulted" }.into()));
+        }
+        runs
+    };
+    let width = |runs: &[(Style, String)]| runs.iter().map(|(s, t)| s.width(t)).sum::<f32>();
+    let mut runs = status(false);
+    if width(&runs) > w {
+        runs = status(true);
     }
     let line = plain.line();
-    let total: f32 = runs.iter().map(|(s, t)| s.width(t)).sum();
-    if total > w {
+    if width(&runs) > w {
         let all: String = runs.iter().map(|(_, t)| t.as_str()).collect();
         c.text(plain, x, baseline(plain, y, line), &plain.fit(&all, w));
     } else {
@@ -151,16 +174,19 @@ fn message(c: &mut Canvas, b: [f32; 4], u: f32, text: &str) {
 // ---------------------------------------------------------------- the riven panel
 
 /// The riven panel, `width` pixels wide and as tall as what it shows.
-pub fn riven(r: &RivenResult, width: u32, u: f32) -> Pixmap {
-    // Laid out once to learn its height (nothing lands on a 1x1 canvas), then drawn.
-    let height = riven_into(&mut Canvas::new(1, 1), r, width as f32, None, u);
+/// Taller than `max_height` it is cut off (a very small game window).
+pub fn riven(r: &RivenResult, width: u32, max_height: u32, u: f32) -> Pixmap {
+    // Laid out once without drawing to learn its height, then drawn.
+    let pic = r.image.as_deref().and_then(|url| canvas::art(url, (40.0 * u).round() as u32));
+    let height = riven_into(&mut Canvas::measure(), r, pic.as_ref(), width as f32, None, u);
+    let height = height.min(max_height as f32);
     let mut c = Canvas::new(width, height.ceil() as u32);
-    riven_into(&mut c, r, width as f32, Some(height), u);
+    riven_into(&mut c, r, pic.as_ref(), width as f32, Some(height), u);
     c.pixmap
 }
 
 /// Draws the panel `w` wide (the background only when its `height` is known); its height.
-fn riven_into(c: &mut Canvas, r: &RivenResult, w: f32, height: Option<f32>, u: f32) -> f32 {
+fn riven_into(c: &mut Canvas, r: &RivenResult, pic: Option<&Pixmap>, w: f32, height: Option<f32>, u: f32) -> f32 {
     if let Some(h) = height {
         c.fill(0.0, 0.0, w, h, 3.0 * u, PANEL);
         c.outline(0.0, 0.0, w, h, 3.0 * u, EDGE);
@@ -176,11 +202,10 @@ fn riven_into(c: &mut Canvas, r: &RivenResult, w: f32, height: Option<f32>, u: f
     let weapon = Style::new(Face::Display, 21.0 * u, WEAPON);
     let sub = Style::new(Face::Text, 13.0 * u, MUTED);
     let badge = Style::new(Face::Display, 20.0 * u, DARK);
-    let pic = r.image.as_deref().and_then(|url| canvas::art(url, (40.0 * u).round() as u32));
-    let pic_w = pic.as_ref().map_or(0.0, |p| p.width() as f32 + 8.0 * u);
+    let pic_w = pic.map_or(0.0, |p| p.width() as f32 + 8.0 * u);
     let badge_w = r.overall.map_or(0.0, |g| badge.width(g) + 8.0 * u);
-    let h = (weapon.line() + sub.line()).max(pic.as_ref().map_or(0.0, |p| p.height() as f32)).max(badge.line());
-    if let Some(p) = &pic {
+    let h = (weapon.line() + sub.line()).max(pic.map_or(0.0, |p| p.height() as f32)).max(badge.line());
+    if let Some(p) = pic {
         c.picture(p, x, y + (h - p.height() as f32) / 2.0);
     }
     let names = iw - pic_w - if badge_w > 0.0 { badge_w + 8.0 * u } else { 0.0 };
@@ -304,6 +329,14 @@ fn prices(c: &mut Canvas, r: &RivenResult, x: f32, y: f32, w: f32, u: f32) -> f3
         }
         (Some(_), _) => "No listings with these positives".into(),
         (None, Some(_)) => "warframe.market did not answer".into(),
+        // Listings are looked up by the weapon and its positive stats (ScanService::
+        // find_riven_listings); without them nothing is asked.
+        (None, None)
+            if r.weapon.is_none()
+                || !r.stats.iter().any(|g| !g.negative && crate::rivens::market_slug(g.stat).is_some()) =>
+        {
+            "No positive stats to look listings up by".into()
+        }
         (None, None) => "Looking up listings…".into(),
     };
     c.text(sub, px, baseline(sub, y, h), &sub.fit(&text, x + w - px));

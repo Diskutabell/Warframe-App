@@ -156,12 +156,19 @@ impl Style {
 
 pub struct Canvas {
     pub pixmap: Pixmap,
+    /// Only measuring: nothing is drawn, text only says where it ends.
+    dry: bool,
 }
 
 impl Canvas {
     /// A transparent canvas; at least one pixel each way.
     pub fn new(width: u32, height: u32) -> Canvas {
-        Canvas { pixmap: Pixmap::new(width.max(1), height.max(1)).expect("a canvas of at least 1x1") }
+        Canvas { pixmap: Pixmap::new(width.max(1), height.max(1)).expect("a canvas of at least 1x1"), dry: false }
+    }
+
+    /// A canvas that draws nothing, for laying a panel out to learn its size.
+    pub fn measure() -> Canvas {
+        Canvas { dry: true, ..Canvas::new(1, 1) }
     }
 
     fn rounded(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<Path> {
@@ -181,6 +188,9 @@ impl Canvas {
     }
 
     pub fn fill(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, colour: Colour) {
+        if self.dry {
+            return;
+        }
         if let Some(path) = Self::rounded(x, y, w, h, radius) {
             self.pixmap.fill_path(&path, &colour.paint(), FillRule::Winding, Transform::identity(), None);
         }
@@ -188,6 +198,9 @@ impl Canvas {
 
     /// A band along the top of a box with rounded corners, square below (a coloured top border).
     pub fn fill_top(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, colour: Colour) {
+        if self.dry {
+            return;
+        }
         let r = radius.min(w / 2.0).min(h).max(0.0);
         let mut pb = PathBuilder::new();
         pb.move_to(x, y + h);
@@ -204,6 +217,9 @@ impl Canvas {
 
     /// A one-pixel outline just inside the box.
     pub fn outline(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, colour: Colour) {
+        if self.dry {
+            return;
+        }
         if let Some(path) = Self::rounded(x + 0.5, y + 0.5, w - 1.0, h - 1.0, radius) {
             let stroke = Stroke { width: 1.0, ..Stroke::default() };
             self.pixmap.stroke_path(&path, &colour.paint(), &stroke, Transform::identity(), None);
@@ -212,6 +228,9 @@ impl Canvas {
 
     /// A picture at its own size.
     pub fn picture(&mut self, img: &Pixmap, x: f32, y: f32) {
+        if self.dry {
+            return;
+        }
         self.pixmap.draw_pixmap(
             x.round() as i32,
             y.round() as i32,
@@ -224,6 +243,9 @@ impl Canvas {
 
     /// `text` with its baseline at `y`, from `x`; where it ends.
     pub fn text(&mut self, style: Style, x: f32, y: f32, text: &str) -> f32 {
+        if self.dry {
+            return x + style.width(text);
+        }
         let font = style.font();
         let scaled = font.as_scaled(style.scale());
         let Colour(r, g, b, a) = style.colour;
@@ -295,5 +317,8 @@ pub fn icon(name: &'static str, px: u32) -> Option<Arc<Pixmap>> {
 /// download.
 pub fn art(url: &str, px: u32) -> Option<Pixmap> {
     let art = crate::art::cached(url, 128)?;
-    scaled(image::load_from_memory(&art.bytes).ok()?.to_rgba8(), px)
+    let img = image::load_from_memory(&art.bytes).ok()?.to_rgba8();
+    // Weapon pictures are wide: the longer side fits the square.
+    let height = (px as f64 * img.height() as f64 / img.width().max(img.height()).max(1) as f64).round() as u32;
+    scaled(img, height)
 }

@@ -48,8 +48,10 @@ export function loader<T>(fetch: string | ((signal: AbortSignal) => Promise<T>),
       s.error = (e as Error).message;
     }
   }
-  /** A burst of topics is one reload. */
+  /** A burst of topics is one reload. What was asked before the change can only be older. */
   function soon() {
+    ctl?.abort();
+    clearTimeout(retry);
     clearTimeout(later);
     later = setTimeout(run, 300);
   }

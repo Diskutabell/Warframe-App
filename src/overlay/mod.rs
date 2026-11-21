@@ -77,13 +77,13 @@ pub fn rewards(r: &RewardResult, screen: Screen, above: bool) -> Drawn {
     let y0 = rects.iter().map(|r| r[1]).fold(f64::INFINITY, f64::min);
     let x1 = rects.iter().map(|r| r[0] + r[2]).fold(f64::NEG_INFINITY, f64::max);
     let y1 = rects.iter().map(|r| r[1] + r[3]).fold(f64::NEG_INFINITY, f64::max);
-    let rect = fit(game, (x1 - x0).round() as i32, (y1 - y0).round() as i32, x0.round() as i32, y0.round() as i32);
+    let rect = fit(game, (x1 - x0).ceil() as i32, (y1 - y0).ceil() as i32, x0.round() as i32, y0.round() as i32);
     // Kept inside the game, the window may have moved; the panels move with it. In pixels.
     let boxes: Vec<[f32; 4]> = rects
         .iter()
         .map(|b| {
             let px = |v: f64| (v * display) as f32;
-            [px(b[0] - rect.x as f64), px(b[1] - rect.y as f64), px(b[2]), px(b[3])]
+            [px(b[0] - x0), px(b[1] - y0), px(b[2]), px(b[3])]
         })
         .collect();
     let size = ((rect.width as f64 * display).round() as u32, (rect.height as f64 * display).round() as u32);
@@ -96,8 +96,10 @@ pub fn rewards(r: &RewardResult, screen: Screen, above: bool) -> Drawn {
 pub fn riven(r: &RivenResult, screen: Screen) -> Drawn {
     let Screen { game, display, .. } = screen;
     let (u, text_u) = screen.units();
-    let width = riven::PANEL_W * text_u;
-    let pixels = panels::riven(r, (width * display).round() as u32, (text_u * display) as f32);
+    // Never wider or taller than the game, so the pixels and the window keep the same size.
+    let width = (riven::PANEL_W * text_u).min(game.width.max(1) as f64);
+    let max_height = (game.height.max(1) as f64 * display).round() as u32;
+    let pixels = panels::riven(r, (width * display).round() as u32, max_height, (text_u * display) as f32);
     let height = (pixels.height() as f64 / display).round() as i32;
     // Beside the card, clear of the "fits in" box further right.
     let x = (game.x as f64 + game.width as f64 / 2.0 + (riven::CARD_HALF_W + riven::PANEL_GAP) * u).round() as i32;
@@ -141,6 +143,22 @@ mod tests {
     }
 
     #[test]
+    fn panels_pushed_into_the_game_move_with_their_window() {
+        // Above the cards at 125%, the middle panel would start above the screen: the window is
+        // moved down, and the panels must come along whole, not be cut at its top.
+        let game = Rect { x: 0, y: 0, width: 1920, height: 1080 };
+        let mut three = RewardResult::sample(1.25);
+        three.items.truncate(3);
+        three.cards = Some(3);
+        let d = rewards(&three, at(game, 1.0, 1.25), true);
+        assert_eq!(d.rect.y, 0);
+        let row =
+            |y: u32| (0..d.pixels.width()).filter(|&x| d.pixels.pixel(x, y).is_some_and(|p| p.alpha() > 0)).count();
+        assert!(row(1) > 0, "the top of the highest panel is in the picture");
+        assert!(row(d.pixels.height() - 2) > 0, "the bottom of the lowest one too");
+    }
+
+    #[test]
     fn a_message_gets_one_panel_and_a_riven_its_own_height() {
         let game = Rect { x: 0, y: 0, width: 1920, height: 1080 };
         let msg = RewardResult { error: Some("No reward names recognized.".into()), ..Default::default() };
@@ -174,5 +192,8 @@ mod tests {
         };
         rewards(&msg, at(game, 1.0, 0.85), false).pixels.save_png(dir.join("message.png")).unwrap();
         riven(&panels::sample_riven(), at(game, 1.0, 0.85)).pixels.save_png(dir.join("riven.png")).unwrap();
+        // Narrow: a 150% desktop at a 70% interface, panels above the cards.
+        let wide = Screen { game: Rect { x: 0, y: 0, width: 1920, height: 1080 }, display: 1.0, dpi: 1.5, ui_scale: 0.7 };
+        rewards(&RewardResult::sample(0.7), wide, true).pixels.save_png(dir.join("narrow.png")).unwrap();
     }
 }

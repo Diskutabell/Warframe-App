@@ -94,10 +94,16 @@ pub fn resolve(setting: ScreenshotTool) -> Option<ScreenshotTool> {
         ScreenshotTool::Auto => {
             let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
             let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-            auto_order(wayland, &desktop).iter().copied().find(|t| which(program(*t)).is_some())
+            auto_order(wayland, &desktop).iter().copied().find(|t| available(*t))
         }
-        t => which(program(t)).map(|_| t),
+        t => available(t).then_some(t),
     }
+}
+
+/// A tool can be used: its program is installed, or (grim) the app copies the screen itself.
+#[cfg(unix)]
+fn available(tool: ScreenshotTool) -> bool {
+    (tool == ScreenshotTool::Grim && super::screencopy::possible()) || which(program(tool)).is_some()
 }
 
 #[cfg(unix)]
@@ -121,6 +127,9 @@ pub fn capture(setting: ScreenshotTool) -> Result<Rgb> {
         // What grim does, without starting it; grim itself when that fails.
         match super::screencopy::capture(output.as_deref()) {
             Ok(frame) => return Ok(frame),
+            Err(e) if which("grim").is_none() => {
+                return Err(e.context("the screen could not be copied, and grim (the fallback) is not installed"));
+            }
             Err(e) => {
                 static SAID: AtomicBool = AtomicBool::new(false);
                 if !SAID.swap(true, Ordering::Relaxed) {

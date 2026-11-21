@@ -12,6 +12,8 @@
     if (await act("manual/count", { uid, count })) {
       shown = count;
       await changed();
+      // A reload that left before the save may have landed meanwhile.
+      shown = count;
       onchange?.();
     }
     busy = false;
