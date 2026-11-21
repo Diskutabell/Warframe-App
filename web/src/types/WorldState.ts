@@ -7,16 +7,16 @@ import type { Bounty } from "./Bounty";
 import type { CircuitGroup } from "./CircuitGroup";
 import type { Cycle } from "./Cycle";
 import type { Darvo } from "./Darvo";
-import type { Event } from "./Event";
 import type { Invasion } from "./Invasion";
 import type { Nightwave } from "./Nightwave";
 import type { Resets } from "./Resets";
 import type { Sortie } from "./Sortie";
 import type { SteelPath } from "./SteelPath";
 import type { Varzia } from "./Varzia";
+import type { WorldEvent } from "./WorldEvent";
 
 export type WorldState = { 
 /**
  * When the worldstate was made.
  */
-fetched: string | null, cycles: Array<Cycle>, baro: Baro, sortie: Sortie, archon: Archon, steelPath: SteelPath, nightwave: Nightwave, darvo: Darvo | null, resets: Resets, alerts: Array<Alert>, invasions: Array<Invasion>, bounties: Array<Bounty>, circuit: Array<CircuitGroup>, archimedea: Array<Archimedea>, events: Array<Event>, varzia: Varzia, error: string | null, };
+fetched: string | null, cycles: Array<Cycle>, baro: Baro, sortie: Sortie, archon: Archon, steelPath: SteelPath, nightwave: Nightwave, darvo: Darvo | null, resets: Resets, alerts: Array<Alert>, invasions: Array<Invasion>, bounties: Array<Bounty>, circuit: Array<CircuitGroup>, archimedea: Array<Archimedea>, events: Array<WorldEvent>, varzia: Varzia, error: string | null, };

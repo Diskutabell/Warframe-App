@@ -482,7 +482,7 @@ impl Overlays {
         panel
     }
 
-    /// A bundled currency icon (`web/icons/<name>.png`), `px` pixels high.
+    /// A bundled currency icon (`web/public/icons/<name>.png`), `px` pixels high.
     fn icon(&self, name: &'static str, px: i32) -> Option<gdk_pixbuf::Pixbuf> {
         let px = px.max(8);
         if let Some(icon) = self.icons.borrow().get(&(name, px)) {

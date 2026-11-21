@@ -5,7 +5,8 @@ let
   runtime = import ./nix/runtime.nix { inherit pkgs; };
 in
 pkgs.mkShell {
-  nativeBuildInputs = with pkgs; [ cargo rustc rustfmt clippy pkg-config ];
+  # Node builds the UI (web/): `npm run build` in web/ before cargo, `npm run dev` while editing.
+  nativeBuildInputs = with pkgs; [ cargo rustc rustfmt clippy pkg-config nodejs_22 ];
   buildInputs = runtime.libraries;
   packages = runtime.tools;
   shellHook = runtime.environment;

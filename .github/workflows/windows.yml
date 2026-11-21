@@ -21,6 +21,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # The engine embeds the built UI (web/dist).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build the UI
+        working-directory: web
+        run: |
+          npm ci
+          npm run check
+          npm run build
 
       - name: Test
         run: cargo test

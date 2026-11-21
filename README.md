@@ -241,9 +241,11 @@ Nothing else is sent anywhere.
 ## Development
 
 ```sh
-nix-shell                                        # toolchain, libraries, tesseract, grim
-cargo test
+nix-shell                                        # toolchain, Node, libraries, tesseract, grim
+(cd web && npm ci && npm run build)              # the interface, embedded by the engine
+cargo test                                       # also writes web/src/types (the API's types)
 cargo run -- --headless --offline --port 8650    # engine only, no network
+(cd web && WFP_PORT=8650 npm run dev)            # the interface with live reload, against that engine
 ```
 
 On Windows, `cargo build --release` with the MSVC toolchain builds the app; it then uses an
@@ -254,8 +256,9 @@ picked in `main.rs`). GitHub Actions builds the Windows exe on every push, has i
 screen, and attaches it to each release.
 
 `--browser` opens the interface in your web browser instead of a window. The interface in `web/`
-is plain HTML, CSS and JavaScript modules with no build step; debug builds read it from disk, so a
-reload picks up changes.
+is Svelte 5 and TypeScript, built by Vite into `web/dist`; debug builds read that folder from disk,
+release builds embed it. Every answer of the engine's API is a Rust type whose TypeScript twin
+`cargo test` writes to `web/src/types`, and `npm run check` type-checks the interface against them.
 
 Known limitations: part and relic counts need manual tracking, an import or the memory scan; the
 reward reader has been checked on the Fortuna and Stalker interface themes (1080p to 4K, 70-100%

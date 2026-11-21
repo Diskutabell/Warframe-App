@@ -353,7 +353,7 @@ pub struct WorldState {
     pub bounties: Vec<Bounty>,
     pub circuit: Vec<CircuitGroup>,
     pub archimedea: Vec<Archimedea>,
-    pub events: Vec<Event>,
+    pub events: Vec<WorldEvent>,
     pub varzia: Varzia,
     pub error: Option<String>,
 }
@@ -525,7 +525,7 @@ pub struct Named {
 
 #[derive(Serialize, TS)]
 #[ts(export)]
-pub struct Event {
+pub struct WorldEvent {
     pub name: Option<String>,
     pub node: Option<String>,
     pub expiry: Option<String>,
@@ -716,7 +716,7 @@ fn state(raw: Option<&Value>, err: Option<String>, cat: &Catalog) -> WorldStateO
         archimedea: list(&raw["archimedeas"]).iter().map(archimedea).collect(),
         events: list(&raw["events"])
             .iter()
-            .map(|e| Event {
+            .map(|e| WorldEvent {
                 name: text(&e["description"]),
                 node: text(&e["node"]),
                 expiry: text(&e["expiry"]),

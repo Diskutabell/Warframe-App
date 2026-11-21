@@ -22,7 +22,17 @@ if [ "${1:-}" = "--detach" ] || [ "${1:-}" = "-d" ]; then
   exit 0
 fi
 
-if command -v cargo >/dev/null && pkg-config --exists webkit2gtk-4.1 gtk-layer-shell-0 2>/dev/null; then
+# The interface (web/, Svelte) is built into web/dist, which the binary embeds: again whenever a
+# source of it is newer than the last build.
+build_ui() {
+  if [ ! -d web/node_modules ]; then (cd web && npm ci --silent --no-audit --no-fund); fi
+  if [ ! -f web/dist/index.html ] || [ -n "$(find web/src web/public web/index.html web/package.json -newer web/dist/index.html -print -quit)" ]; then
+    (cd web && npm run --silent build >/dev/null)
+  fi
+}
+
+if command -v cargo >/dev/null && command -v npm >/dev/null && pkg-config --exists webkit2gtk-4.1 gtk-layer-shell-0 2>/dev/null; then
+  build_ui
   cargo build --release --quiet
   exec ./target/release/warframeproject "$@"
 fi
@@ -30,9 +40,9 @@ fi
 if [ -e /etc/NIXOS ] && command -v nix-shell >/dev/null; then
   args=""
   for a in "$@"; do args+=" $(printf '%q' "$a")"; done
-  exec nix-shell "$PWD/shell.nix" --run "cargo build --release --quiet && exec ./target/release/warframeproject$args"
+  exec nix-shell "$PWD/shell.nix" --run "$(declare -f build_ui); build_ui && cargo build --release --quiet && exec ./target/release/warframeproject$args"
 fi
 
-echo "Building needs cargo plus the development files of GTK 3, WebKitGTK 4.1 and gtk-layer-shell," >&2
+echo "Building needs cargo, npm (Node 22) and the development files of GTK 3, WebKitGTK 4.1 and gtk-layer-shell," >&2
 echo "or Nix. See README.md." >&2
 exit 1

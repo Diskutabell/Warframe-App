@@ -33,7 +33,7 @@ use crate::memscan::ScanError;
 use crate::sources::ProfileRefused;
 
 #[derive(RustEmbed)]
-#[folder = "web/"]
+#[folder = "web/dist/"]
 pub(crate) struct Web;
 
 /// What every handler gets: the engine.
@@ -325,8 +325,11 @@ mod tests {
     #[test]
     fn the_ui_is_embedded() {
         assert!(Web::get("index.html").is_some());
-        assert!(Web::get("js/main.js").is_some());
-        assert!(Web::get("js/pages/settings.js").is_some());
+        // The built UI (web/: npm run build), with what the desktop shells read from it.
+        assert!(Web::iter().any(|f| f.starts_with("assets/") && f.ends_with(".js")), "web/dist holds no built UI");
+        assert!(Web::get("fonts/Rajdhani-Bold.ttf").is_some());
+        assert!(Web::get("icons/platinum.png").is_some());
+        assert!(Web::get("overlay.html").is_some());
         assert!(Web::get("../Cargo.toml").is_none());
     }
 
