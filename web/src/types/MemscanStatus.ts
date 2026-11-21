@@ -3,8 +3,8 @@ import type { LastScan } from "./LastScan";
 
 export type MemscanStatus = { 
 /**
- * "idle" (nothing read yet), "scanning", "ok" or "error"; the summary adds "off" and
- * "unavailable".
+ * "idle" (nothing read yet), "scanning", "ok" or "error"; the summary adds "off",
+ * "unavailable" and "absent" (built without the memory scan).
  */
 state: string, 
 /**

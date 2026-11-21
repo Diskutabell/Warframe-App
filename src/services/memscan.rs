@@ -31,8 +31,8 @@ const PROGRESS_STEP: f64 = 0.02;
 #[derive(Clone, Debug, Default, Serialize, ts_rs::TS)]
 #[ts(export)]
 pub struct MemscanStatus {
-    /// "idle" (nothing read yet), "scanning", "ok" or "error"; the summary adds "off" and
-    /// "unavailable".
+    /// "idle" (nothing read yet), "scanning", "ok" or "error"; the summary adds "off",
+    /// "unavailable" and "absent" (built without the memory scan).
     pub state: &'static str,
     /// Why the last attempt read nothing, or what went wrong.
     pub detail: Option<String>,
@@ -85,6 +85,19 @@ impl MemscanStatus {
         self.last_attempt = time;
         ScheduledScan::Start
     }
+
+    fn for_summary(mut self, enabled: bool, compiled: bool, available: Result<(), String>) -> MemscanStatus {
+        if !compiled {
+            self.state = "absent";
+            self.detail = available.err();
+        } else if !enabled {
+            self.state = "off";
+        } else if let Err(why) = available {
+            self.state = "unavailable";
+            self.detail = Some(why);
+        }
+        self
+    }
 }
 
 pub struct MemscanService {
@@ -124,14 +137,11 @@ impl MemscanService {
 
     /// The status as the summary shows it.
     pub fn status(&self) -> MemscanStatus {
-        let mut st = self.status.read().clone();
-        if !self.settings.get().memory_scan_enabled {
-            st.state = "off";
-        } else if let Err(why) = memscan::availability() {
-            st.state = "unavailable";
-            st.detail = Some(why);
-        }
-        st
+        self.status.read().clone().for_summary(
+            self.settings.get().memory_scan_enabled,
+            cfg!(feature = "memscan"),
+            memscan::availability(),
+        )
     }
 
     /// Whether the game is running, by its process; only asked with the scan switched on.
@@ -364,5 +374,17 @@ mod tests {
         status.next = Some(120.0);
         assert_eq!(status.start_scheduled(120.0, false, Some(1), 120.0), ScheduledScan::Cancelled);
         assert_eq!(status.next, None);
+    }
+
+    #[test]
+    fn summary_status_reports_absent_build_even_when_off() {
+        let base = MemscanStatus { state: "idle", ..Default::default() };
+        let absent = base.clone().for_summary(false, false, Err("left out".into()));
+        assert_eq!(absent.state, "absent");
+        assert_eq!(absent.detail.as_deref(), Some("left out"));
+        assert_eq!(base.clone().for_summary(false, true, Err("ptrace".into())).state, "off");
+        let unavail = base.for_summary(true, true, Err("ptrace".into()));
+        assert_eq!(unavail.state, "unavailable");
+        assert_eq!(unavail.detail.as_deref(), Some("ptrace"));
     }
 }

@@ -1,5 +1,6 @@
-# Builds the Windows exe on a real Windows machine. Every push to main checks that it still builds
-# and reads a reward screen; publishing a release attaches the exe to it.
+# Builds both Windows exes (without and with the memory scan) on a real Windows machine. Every
+# push to main checks that they build and read a reward screen; publishing a release attaches both
+# to it.
 name: Windows
 
 on:
@@ -49,19 +50,7 @@ jobs:
           changed=$(git status --porcelain -- web/src/types)
           if [ -n "$changed" ]; then echo "$changed"; echo "web/src/types is out of date: run cargo test and commit it"; exit 1; fi
 
-      # A build without the memory scan must not be able to open or read another process: none of
-      # those calls may be among the exe's imports.
-      - uses: ilammy/msvc-dev-cmd@v1
-      - name: Build without the memory scan
-        shell: powershell
-        run: |
-          cargo build --release --no-default-features --target-dir target-nomemscan
-          $imports = dumpbin /imports target-nomemscan\release\warframeproject.exe | Out-String
-          $found = @("OpenProcess", "ReadProcessMemory", "VirtualQueryEx", "CreateToolhelp32Snapshot", "Process32FirstW") |
-            Where-Object { $imports -match "\b$_\b" }
-          if ($found) { throw "a build without the memory scan imports: $($found -join ', ')" }
-
-      # The OCR program goes into the exe, so Windows users have nothing to install.
+      # The OCR program goes into both exes, so Windows users have nothing to install.
       - uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
@@ -71,17 +60,47 @@ jobs:
         shell: msys2 {0}
         run: bash .github/bundle-tesseract.sh "$(cygpath -u "$GITHUB_WORKSPACE")/tesseract.zip"
 
-      - name: Build
-        run: cargo build --release --features bundled-tesseract
+      # Both release exes carry tesseract and link the C runtime statically (no Visual C++
+      # redistributable). Sharing `target` and `RUSTFLAGS` compiles dependencies once.
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      # The plain exe is built without the memory scan and must not be able to open or read
+      # another process: none of those calls may be among its imports.
+      - name: Build without the memory scan
+        shell: powershell
         env:
           WFP_TESSERACT_ZIP: ${{ github.workspace }}\tesseract.zip
-          # The C runtime goes into the exe too, so it runs without the Visual C++ redistributable.
           RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          cargo build --release --no-default-features --features bundled-tesseract
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item target\release\warframeproject.exe warframeproject-windows-x64.exe
+          $imports = dumpbin /imports warframeproject-windows-x64.exe | Out-String
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($imports -notmatch "kernel32\.dll") { throw "dumpbin output looks empty" }
+          $found = @("OpenProcess", "ReadProcessMemory", "VirtualQueryEx", "CreateToolhelp32Snapshot", "Process32FirstW", "Process32NextW") |
+            Where-Object { $imports -match "\b$_\b" }
+          if ($found) { throw "a build without the memory scan imports: $($found -join ', ')" }
+
+      - name: Build with the memory scan
+        shell: powershell
+        env:
+          WFP_TESSERACT_ZIP: ${{ github.workspace }}\tesseract.zip
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          cargo build --release --features bundled-tesseract
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item target\release\warframeproject.exe warframeproject-windows-x64-memscan.exe
+          $imports = dumpbin /imports warframeproject-windows-x64-memscan.exe | Out-String
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($imports -notmatch "\bReadProcessMemory\b") {
+            throw "the build with the memory scan is missing ReadProcessMemory"
+          }
 
       # Draws a reward screen as the game lays it out at 1920x1080 and 100% interface scale - four
-      # cards, 242 px wide, centred, each name bottom-aligned above its rarity bar - and has the exe
-      # read it with nothing but Windows itself on PATH: proves the packed OCR is complete.
-      - name: Read a reward screen with the exe
+      # cards, 242 px wide, centred, each name bottom-aligned above its rarity bar - and has each
+      # exe read it with nothing but Windows itself on PATH: proves the packed OCR is complete.
+      - name: Read a reward screen with both exes
         shell: powershell
         run: |
           Add-Type -AssemblyName System.Drawing
@@ -104,24 +123,33 @@ jobs:
           }
           $bmp.Save("$PWD\frame.png", [System.Drawing.Imaging.ImageFormat]::Png)
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
-          $p = Start-Process -FilePath target\release\warframeproject.exe -ArgumentList "replay", "frame.png" `
-            -NoNewWindow -Wait -PassThru -RedirectStandardOutput out.txt -RedirectStandardError err.txt
-          Get-Content out.txt, err.txt
-          $read = @($names | Where-Object { (Get-Content out.txt -Raw) -match [regex]::Escape($_) }).Count
-          if ($p.ExitCode -ne 0 -or $read -lt 3) { throw "read $read of 4 names (exit code $($p.ExitCode))" }
-
-      - name: Package
-        shell: bash
-        run: cp target/release/warframeproject.exe warframeproject-windows-x64.exe
+          foreach ($exe in @("warframeproject-windows-x64.exe", "warframeproject-windows-x64-memscan.exe")) {
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "$env:LOCALAPPDATA\warframeproject\cache\tesseract-*"
+            $p = Start-Process -FilePath ".\$exe" -ArgumentList "replay", "frame.png" `
+              -NoNewWindow -Wait -PassThru -RedirectStandardOutput out.txt -RedirectStandardError err.txt
+            Write-Host "=== $exe ==="
+            Get-Content out.txt, err.txt
+            $read = @($names | Where-Object { (Get-Content out.txt -Raw) -match [regex]::Escape($_) }).Count
+            if ($p.ExitCode -ne 0 -or $read -lt 3) { throw "${exe}: read $read of 4 names (exit code $($p.ExitCode))" }
+          }
 
       - uses: actions/upload-artifact@v4
         with:
           name: warframeproject-windows-x64
           path: warframeproject-windows-x64.exe
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: warframeproject-windows-x64-memscan
+          path: warframeproject-windows-x64-memscan.exe
+
       - name: Attach to the release
         if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$GITHUB_REF_NAME" warframeproject-windows-x64.exe --clobber
+        run: |
+          gh release upload "$GITHUB_REF_NAME" \
+            warframeproject-windows-x64.exe \
+            warframeproject-windows-x64-memscan.exe \
+            --clobber

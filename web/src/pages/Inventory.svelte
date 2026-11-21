@@ -12,7 +12,9 @@
   import { loader } from "../lib/loader.svelte";
   import type { InventoryRow } from "../types/InventoryRow";
   import type { InventoryView } from "../types/InventoryView";
+  import type { Summary } from "../types/Summary";
 
+  let { S }: { S: Summary } = $props();
   const page = loader<InventoryView>("inventory", ["inventory", "catalog"]);
   // Equipment kinds from the catalog, gathered under one chip; the details panel knows them,
   // parts and relics too.
@@ -63,8 +65,12 @@
     <div class="page">
       {#if !data.items.length}
         <div class="page-head"><div><h1>Inventory</h1></div></div>
-        <div class="empty"><b>No inventory loaded yet</b>Switch on the memory scan in Settings and it is read while the game runs,
-          after login and after each mission. An exported inventory file can be imported there too.</div>
+        {#if S.sources.memscan.state === "absent"}
+          <div class="empty"><b>No inventory loaded yet</b>Import an exported <code>inventory.json</code> in Settings (this build was made without the memory scan).</div>
+        {:else}
+          <div class="empty"><b>No inventory loaded yet</b>Switch on the memory scan in Settings and it is read while the game runs,
+            after login and after each mission. An exported inventory file can be imported there too.</div>
+        {/if}
       {:else}
         {@const c = data.currencies}
         <div class="page-head"><div><h1>Inventory</h1><p>{fmt(data.items.length)} stacks · {data.source || ""} {ago(data.imported)}</p></div></div>

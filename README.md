@@ -74,10 +74,15 @@ Linux it runs natively next to the game (no Wine needed for the app itself).
 
 ## Windows
 
-1. Download `warframeproject-windows-x64.exe` from the
-   [latest release](https://github.com/Diskutabell/Warframe-App/releases/latest). It's a single
-   file: no installer, nothing else to install. Windows SmartScreen will warn you because the exe
-   isn't signed ("More info" → "Run anyway").
+1. Download one of the two files from the
+   [latest release](https://github.com/Diskutabell/Warframe-App/releases/latest) — each is a single
+   exe with no installer and nothing else to install:
+   - **`warframeproject-windows-x64.exe`** — built without the memory scan (no code that opens or
+     reads another process).
+   - **`warframeproject-windows-x64-memscan.exe`** — the same app with the optional memory scan
+     included (off by default).
+
+   Windows SmartScreen will warn you because the exe isn't signed ("More info" → "Run anyway").
 2. Run it, then Warframe. Set the game to **borderless fullscreen** (or windowed): overlays can't
    draw over exclusive fullscreen, and screenshots of it come out black.
 
@@ -181,7 +186,8 @@ while.
 ## Memory scan
 
 There's no public API for your inventory, so tools that keep it up to date automatically read
-it from the game's memory. Here that is optional and **off by default**:
+it from the game's memory. Here that is optional and **off by default** (and omitted altogether
+from `warframeproject-windows-x64.exe`, or any build made with `--no-default-features`):
 
 - Read-only, through `/proc/<pid>/mem` on Linux and `ReadProcessMemory` on Windows. Nothing is
   written to or injected into the game.
@@ -249,11 +255,13 @@ cargo run -- --headless --offline --port 8650    # engine only, no network
 ```
 
 On Windows, `cargo build --release` with the MSVC toolchain builds the app; it then uses an
-installed tesseract. The release exe also carries one (`--features bundled-tesseract`, see
+installed tesseract. The release exes also carry one (`--features bundled-tesseract`, and
+`--no-default-features --features bundled-tesseract` for the build without the memory scan; see
 `.github/workflows/windows.yml`). The code that talks to the desktop is split per system:
 `src/compositor.rs` and `src/desktop/` on Linux, `src/windows/` on Windows (same module names,
-picked in `main.rs`). GitHub Actions builds the Windows exe on every push, has it read a reward
-screen, and attaches it to each release.
+picked in `main.rs`). GitHub Actions builds both Windows exes on every push, checks that the plain
+exe imports no process-reading calls, has both read a reward screen, and attaches them to each
+release.
 
 `--browser` opens the interface in your web browser instead of a window. The interface in `web/`
 is Svelte 5 and TypeScript, built by Vite into `web/dist`; debug builds read that folder from disk,

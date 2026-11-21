@@ -184,7 +184,7 @@
               <div class="btn-group"><button disabled={!S.account.id} onclick={() => act("profile/refresh", {}, "Profile refreshed")}>Refresh</button>
                 <button onclick={() => importFile("profile/import", "Profile imported")}>Import file</button></div></div>
             <div class="list-row">{@render dot(src.inventory.source ? "on" : "")}<div class="main"><div class="t">Inventory</div>
-              <div class="s" style="white-space:normal">{src.inventory.source ? `${fmt(src.inventory.stacks)} stacks · ${src.inventory.source} · ${ago(src.inventory.imported)}` : "None - parts, relics, currencies and medallions need one (memory scan or an inventory.json)."}</div></div>
+              <div class="s" style="white-space:normal">{src.inventory.source ? `${fmt(src.inventory.stacks)} stacks · ${src.inventory.source} · ${ago(src.inventory.imported)}` : m.state === "absent" ? "None - parts, relics, currencies and medallions need an imported inventory.json." : "None - parts, relics, currencies and medallions need one (memory scan or an inventory.json)."}</div></div>
               <div class="btn-group"><button onclick={() => importFile("inventory/import", "Inventory imported")}>Import file</button>
                 {#if src.inventory.source}<button class="ghost" onclick={async () => { if (await act("inventory/clear", {}, "Inventory forgotten")) await changed(); }}>Forget</button>{/if}</div></div>
             <div class="list-row">{@render dot(tools.tesseract && tools.screenshot ? "on" : "warn")}<div class="main"><div class="t">Screen reader</div>
@@ -196,17 +196,21 @@
         </div>
 
         <div class="card" id="sec-memscan"><div class="card-head"><h2>Memory scan</h2></div>
-          <p class="muted" style="margin:0 0 6px">Reads the inventory the game has already downloaded - parts, relics, currencies, the foundry - straight from its memory, read-only, and keeps nothing else. It runs by itself after you log in and after each mission, because that is when the game holds the whole inventory. Nothing is sent anywhere. Third-party tools are used at your own risk.</p>
-          {@render toggle(s, "memory_scan_enabled", "Read the inventory from game memory", "Off by default.")}
-          <div class="memscan-box">
-            {#if m.state === "off"}{@render dot("")}<span>Off.</span>
-            {:else if m.state === "unavailable"}{@render dot("warn")}<span>{m.detail || "Not possible on this system."}</span>
-            {:else if m.state === "idle"}{@render dot("")}<span>{m.detail || "Waiting for the game."}{#if m.next}{" "}Next read in <Countdown until={m.next} done="a moment" />.{/if}</span>
-            {:else if m.state === "scanning"}{@render dot("gold")}<span>Reading… {Math.round(m.progress * 100)}%</span>
-            {:else if m.state === "ok"}{@render dot("on")}<span>{#if m.last}Last read {ago(m.last.t)}: {fmt(m.last.stacks)} stacks in {m.last.seconds}s.{/if}{m.detail ? ` ${m.detail}` : ""}{#if m.next}{" "}Next read in <Countdown until={m.next} done="a moment" />.{/if}</span>
-            {:else if m.state === "error"}{@render dot("warn")}<span><span class="warn-text">{m.detail || "Failed."}</span>{#if m.next}{" "}Next read in <Countdown until={m.next} done="a moment" />.{/if}</span>
-            {:else}{@render dot("")}<span>{m.state}</span>{/if}
-          </div>
+          {#if m.state === "absent"}
+            <p class="muted" style="margin:0">{m.detail || "This build of warframeproject was made without the memory scan."}</p>
+          {:else}
+            <p class="muted" style="margin:0 0 6px">Reads the inventory the game has already downloaded - parts, relics, currencies, the foundry - straight from its memory, read-only, and keeps nothing else. It runs by itself after you log in and after each mission, because that is when the game holds the whole inventory. Nothing is sent anywhere. Third-party tools are used at your own risk.</p>
+            {@render toggle(s, "memory_scan_enabled", "Read the inventory from game memory", "Off by default.")}
+            <div class="memscan-box">
+              {#if m.state === "off"}{@render dot("")}<span>Off.</span>
+              {:else if m.state === "unavailable"}{@render dot("warn")}<span>{m.detail || "Not possible on this system."}</span>
+              {:else if m.state === "idle"}{@render dot("")}<span>{m.detail || "Waiting for the game."}{#if m.next}{" "}Next read in <Countdown until={m.next} done="a moment" />.{/if}</span>
+              {:else if m.state === "scanning"}{@render dot("gold")}<span>Reading… {Math.round(m.progress * 100)}%</span>
+              {:else if m.state === "ok"}{@render dot("on")}<span>{#if m.last}Last read {ago(m.last.t)}: {fmt(m.last.stacks)} stacks in {m.last.seconds}s.{/if}{m.detail ? ` ${m.detail}` : ""}{#if m.next}{" "}Next read in <Countdown until={m.next} done="a moment" />.{/if}</span>
+              {:else if m.state === "error"}{@render dot("warn")}<span><span class="warn-text">{m.detail || "Failed."}</span>{#if m.next}{" "}Next read in <Countdown until={m.next} done="a moment" />.{/if}</span>
+              {:else}{@render dot("")}<span>{m.state}</span>{/if}
+            </div>
+          {/if}
         </div>
 
         <div class="card" id="sec-notifications"><div class="card-head"><h2>Notifications</h2></div>
