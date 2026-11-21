@@ -21,13 +21,22 @@ const HOUR: i64 = 3600;
 /// How far ahead the World page lists them.
 const AHEAD: usize = 24;
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Schedule {
     /// When each hour starts (epoch seconds) and its node tag, in time order.
     pub slots: Vec<(i64, String)>,
     /// Node tag -> "S", "A", "B", "C" or "D"; a node the list leaves out is F tier, as on
     /// browse.wf. Empty when the list could not be loaded: then no tier is shown at all.
     pub tiers: HashMap<String, String>,
+}
+
+impl Schedule {
+    /// Only the hours that have not ended yet: the file runs from 2024.
+    pub fn current(mut self) -> Schedule {
+        let t = now() as i64;
+        self.slots.retain(|(start, _)| start + HOUR > t);
+        self
+    }
 }
 
 /// The "<start>,<node>" lines of `arbys.txt`, in time order. Other lines are skipped.

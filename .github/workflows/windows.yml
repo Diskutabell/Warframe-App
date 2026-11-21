@@ -14,6 +14,8 @@ permissions:
 
 jobs:
   build:
+    # The `catalog` pre-release holds game data, not the app (catalog.yml).
+    if: github.event_name != 'release' || github.event.release.tag_name != 'catalog'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

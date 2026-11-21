@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result, anyhow};
 use futures_util::future::BoxFuture;
 use indexmap::IndexMap;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{config, net, now};
@@ -53,6 +53,11 @@ const DROP_TABLES: [&str; 12] = [
     "blueprintLocations",
     "modLocations",
 ];
+/// How many drop tables an item can drop from (all but the relics' own).
+pub const fn drop_table_count() -> usize {
+    DROP_TABLES.len() - 1
+}
+
 /// A junction gives 1,000 mastery points (wiki.warframe.com/w/Mastery_Rank); the export lists
 /// every junction with 0.
 const JUNCTION_XP: i64 = 1000;
@@ -282,13 +287,45 @@ struct Sources {
     arbitrations: crate::arbitration::Schedule,
 }
 
-/// Downloads (or revalidates) every file and builds the catalog. The downloads run side by
-/// side; building, which walks every file, runs on the blocking pool.
+/// Builds the catalog: from the prepared data CI publishes once a day (`bundle.rs`, one
+/// download), else from the sources themselves (some forty downloads). The downloads run side
+/// by side; building, which walks every file, runs on the blocking pool.
 pub async fn load(force: bool) -> Result<Catalog> {
+    let prepared = match crate::bundle::fetch(force).await {
+        Ok(prepared) => prepared,
+        Err(e) => {
+            eprintln!("the prepared game data is unavailable, building it from its sources: {e:#}");
+            prepare_from_sources(force).await?
+        }
+    };
+    blocking(move || build_prepared(&prepared)).await
+}
+
+/// Downloads every source and prepares the data from them (what `build-catalog` publishes).
+pub async fn prepare_from_sources(force: bool) -> Result<Prepared> {
     let sources = fetch_sources(force).await;
-    tokio::task::spawn_blocking(move || assemble(sources))
-        .await
-        .map_err(|e| anyhow!("building the game data failed: {e}"))?
+    blocking(move || prepare(sources)).await?
+}
+
+/// What the catalog is built from, once the fixes that need several sources together are done:
+/// DE's recipes laid over the export's, relics given the drop tables WFCD left out. This is what
+/// CI publishes (`bundle.rs`), so every client builds from the same checked data.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Prepared {
+    /// When it was prepared, epoch seconds.
+    pub built: f64,
+    /// WFCD's files by name, "Mods", and the merged "ExportRecipes".
+    pub files: IndexMap<String, Value>,
+    /// The drop tables an item can drop from (`DROP_TABLES` after "relics"), by name.
+    pub drops: IndexMap<String, Value>,
+    /// The star chart export.
+    pub regions: Option<Value>,
+    pub syndicate_export: Option<Value>,
+    /// The game's English names (`dict.en.json`).
+    pub dict: Option<Value>,
+    /// The exports that name what an inventory holds (`inventory::EXPORTS`), by file name.
+    pub held: IndexMap<String, Value>,
+    pub arbitrations: crate::arbitration::Schedule,
 }
 
 async fn fetch_sources(force: bool) -> Sources {
@@ -324,7 +361,9 @@ async fn fetch_sources(force: bool) -> Sources {
     }
 }
 
-fn assemble(sources: Sources) -> Result<Catalog> {
+/// Merges and repairs the downloaded sources. Fails only without one of WFCD's files; anything
+/// else missing leaves its part of the app empty, as before.
+fn prepare(sources: Sources) -> Result<Prepared> {
     let Sources { wfcd, mods, recipes, de_recipes, regions, syndicates, drops, held, relic_exports, arbitrations } =
         sources;
     let mut files = IndexMap::new();
@@ -362,56 +401,59 @@ fn assemble(sources: Sources) -> Result<Catalog> {
     if files.get("Relics").is_some_and(crate::relics::lacks_rewards) {
         repair_relics(&mut files, &relic_exports, &drops);
     }
-    let mut catalog = build(&files);
-    let mut drop_tables = Vec::new();
-    for (name, data) in DROP_TABLES.iter().zip(&drops).skip(1) {
+    let mut tables = IndexMap::new();
+    for (name, data) in DROP_TABLES.iter().zip(drops).skip(1) {
         match data {
             Ok(data) if data.get(*name).is_some_and(|v| v.is_array() || v.is_object()) => {
-                drop_tables.push((*name, data))
+                tables.insert(name.to_string(), data);
             }
             Ok(_) => eprintln!("drop table {name} has an unexpected format"),
             Err(e) => eprintln!("drop table {name} unavailable: {e:#}"),
         }
     }
-    catalog.drops = crate::drops::Drops::from_tables(&drop_tables, DROP_TABLES.len() - 1);
     // The app works without the star chart: only the mastery total is then short of it, and the
     // arbitration schedule of its node names.
-    match regions {
-        Ok(raw) => {
-            catalog.node_xp = node_xp_table(&raw);
-            if let Some(Ok(dict)) = syndicates.get(1) {
-                catalog.nodes = node_table(&raw, dict);
+    let regions = regions.map_err(|e| eprintln!("star chart data unavailable, mastery will leave it out: {e:#}")).ok();
+    let [syndicate_export, dict] = <[Result<Value>; 2]>::try_from(syndicates)
+        .map_err(|_| anyhow!("two syndicate files expected"))?
+        .map(|r| r.map_err(|e| eprintln!("syndicate data unavailable: {e:#}")).ok());
+    let held = crate::inventory::EXPORTS
+        .iter()
+        .zip(held)
+        .filter_map(|(f, r)| match r {
+            Ok(v) => Some((f.to_string(), v)),
+            Err(e) => {
+                eprintln!("{f} unavailable, the inventory page names less: {e:#}");
+                None
             }
+        })
+        .collect();
+    Ok(Prepared { built: now(), files, drops: tables, regions, syndicate_export, dict, held, arbitrations })
+}
+
+/// The catalog from prepared data: pure work on what is in memory.
+pub fn build_prepared(p: &Prepared) -> Catalog {
+    let mut catalog = build(&p.files);
+    let tables: Vec<(&str, &Value)> = p.drops.iter().map(|(n, v)| (n.as_str(), v)).collect();
+    catalog.drops = crate::drops::Drops::from_tables(&tables, DROP_TABLES.len() - 1);
+    if let Some(raw) = &p.regions {
+        catalog.node_xp = node_xp_table(raw);
+        if let Some(dict) = &p.dict {
+            catalog.nodes = node_table(raw, dict);
         }
-        Err(e) => eprintln!("star chart data unavailable, mastery will leave it out: {e:#}"),
     }
-    catalog.arbitrations = arbitrations;
+    catalog.arbitrations = p.arbitrations.clone().current();
     // Standing works without it too: the page then says the syndicate data is missing.
-    match &syndicates[..] {
-        [Ok(export), Ok(dict)] => catalog.syndicates = crate::standing::build(export, dict),
-        _ => {
-            let why: Vec<String> =
-                syndicates.iter().filter_map(|r| r.as_ref().err()).map(|e| format!("{e:#}")).collect();
-            eprintln!("syndicate data unavailable: {}", why.join("; "));
-        }
+    if let (Some(export), Some(dict)) = (&p.syndicate_export, &p.dict) {
+        catalog.syndicates = crate::standing::build(export, dict);
     }
     // The inventory page names what it can without it.
-    if let Some(Ok(dict)) = syndicates.get(1) {
-        let exports: Vec<(&str, &Value)> = crate::inventory::EXPORTS
-            .iter()
-            .zip(&held)
-            .filter_map(|(f, r)| match r {
-                Ok(v) => Some((*f, v)),
-                Err(e) => {
-                    eprintln!("{f} unavailable, the inventory page names less: {e:#}");
-                    None
-                }
-            })
-            .collect();
-        catalog.inventory = crate::inventory::index(&exports, files.get("ExportRecipes"), dict);
+    if let Some(dict) = &p.dict {
+        let exports: Vec<(&str, &Value)> = p.held.iter().map(|(f, v)| (f.as_str(), v)).collect();
+        catalog.inventory = crate::inventory::index(&exports, p.files.get("ExportRecipes"), dict);
     }
     catalog.loaded_at = Some(now());
-    Ok(catalog)
+    catalog
 }
 
 /// Fills in the drop tables WFCD's relics lack, from the game's export and DE's drop tables (see
@@ -741,7 +783,7 @@ fn settle<T>(
 
 /// Downloads `url` into the cache file `path` (see `download_to_owned`). True with the data when
 /// the source sent new data.
-async fn fetch_cached<T: Send + 'static>(
+pub(crate) async fn fetch_cached<T: Send + 'static>(
     url: &str,
     path: &Path,
     force: bool,

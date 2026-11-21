@@ -27,6 +27,10 @@ notify = { version = "8", default-features = false }
 # the same on Linux and Windows).
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# SHA-256 of the prepared game data (the same ring rustls uses).
+ring = "0.17"
+# The prepared game data CI publishes is one zstd-packed file.
+zstd = { version = "0.13", default-features = false }
 webpki-roots = "1"
 # The app's own data (accounts, hand-set counts, reward history, prices) in one SQLite file;
 # SQLite is compiled in, so nothing has to be installed.

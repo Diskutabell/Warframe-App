@@ -11,6 +11,7 @@ mod api;
 mod app;
 mod arbitration;
 mod art;
+mod bundle;
 mod bus;
 mod clock;
 mod config;
@@ -126,6 +127,13 @@ enum Command {
         #[arg(long)]
         scale: Option<f64>,
     },
+    /// Download every game data source, check it, and write the prepared bundle and its
+    /// manifest into a folder (what CI publishes on the `catalog` release).
+    BuildCatalog {
+        /// Where the bundle and manifest.json go.
+        #[arg(long, default_value = "catalog")]
+        out: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -151,6 +159,10 @@ fn main() -> ExitCode {
         Command::Replay { frames, riven, scale } => {
             net::set_offline(cli.offline);
             replay(&frames, riven, scale)
+        }
+        Command::BuildCatalog { out } => {
+            net::set_offline(cli.offline);
+            build_catalog(&out)
         }
     };
     match result {
@@ -325,6 +337,26 @@ fn riven(port: u16) -> Result<()> {
 }
 
 /// Reads a saved frame offline: the regression check for the OCR.
+fn build_catalog(out: &std::path::Path) -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let prepared = runtime.block_on(gamedata::prepare_from_sources(true))?;
+    let catalog = gamedata::build_prepared(&prepared);
+    eprintln!("prepared: {}", serde_json::Value::Object(bundle::counts(&catalog)));
+    let failed = bundle::check(&prepared, &catalog);
+    if !failed.is_empty() {
+        for f in &failed {
+            eprintln!("check failed: {f}");
+        }
+        anyhow::bail!("the game data failed {} check(s); nothing was written", failed.len());
+    }
+    let (packed, manifest) = bundle::encode(&prepared, bundle::counts(&catalog))?;
+    std::fs::create_dir_all(out)?;
+    std::fs::write(out.join(&manifest.file), &packed)?;
+    std::fs::write(out.join("manifest.json"), serde_json::to_vec_pretty(&manifest)?)?;
+    println!("{} ({} bytes): {}", manifest.file, manifest.size, serde_json::Value::Object(manifest.counts.clone()));
+    Ok(())
+}
+
 fn replay(frames: &[PathBuf], riven: bool, scale: Option<f64>) -> Result<()> {
     #[cfg(windows)]
     compositor::unpack_tesseract()?;

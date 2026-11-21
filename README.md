@@ -194,6 +194,12 @@ This is the part most likely to be against the ToS. See the disclaimer above.
 
 ## Data sources
 
+The game data below is prepared once a day by this repository's CI and published on its
+[`catalog` release](https://github.com/Diskutabell/Warframe-App/releases/tag/catalog): the app
+downloads that one file (about 2 MB, checked against its SHA-256) when it changes, and only
+asks the sources themselves when it cannot be had. `warframeproject build-catalog` makes the
+same file locally.
+
 - [WFCD warframe-items](https://github.com/WFCD/warframe-items) and its
   [drop data](https://drops.warframestat.us): items, parts, relics, drop tables
 - [warframe-public-export-plus](https://github.com/calamity-inc/warframe-public-export-plus):
@@ -203,7 +209,7 @@ This is the part most likely to be against the ToS. See the disclaimer above.
 - [warframe.market](https://warframe.market): prices and item art (at most 3 requests a second)
 - [browse.wf](https://browse.wf): the game's own interface art, the arbitration schedule and the
   [arbi.guide](https://arbi.guide) tiers
-- GitHub: the latest release of this app, once at startup
+- GitHub: the latest release of this app, once at startup, and the prepared game data
 - DE's public profile: mastery XP, star chart, intrinsics, standing
 - `EE.log`, reward screen OCR, your own counts, an imported inventory, or the memory scan
 
