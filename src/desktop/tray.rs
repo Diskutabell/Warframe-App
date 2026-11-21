@@ -12,7 +12,7 @@ use anyhow::{Result, anyhow};
 use gtk::gio;
 use gtk::glib::{self, ToVariant, Variant, VariantDict, VariantTy};
 
-use crate::state::State;
+use crate::app::App;
 use crate::tray_icon;
 
 const SNI_PATH: &str = "/StatusNotifierItem";
@@ -147,7 +147,7 @@ struct ActiveTray {
 }
 
 impl ActiveTray {
-    fn start(state: Arc<State>, window_visible: bool) -> Result<Self> {
+    fn start(state: Arc<App>, window_visible: bool) -> Result<Self> {
         static SEQ: AtomicU32 = AtomicU32::new(1);
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         let bus_name = format!("org.kde.StatusNotifierItem-{}-{seq}", std::process::id());
@@ -296,12 +296,12 @@ impl Drop for ActiveTray {
 
 /// Manages the optional Linux system tray icon. Safe to toggle on/off at runtime from Settings.
 pub struct Tray {
-    state: Arc<State>,
+    state: Arc<App>,
     active: Option<ActiveTray>,
 }
 
 impl Tray {
-    pub fn new(state: Arc<State>, enabled: bool, window_visible: bool) -> Self {
+    pub fn new(state: Arc<App>, enabled: bool, window_visible: bool) -> Self {
         let mut tray = Self { state, active: None };
         tray.set_enabled(enabled, window_visible);
         tray
@@ -419,28 +419,18 @@ fn menu_node(id: i32, visible: bool, depth: i32) -> Variant {
     Variant::tuple_from_iter([id.to_variant(), item_props(id, visible), children_arr])
 }
 
-fn dispatch_menu_click(state: &Arc<State>, id: i32) {
+fn dispatch_menu_click(state: &Arc<App>, id: i32) {
     match id {
         ID_TOGGLE => state.toggle_window(),
-        ID_REWARDS => {
-            let s = Arc::clone(state);
-            let _ = std::thread::Builder::new().name("tray-rewards".into()).spawn(move || {
-                let _ = s.scan_rewards();
-            });
-        }
-        ID_RIVEN => {
-            let s = Arc::clone(state);
-            let _ = std::thread::Builder::new().name("tray-riven".into()).spawn(move || {
-                let _ = s.scan_riven();
-            });
-        }
+        ID_REWARDS => state.scan_rewards_later(),
+        ID_RIVEN => state.scan_riven_later(),
         ID_QUIT => state.quit(),
         _ => {}
     }
 }
 
 fn handle_menu_call(
-    state: &Arc<State>,
+    state: &Arc<App>,
     visible: &AtomicBool,
     rev: &AtomicU32,
     method: &str,

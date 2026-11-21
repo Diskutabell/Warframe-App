@@ -20,8 +20,10 @@ use crate::{config, gamedata, market, net};
 /// Textures from the game's own interface (mastery badges, faction and syndicate emblems,
 /// portraits, location shots), served by path: `GAME_ART` + "Icons/BaroKiTeer.png".
 pub const GAME_ART: &str = "https://browse.wf/Lotus/Interface/";
+/// Where WFCD's image CDN (`gamedata::IMG_URL`) sends every request for a picture.
+const WFCD_IMAGES: &str = "https://raw.githubusercontent.com/wfcd/warframe-items/master/data/img/";
 /// The only places art is fetched from: the endpoint must not become a proxy for any URL.
-const SOURCES: [&str; 3] = [gamedata::IMG_URL, market::ASSETS, GAME_ART];
+const SOURCES: [&str; 4] = [gamedata::IMG_URL, WFCD_IMAGES, market::ASSETS, GAME_ART];
 const MIN_SIZE: u32 = 16;
 /// The sources' pictures are 512 px at most; card backgrounds use them whole.
 const MAX_SIZE: u32 = 512;
@@ -39,7 +41,8 @@ pub struct Art {
     pub content_type: &'static str,
 }
 
-fn allowed(url: &str) -> bool {
+/// Whether `url` is a picture on one of the art sources (also checked for every redirect).
+pub fn allowed(url: &str) -> bool {
     let Some(rest) = SOURCES.iter().find_map(|s| url.strip_prefix(s)) else {
         return false;
     };
@@ -67,22 +70,29 @@ pub fn cached(url: &str, size: u32) -> Option<Art> {
 
 /// The image at `url`, no larger than `size` pixels on its longer side. Downloads and scales it
 /// when the cache has no recent copy, which can take a while.
-pub fn get(url: &str, size: u32) -> Result<Art> {
+pub async fn get(url: &str, size: u32) -> Result<Art> {
     if !allowed(url) {
         bail!("not an art source: {url}");
     }
     let size = size.clamp(MIN_SIZE, MAX_SIZE);
     let path = cache_path(url, size);
     // An old copy is refreshed, but it will do when the source cannot be reached.
-    let old = match cached_copy(&path) {
+    let lookup = path.clone();
+    let old = match blocking(move || cached_copy(&lookup)).await? {
         Some((art, true)) => return Ok(art),
         Some((art, false)) => Some(art),
         None => None,
     };
     if !recently_failed(url) {
-        match download(url).and_then(|body| scale(&body, size)).and_then(typed) {
+        let fresh = match download(url).await {
+            // Decoding and scaling are CPU work: off the async threads.
+            Ok(body) => blocking(move || scale(&body, size).and_then(typed)).await.and_then(|r| r),
+            Err(e) => Err(e),
+        };
+        match fresh {
             Ok(art) => {
-                store(&path, &art.bytes);
+                let (path, bytes) = (path.clone(), art.bytes.clone());
+                let _ = blocking(move || store(&path, &bytes)).await;
                 return Ok(art);
             }
             Err(e) => {
@@ -96,9 +106,14 @@ pub fn get(url: &str, size: u32) -> Result<Art> {
     old.ok_or_else(|| anyhow!("no art at {url}"))
 }
 
-fn download(url: &str) -> Result<Vec<u8>> {
-    // Redirects are disabled so an allowlisted host cannot steer the fetch to another origin.
-    let resp = net::get_with(url, &[], Duration::from_secs(20), MAX_ART_BYTES, false)?;
+async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T> {
+    tokio::task::spawn_blocking(work).await.map_err(|e| anyhow!("{e}"))
+}
+
+async fn download(url: &str) -> Result<Vec<u8>> {
+    // Redirects are followed only to the art sources: an allowlisted host cannot steer the fetch
+    // to another origin.
+    let resp = net::get_with(url, &[], Duration::from_secs(20), MAX_ART_BYTES, net::Redirects::ArtSources).await?;
     if resp.status != 200 {
         return Err(net::HttpStatus(resp.status).into());
     }
@@ -254,12 +269,15 @@ mod tests {
         }
     }
 
-    #[test]
-    fn only_the_art_sources_are_fetched() {
+    #[tokio::test]
+    async fn only_the_art_sources_are_fetched() {
         assert!(allowed("https://cdn.warframestat.us/img/ash-prime.png"));
         assert!(allowed("https://browse.wf/Lotus/Interface/Icons/BaroKiTeer.png"));
-        assert!(get("https://example.com/a.png", 64).is_err());
-        assert!(get("https://warframe.market/static/assets/../../api/x", 64).is_err());
+        // Where the WFCD CDN redirects to; the rest of GitHub is not art.
+        assert!(allowed("https://raw.githubusercontent.com/wfcd/warframe-items/master/data/img/NokkoArchGun.png"));
+        assert!(!allowed("https://raw.githubusercontent.com/someone/else/master/x.png"));
+        assert!(get("https://example.com/a.png", 64).await.is_err());
+        assert!(get("https://warframe.market/static/assets/../../api/x", 64).await.is_err());
         assert!(!allowed("https://warframe.market/static/assets/%2e%2e/api/x"));
         assert!(!allowed("https://warframe.market/static/assets/.%2E/api/x"));
         assert!(!allowed("https://warframe.market/static/assets/a%2fb.png"));

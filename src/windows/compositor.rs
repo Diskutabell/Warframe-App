@@ -377,15 +377,11 @@ pub fn register_hotkeys(port: u16, keys: &[(&str, &str)]) -> Result<Vec<String>>
             while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
                 if msg.message == WM_HOTKEY {
                     if let Some((_, _, _, path)) = wanted.get(msg.wParam.wrapping_sub(1)) {
-                        let url = format!("http://127.0.0.1:{port}/api/{path}");
+                        let path = path.clone();
                         // Off this thread: a scan takes a second, and keys must stay responsive.
                         std::thread::spawn(move || {
-                            let agent: ureq::Agent = ureq::Agent::config_builder()
-                                .timeout_global(Some(Duration::from_secs(60)))
-                                .build()
-                                .into();
-                            if let Err(e) = agent.post(&url).header("Content-Type", "application/json").send("{}") {
-                                eprintln!("hotkey request failed: {e}");
+                            if let Err(e) = crate::net::local::call(port, &path, true, Duration::from_secs(60)) {
+                                eprintln!("hotkey request failed: {e:#}");
                             }
                         });
                     }

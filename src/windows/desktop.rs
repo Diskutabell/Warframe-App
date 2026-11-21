@@ -26,10 +26,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 use wry::{NewWindowResponse, WebContext, WebView, WebViewBuilder};
 
+use crate::app::App;
 use crate::compositor::{self, Rect};
 use crate::config::{self, PanelPosition, Settings};
 use crate::ocr::{reward, riven};
-use crate::state::{RewardResult, RivenResult, State, UiEvent};
+use crate::services::scans::{RewardResult, RivenResult};
+use crate::services::shell::UiEvent;
 
 /// Linux picks an overlay backend here; Windows has only one way.
 pub struct Backend;
@@ -261,7 +263,7 @@ impl Overlay {
 }
 
 struct Overlays {
-    state: Arc<State>,
+    state: Arc<App>,
     strip: Overlay,
     riven: Overlay,
 }
@@ -381,7 +383,7 @@ mod tests {
 }
 
 /// Runs the event loop until the main window closes or the app is told to quit.
-pub fn run(state: Arc<State>, url: &str, _backend: Backend) -> Result<()> {
+pub fn run(state: Arc<App>, url: &str, _backend: Backend) -> Result<()> {
     let mut event_loop = EventLoopBuilder::<Event>::with_user_event().build();
     let proxy = event_loop.create_proxy();
 

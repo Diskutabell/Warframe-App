@@ -398,7 +398,8 @@ struct RivenCacheState {
     last_failed: std::collections::HashMap<Platform, f64>,
 }
 
-static MARKET_LOCK: Mutex<()> = Mutex::new(());
+/// One fetch of the traded prices at a time.
+static MARKET_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static RIVEN_CACHE: std::sync::LazyLock<Mutex<RivenCacheState>> =
     std::sync::LazyLock::new(|| Mutex::new(RivenCacheState::default()));
 
@@ -438,16 +439,16 @@ fn claim_background_refresh(state: &mut RivenCacheState, platform: Platform, tim
 }
 
 /// {weapon name: {unrolled: {...}, rerolled: {...}}} of traded riven prices, cached 6 h.
-fn market(platform: Platform) -> (serde_json::Map<String, Value>, Option<String>) {
-    let _guard = MARKET_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let cached = load_cached(platform);
+pub async fn market(platform: Platform) -> (std::sync::Arc<serde_json::Map<String, Value>>, Option<String>) {
+    let _guard = MARKET_LOCK.lock().await;
+    let cached = tokio::task::spawn_blocking(move || load_cached(platform)).await.ok().flatten();
     if let Some(c) = &cached {
         if now() - c.fetched < MARKET_MAX_AGE {
-            return ((*c.data).clone(), None);
+            return (std::sync::Arc::clone(&c.data), None);
         }
     }
     let url = RIVEN_API.replace("{platform}", platform.as_str());
-    match net::get_json(&url, &[], Duration::from_secs(25)) {
+    match net::get_json(&url, &[], Duration::from_secs(25)).await {
         Ok(raw) => {
             let mut data = serde_json::Map::new();
             for group in raw.as_object().into_iter().flat_map(|o| o.values()) {
@@ -458,18 +459,17 @@ fn market(platform: Platform) -> (serde_json::Map<String, Value>, Option<String>
                 }
             }
             let fetched = now();
-            let _ = config::write_json(
-                &riven_cache_file(platform),
-                &json!({"t": fetched, "platform": platform.as_str(), "data": data}),
-            );
+            let data = std::sync::Arc::new(data);
+            let saved = json!({"t": fetched, "platform": platform.as_str(), "data": &*data});
+            let _ = tokio::task::spawn_blocking(move || config::write_json(&riven_cache_file(platform), &saved)).await;
             let mut state = RIVEN_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-            state.by_platform.insert(platform, CachedRivens { fetched, data: std::sync::Arc::new(data.clone()) });
+            state.by_platform.insert(platform, CachedRivens { fetched, data: std::sync::Arc::clone(&data) });
             state.last_failed.remove(&platform);
             (data, None)
         }
         Err(e) => {
             RIVEN_CACHE.lock().unwrap_or_else(|e| e.into_inner()).last_failed.insert(platform, now());
-            (cached.map(|c| (*c.data).clone()).unwrap_or_default(), Some(format!("Riven prices unavailable: {e}")))
+            (cached.map(|c| c.data).unwrap_or_default(), Some(format!("Riven prices unavailable: {e}")))
         }
     }
 }
@@ -485,18 +485,22 @@ pub fn traded(weapon: &str, platform: Platform) -> Option<Value> {
             claim_background_refresh(&mut state, platform, now())
         };
         if should_spawn {
-            let spawn = std::thread::Builder::new().name("rivens-market".into()).spawn(move || {
-                struct RefreshGuard(Platform);
-                impl Drop for RefreshGuard {
-                    fn drop(&mut self) {
-                        RIVEN_CACHE.lock().unwrap_or_else(|e| e.into_inner()).refreshing.remove(&self.0);
-                    }
+            struct RefreshGuard(Platform);
+            impl Drop for RefreshGuard {
+                fn drop(&mut self) {
+                    RIVEN_CACHE.lock().unwrap_or_else(|e| e.into_inner()).refreshing.remove(&self.0);
                 }
-                let _guard = RefreshGuard(platform);
-                let _ = market(platform);
-            });
-            if spawn.is_err() {
-                RIVEN_CACHE.lock().unwrap_or_else(|e| e.into_inner()).refreshing.remove(&platform);
+            }
+            let guard = RefreshGuard(platform);
+            match tokio::runtime::Handle::try_current() {
+                Ok(runtime) => {
+                    runtime.spawn(async move {
+                        let _guard = guard;
+                        let _ = market(platform).await;
+                    });
+                }
+                // Outside the engine (`replay`): no refresh, the cache will do.
+                Err(_) => drop(guard),
             }
         }
     }
@@ -506,9 +510,8 @@ pub fn traded(weapon: &str, platform: Platform) -> Option<Value> {
     (unrolled.is_some() || rerolled.is_some()).then(|| json!({"unrolled": unrolled, "rerolled": rerolled}))
 }
 
-/// Every weapon that takes a riven, with its traded riven prices.
-pub fn rows(catalog: &Catalog, platform: Platform) -> (Vec<Value>, Option<String>) {
-    let (prices, err) = market(platform);
+/// Every weapon that takes a riven, with its traded riven prices (`market`).
+pub fn rows(catalog: &Catalog, prices: &serde_json::Map<String, Value>) -> Vec<Value> {
     let pick = |v: &Value| {
         v.as_object().filter(|o| !o.is_empty()).map(|o| {
             json!({"median": o.get("median"), "avg": o.get("avg"), "min": o.get("min"),
@@ -534,7 +537,7 @@ pub fn rows(catalog: &Catalog, platform: Platform) -> (Vec<Value>, Option<String
         })
         .collect();
     out.sort_by(|a, b| b.0.total_cmp(&a.0));
-    (out.into_iter().map(|(_, v)| v).collect(), err)
+    out.into_iter().map(|(_, v)| v).collect()
 }
 
 #[cfg(test)]

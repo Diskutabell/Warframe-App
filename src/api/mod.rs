@@ -22,18 +22,19 @@ use axum::response::{IntoResponse, Response};
 use rust_embed::RustEmbed;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
+use tower_http::catch_panic::CatchPanicLayer;
 
 use crate::UserError;
+use crate::app::App;
 use crate::memscan::ScanError;
 use crate::sources::ProfileRefused;
-use crate::state::State;
 
 #[derive(RustEmbed)]
 #[folder = "web/"]
 pub(crate) struct Web;
 
 /// What every handler gets: the engine.
-pub type Engine = Arc<State>;
+pub type Engine = Arc<App>;
 
 /// Default cap for JSON API POST bodies; only inventory/profile file imports allow large payloads.
 pub const MAX_BODY: usize = 1024 * 1024;
@@ -47,7 +48,15 @@ pub async fn serve(listener: tokio::net::TcpListener, engine: Engine, stop: Canc
 }
 
 pub fn router(engine: Engine, stop: CancellationToken) -> Router {
-    routes::api(engine.clone(), stop).fallback(static_file).layer(middleware::from_fn(guard)).with_state(engine)
+    routes::api(engine.clone(), stop)
+        .fallback(static_file)
+        .layer(middleware::from_fn(guard))
+        // A panic in a request (a bug) answers 500 instead of dropping the connection; the panic
+        // itself is printed to the log.
+        .layer(CatchPanicLayer::custom(|_: Box<dyn std::any::Any + Send>| {
+            json_response(StatusCode::INTERNAL_SERVER_ERROR, &json!({"error": BUG}))
+        }))
+        .with_state(engine)
 }
 
 // ------------------------------------------------------------------ requests

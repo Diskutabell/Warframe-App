@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Result, anyhow};
+use anyhow::anyhow;
 use serde_json::{Value, json};
 
 use crate::gamedata::{self, Catalog};
@@ -65,33 +65,32 @@ pub fn parse_tiers(js: &str) -> HashMap<String, String> {
 
 /// Both files, revalidated once a day like the game data (`gamedata::download_file`). Without
 /// them the World page simply has no arbitration card.
-pub fn download(force: bool) -> Schedule {
-    let cache = &config::dirs().cache;
-    let read_schedule = |bytes: &[u8]| -> Result<Vec<(i64, String)>> {
+pub async fn download(force: bool) -> Schedule {
+    let cache = config::dirs().cache.clone();
+    let read_schedule: gamedata::Reader<Vec<(i64, String)>> = std::sync::Arc::new(|bytes: &[u8]| {
         let slots = parse_schedule(&String::from_utf8_lossy(bytes));
         if slots.is_empty() { Err(anyhow!("no arbitration in the schedule")) } else { Ok(slots) }
-    };
-    let mut slots = match gamedata::download_file(SCHEDULE_URL, &cache.join("arbys.txt"), force, read_schedule) {
-        Ok(slots) => slots,
-        Err(e) => {
-            eprintln!("arbitration schedule unavailable: {e:#}");
-            Vec::new()
-        }
-    };
+    });
+    let read_tiers: gamedata::Reader<HashMap<String, String>> = std::sync::Arc::new(|bytes: &[u8]| {
+        let tiers = parse_tiers(&String::from_utf8_lossy(bytes));
+        if tiers.is_empty() { Err(anyhow!("no tier in the tier list")) } else { Ok(tiers) }
+    });
+    let (schedule_path, tiers_path) = (cache.join("arbys.txt"), cache.join("arbyTiers.js"));
+    let (slots, tiers) = tokio::join!(
+        gamedata::download_file(SCHEDULE_URL, &schedule_path, force, read_schedule),
+        gamedata::download_file(TIERS_URL, &tiers_path, force, read_tiers),
+    );
+    let mut slots = slots.unwrap_or_else(|e| {
+        eprintln!("arbitration schedule unavailable: {e:#}");
+        Vec::new()
+    });
     // The file starts in 2024; only what has not ended yet is of use.
     let t = now() as i64;
     slots.retain(|(start, _)| start + HOUR > t);
-    let read_tiers = |bytes: &[u8]| -> Result<HashMap<String, String>> {
-        let tiers = parse_tiers(&String::from_utf8_lossy(bytes));
-        if tiers.is_empty() { Err(anyhow!("no tier in the tier list")) } else { Ok(tiers) }
-    };
-    let tiers = match gamedata::download_file(TIERS_URL, &cache.join("arbyTiers.js"), force, read_tiers) {
-        Ok(tiers) => tiers,
-        Err(e) => {
-            eprintln!("arbitration tiers unavailable: {e:#}");
-            HashMap::new()
-        }
-    };
+    let tiers = tiers.unwrap_or_else(|e| {
+        eprintln!("arbitration tiers unavailable: {e:#}");
+        HashMap::new()
+    });
     Schedule { slots, tiers }
 }
 

@@ -564,7 +564,6 @@ mod tests {
 
     use crate::accounts::Manual;
     use crate::inventory::Entry;
-    use crate::market::Market;
     use crate::sources::{FoundryEntry, Inventory};
 
     const ASH: &str = "/Lotus/Powersuits/Ninja/AshPrime";
@@ -630,10 +629,7 @@ mod tests {
             profile: None,
             inv: inv.map(Arc::new),
             manual: Arc::new(manual),
-            market: Market::new(
-                Arc::new(std::sync::RwLock::new(crate::config::Settings::default())),
-                crate::bus::Bus::new(),
-            ),
+            market: crate::market::Market::for_tests(),
             foundry: HashSet::new(),
         }
     }

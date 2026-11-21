@@ -20,13 +20,21 @@ regex = "1"
 rust-embed = "8"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
-ureq = "3"
+# File change notifications (inotify on Linux, ReadDirectoryChangesW on Windows) for EE.log and
+# a watched inventory file.
+notify = { version = "8", default-features = false }
+# Outgoing HTTPS: reqwest on rustls with ring and the bundled Mozilla roots (no system TLS library,
+# the same on Linux and Windows).
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
 # The engine: async runtime, the loopback HTTP server and its event stream.
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net", "fs", "io-util"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+tower-http = { version = "0.7", default-features = false, features = ["catch-panic"] }
 
 # Linux: the window and overlays are GTK, the page runs in WebKitGTK.
 [target.'cfg(unix)'.dependencies]

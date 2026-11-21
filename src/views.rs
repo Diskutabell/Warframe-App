@@ -1071,10 +1071,7 @@ mod tests {
             profile: None,
             inv: None,
             manual: Arc::new(Manual::default()),
-            market: Market::new(
-                Arc::new(std::sync::RwLock::new(crate::config::Settings::default())),
-                crate::bus::Bus::new(),
-            ),
+            market: crate::market::Market::for_tests(),
             foundry: HashSet::new(),
         };
         let mastery = view.mastery();
@@ -1209,10 +1206,7 @@ mod tests {
             profile: None,
             inv: None,
             manual: Arc::new(Manual::default()),
-            market: Market::new(
-                Arc::new(std::sync::RwLock::new(crate::config::Settings::default())),
-                crate::bus::Bus::new(),
-            ),
+            market: crate::market::Market::for_tests(),
             foundry: HashSet::new(),
         };
         let (self_name, _, _) = view.inventory_entry("/SelfBp");

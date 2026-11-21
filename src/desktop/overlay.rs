@@ -14,12 +14,13 @@ use gtk::{gdk, gdk_pixbuf, gio, glib, pango};
 use gtk_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
 use super::Backend;
+use crate::app::App;
 use crate::compositor::{self, Rect};
 use crate::config::PanelPosition;
 use crate::ocr::reward;
 use crate::ocr::riven as riven_card;
 use crate::rivens::{self, Graded};
-use crate::state::{RewardItem, RewardResult, RivenResult, State};
+use crate::services::scans::{RewardItem, RewardResult, RivenResult};
 
 const CSS: &str = r#"
 window.wfp-overlay { background-color: transparent; }
@@ -243,7 +244,7 @@ fn monitor_at(display: &gdk::Display, x: i32, y: i32) -> Option<gdk::Monitor> {
 
 pub struct Overlays {
     backend: Backend,
-    state: Arc<State>,
+    state: Arc<App>,
     strip: RefCell<Option<Rc<Panel>>>,
     riven: RefCell<Option<Rc<Panel>>>,
     /// The price panels' style, rewritten when the size of the cards changes.
@@ -254,7 +255,7 @@ pub struct Overlays {
 }
 
 impl Overlays {
-    pub fn new(backend: Backend, state: Arc<State>) -> Overlays {
+    pub fn new(backend: Backend, state: Arc<App>) -> Overlays {
         let panel_css = gtk::CssProvider::new();
         let css = gtk::CssProvider::new();
         if css.load_from_data(CSS.as_bytes()).is_ok() {

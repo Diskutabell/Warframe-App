@@ -3,15 +3,19 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
+
+use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::bus::{Bus, Topic};
-use crate::config::{self, Platform, Settings};
+use crate::config::{self, Platform};
+use crate::services::settings::SettingsStore;
 use crate::{net, now};
 
 const API: &str = "https://api.warframe.market/v2";
@@ -74,7 +78,6 @@ struct Queue {
     normal: VecDeque<String>,
     queued_urgent: HashSet<String>,
     queued_normal: HashSet<String>,
-    stopping: bool,
 }
 
 impl Queue {
@@ -121,16 +124,18 @@ struct PriceCache {
 }
 
 pub struct Market {
-    settings: Arc<RwLock<Settings>>,
+    settings: Arc<SettingsStore>,
     /// Fresh prices are announced here, so the pages showing them can redraw.
     bus: Bus,
     items: RwLock<Items>,
     prices: Mutex<PriceCache>,
     save_lock: Mutex<()>,
     riven_weapons: RwLock<Option<(f64, Vec<Value>)>>,
-    riven_weapons_fetch: Mutex<()>,
+    /// One refresh of the riven weapon list at a time.
+    riven_weapons_fetch: tokio::sync::Mutex<()>,
     queue: Mutex<Queue>,
-    wake: Condvar,
+    /// Wakes the worker when a slug is queued.
+    wake: Notify,
     next_slot: Mutex<Instant>,
     dirty: AtomicBool,
     pub error: Mutex<Option<String>>,
@@ -182,6 +187,34 @@ fn price_from_orders(value: &Value, time: f64) -> anyhow::Result<Price> {
     })
 }
 
+/// Indexes warframe.market's item list by slug, name and game reference.
+fn index_items(cached: &Value) -> Items {
+    let mut items = Items::default();
+    for it in cached["data"].as_array().into_iter().flatten() {
+        let Some(slug) = it["slug"].as_str() else { continue };
+        let en = &it["i18n"]["en"];
+        let name = en["name"].as_str().map(str::to_owned);
+        // subIcon is the per-slot glyph (neuroptics, chassis, barrel...). thumb is often the
+        // same picture for every part of a set, so the glyph is what tells them apart.
+        let art = en["subIcon"].as_str().or_else(|| en["thumb"].as_str());
+        items.by_slug.insert(
+            slug.to_string(),
+            MarketItem {
+                name: name.clone(),
+                ducats: it["ducats"].as_i64(),
+                thumb: art.map(|a| format!("{ASSETS}{a}")),
+            },
+        );
+        if let Some(n) = name {
+            items.by_name.insert(n.to_lowercase(), slug.to_string());
+        }
+        if let Some(r) = it["gameRef"].as_str() {
+            items.by_ref.entry(r.to_string()).or_insert_with(|| slug.to_string());
+        }
+    }
+    items
+}
+
 fn reserve_slot(next: &Mutex<Instant>, deadline: Option<Instant>) -> anyhow::Result<Duration> {
     let mut next = next.lock().unwrap_or_else(|e| e.into_inner());
     let now = Instant::now();
@@ -194,33 +227,50 @@ fn reserve_slot(next: &Mutex<Instant>, deadline: Option<Instant>) -> anyhow::Res
 }
 
 impl Market {
-    pub fn new(settings: Arc<RwLock<Settings>>, bus: Bus) -> Arc<Market> {
-        let platform = settings.read().unwrap_or_else(|e| e.into_inner()).platform;
+    /// The market with the prices cached for the current platform. Nothing is fetched until
+    /// `run` works the queue.
+    pub fn new(settings: Arc<SettingsStore>, bus: Bus) -> Arc<Market> {
+        let platform = settings.get().platform;
         let entries = config::read_json(&prices_file(platform)).unwrap_or_default();
-        let market = Arc::new(Market {
+        Arc::new(Market {
             settings,
             bus,
             items: RwLock::new(Items::default()),
             prices: Mutex::new(PriceCache { platform, entries }),
             save_lock: Mutex::new(()),
             riven_weapons: RwLock::new(None),
-            riven_weapons_fetch: Mutex::new(()),
+            riven_weapons_fetch: tokio::sync::Mutex::new(()),
             queue: Mutex::new(Queue::default()),
-            wake: Condvar::new(),
+            wake: Notify::new(),
             next_slot: Mutex::new(Instant::now()),
             dirty: AtomicBool::new(false),
             error: Mutex::new(None),
-        });
-        let worker = Arc::clone(&market);
-        std::thread::Builder::new()
-            .name("market".into())
-            .spawn(move || worker.run())
-            .expect("spawning the market thread");
-        market
+        })
+    }
+
+    /// A market with default settings and nothing cached, for tests of what reads prices.
+    #[cfg(test)]
+    pub fn for_tests() -> Arc<Market> {
+        let bus = Bus::new();
+        let settings = Arc::new(SettingsStore::new(crate::config::Settings::default(), &bus));
+        Arc::new(Market {
+            settings,
+            bus,
+            items: RwLock::new(Items::default()),
+            prices: Mutex::new(PriceCache { platform: Platform::Pc, entries: HashMap::new() }),
+            save_lock: Mutex::new(()),
+            riven_weapons: RwLock::new(None),
+            riven_weapons_fetch: tokio::sync::Mutex::new(()),
+            queue: Mutex::new(Queue::default()),
+            wake: Notify::new(),
+            next_slot: Mutex::new(Instant::now()),
+            dirty: AtomicBool::new(false),
+            error: Mutex::new(None),
+        })
     }
 
     fn platform(&self) -> Platform {
-        self.settings.read().unwrap_or_else(|e| e.into_inner()).platform
+        self.settings.get().platform
     }
 
     /// Switches the in-memory price map when the user changes platforms in Settings.
@@ -247,12 +297,12 @@ impl Market {
         [("Language", "en"), ("Platform", platform.as_str()), ("Crossplay", "true")]
     }
 
-    fn get(&self, path: &str, deadline: Option<Instant>) -> anyhow::Result<Value> {
-        self.get_for(self.platform(), path, deadline)
+    async fn get(&self, path: &str, deadline: Option<Instant>) -> anyhow::Result<Value> {
+        self.get_for(self.platform(), path, deadline).await
     }
 
-    fn get_for(&self, platform: Platform, path: &str, deadline: Option<Instant>) -> anyhow::Result<Value> {
-        self.wait_for_slot(deadline)?;
+    async fn get_for(&self, platform: Platform, path: &str, deadline: Option<Instant>) -> anyhow::Result<Value> {
+        self.wait_for_slot(deadline).await?;
         let headers = Self::headers_for(platform);
         let timeout = match deadline {
             Some(end) => end
@@ -262,38 +312,46 @@ impl Market {
                 .min(Duration::from_secs(20)),
             None => Duration::from_secs(20),
         };
-        net::get_json(&format!("{API}{path}"), &headers, timeout)
+        net::get_json(&format!("{API}{path}"), &headers, timeout).await
     }
 
-    /// Blocks until this caller may send the next request.
-    fn wait_for_slot(&self, deadline: Option<Instant>) -> anyhow::Result<()> {
+    /// Waits until this caller may send the next request.
+    async fn wait_for_slot(&self, deadline: Option<Instant>) -> anyhow::Result<()> {
         let wait = reserve_slot(&self.next_slot, deadline)?;
         if !wait.is_zero() {
-            std::thread::sleep(wait);
+            tokio::time::sleep(wait).await;
         }
         Ok(())
     }
 
     fn set_error(&self, e: Option<String>) {
         let mut error = self.error.lock().unwrap_or_else(|e| e.into_inner());
-        if *error != e {
-            *error = e;
-            // The summary shows the market's error.
+        // The summary shows the market's error. Only a change between working and failing is
+        // worth a fresh summary: while the market is down every failed request has a message of
+        // its own, and pushing each would recompute the summary a few times a second.
+        let flipped = error.is_some() != e.is_some();
+        *error = e;
+        if flipped {
             self.bus.state_changed();
         }
     }
 
     /// The item list (names, ducats, art, game references), refreshed once a day.
-    pub fn load_items(&self) {
-        let mut cached: Option<Value> = config::read_json(&items_file());
+    pub async fn load_items(&self) {
+        let mut cached: Option<Value> =
+            tokio::task::spawn_blocking(|| config::read_json(&items_file())).await.ok().flatten();
         let stale = cached
             .as_ref()
             .is_none_or(|c| !valid_item_list(&c["data"]) || now() - c["t"].as_f64().unwrap_or(0.0) > ITEMS_MAX_AGE);
         if stale {
-            match self.get("/items", None) {
+            match self.get("/items", None).await {
                 Ok(v) if valid_item_list(&v["data"]) => {
                     let fresh = json!({"t": now(), "data": v["data"]});
-                    if let Err(e) = config::write_json(&items_file(), &fresh) {
+                    let saved = {
+                        let fresh = fresh.clone();
+                        tokio::task::spawn_blocking(move || config::write_json(&items_file(), &fresh)).await
+                    };
+                    if let Ok(Err(e)) = saved {
                         eprintln!("could not cache warframe.market item list: {e:#}");
                     }
                     cached = Some(fresh);
@@ -305,33 +363,13 @@ impl Market {
                 Err(e) => self.set_error(Some(format!("warframe.market item list unavailable: {e}"))),
             }
         }
-        if cached.as_ref().is_none_or(|c| !valid_item_list(&c["data"])) {
-            return;
+        let Some(cached) = cached.filter(|c| valid_item_list(&c["data"])) else { return };
+        let items = tokio::task::spawn_blocking(move || index_items(&cached)).await;
+        if let Ok(items) = items {
+            *self.items.write().unwrap_or_else(|e| e.into_inner()) = items;
         }
-        let mut items = Items::default();
-        for it in cached.as_ref().and_then(|c| c["data"].as_array()).into_iter().flatten() {
-            let Some(slug) = it["slug"].as_str() else { continue };
-            let en = &it["i18n"]["en"];
-            let name = en["name"].as_str().map(str::to_owned);
-            // subIcon is the per-slot glyph (neuroptics, chassis, barrel...). thumb is often the
-            // same picture for every part of a set, so the glyph is what tells them apart.
-            let art = en["subIcon"].as_str().or_else(|| en["thumb"].as_str());
-            items.by_slug.insert(
-                slug.to_string(),
-                MarketItem {
-                    name: name.clone(),
-                    ducats: it["ducats"].as_i64(),
-                    thumb: art.map(|a| format!("{ASSETS}{a}")),
-                },
-            );
-            if let Some(n) = name {
-                items.by_name.insert(n.to_lowercase(), slug.to_string());
-            }
-            if let Some(r) = it["gameRef"].as_str() {
-                items.by_ref.entry(r.to_string()).or_insert_with(|| slug.to_string());
-            }
-        }
-        *self.items.write().unwrap_or_else(|e| e.into_inner()) = items;
+        // Pages show names and art from the list.
+        self.bus.signal(Topic::Prices);
     }
 
     pub fn ducats(&self, slug: Option<&str>) -> Option<i64> {
@@ -369,7 +407,7 @@ impl Market {
     }
 
     fn ttl(&self) -> f64 {
-        self.settings.read().unwrap_or_else(|e| e.into_inner()).price_cache_minutes as f64 * 60.0
+        self.settings.get().price_cache_minutes as f64 * 60.0
     }
 
     /// The cached price (lowest online sell order), queueing a refresh when it is stale.
@@ -389,8 +427,8 @@ impl Market {
     }
 
     pub fn request(&self, slug: &str, urgent: bool) {
-        let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
-        if q.push(slug, urgent) {
+        let queued = self.queue.lock().unwrap_or_else(|e| e.into_inner()).push(slug, urgent);
+        if queued {
             self.wake.notify_one();
         }
     }
@@ -402,7 +440,7 @@ impl Market {
 
     /// Prices for a handful of slugs right now (the reward screen), within `timeout`. Anything
     /// fetched in the last 15 minutes is reused.
-    pub fn fetch_now(&self, slugs: &[Option<String>], timeout: Duration) -> HashMap<String, Price> {
+    pub async fn fetch_now(&self, slugs: &[Option<String>], timeout: Duration) -> HashMap<String, Price> {
         let deadline = Instant::now() + timeout;
         let mut out = HashMap::new();
         for slug in slugs.iter().flatten() {
@@ -413,19 +451,19 @@ impl Market {
             if Instant::now() > deadline {
                 break;
             }
-            if let Some(p) = self.fetch(slug, Some(deadline)) {
+            if let Some(p) = self.fetch(slug, Some(deadline)).await {
                 out.insert(slug.clone(), p);
             }
         }
         out
     }
 
-    fn fetch(&self, slug: &str, deadline: Option<Instant>) -> Option<Price> {
+    async fn fetch(&self, slug: &str, deadline: Option<Instant>) -> Option<Price> {
         if !valid_slug(slug) {
             return None;
         }
         let platform = self.ensure_platform();
-        let entry = match self.get_for(platform, &format!("/orders/item/{slug}/top"), deadline) {
+        let entry = match self.get_for(platform, &format!("/orders/item/{slug}/top"), deadline).await {
             Ok(v) => match price_from_orders(&v, now()) {
                 Ok(price) => price,
                 Err(e) => {
@@ -472,48 +510,48 @@ impl Market {
         }
     }
 
-    /// Stops the background worker and flushes any unsaved prices to disk before exit.
-    pub fn shutdown(&self) {
-        {
-            let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
-            q.stopping = true;
-        }
-        self.wake.notify_all();
-        self.save_if_dirty();
+    /// Writes the prices fetched since the last save, on the blocking pool.
+    async fn save_soon(self: &Arc<Self>) {
+        let me = Arc::clone(self);
+        let _ = tokio::task::spawn_blocking(move || me.save_if_dirty()).await;
     }
 
-    fn run(&self) {
+    /// Works the queue (one request per slot of the shared rate limit) until `stop`, saving new
+    /// prices every 10 s and once more at the end.
+    pub async fn run(self: Arc<Self>, stop: CancellationToken) {
         let mut last_save = Instant::now();
         loop {
-            let (slug, stopping) = {
-                let q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
-                let (mut q, _) = self
-                    .wake
-                    .wait_timeout_while(q, Duration::from_secs(5), |q| {
-                        !q.stopping && q.urgent.is_empty() && q.normal.is_empty()
-                    })
-                    .unwrap_or_else(|e| e.into_inner());
-                if q.stopping { (None, true) } else { (q.pop(), false) }
-            };
-            if stopping {
-                self.save_if_dirty();
-                return;
-            }
-            if let Some(slug) = slug {
-                let fresh = self.cached(&slug).is_some_and(|p| now() - p.t <= self.ttl());
-                if !fresh {
-                    self.fetch(&slug, None);
+            let next = self.queue.lock().unwrap_or_else(|e| e.into_inner()).pop();
+            match next {
+                // Offline nothing can be fetched: the cached prices are all there is.
+                Some(_) if net::offline() => {}
+                Some(slug) => {
+                    let fresh = self.cached(&slug).is_some_and(|p| now() - p.t <= self.ttl());
+                    if !fresh {
+                        tokio::select! {
+                            _ = stop.cancelled() => break,
+                            _ = self.fetch(&slug, None) => {}
+                        }
+                    }
+                }
+                None => {
+                    tokio::select! {
+                        _ = stop.cancelled() => break,
+                        _ = self.wake.notified() => {}
+                        _ = tokio::time::sleep(Duration::from_secs(10)) => {}
+                    }
                 }
             }
             if last_save.elapsed() > Duration::from_secs(10) {
-                self.save_if_dirty();
+                self.save_soon().await;
                 last_save = Instant::now();
             }
         }
+        self.save_soon().await;
     }
 
     /// The site's slug for a weapon's rivens, by the weapon's uniqueName, else its name.
-    fn riven_weapon_slug(&self, uid: &str, name: &str) -> Option<String> {
+    async fn riven_weapon_slug(&self, uid: &str, name: &str) -> Option<String> {
         let find_in = |weapons: &[Value]| {
             let by = |f: &dyn Fn(&Value) -> bool| weapons.iter().find(|w| f(w)).and_then(|w| w["slug"].as_str());
             by(&|w| w["gameRef"].as_str() == Some(uid))
@@ -525,25 +563,34 @@ impl Market {
                 return find_in(weapons);
             }
         }
-        let _refresh = self.riven_weapons_fetch.lock().unwrap_or_else(|e| e.into_inner());
+        let _refresh = self.riven_weapons_fetch.lock().await;
         if let Some((t, weapons)) = self.riven_weapons.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
             if !weapons.is_empty() && now() - *t < RIVEN_WEAPONS_MAX_AGE {
                 return find_in(weapons);
             }
         }
         let file = config::dirs().cache.join("wfm_riven_weapons.json");
-        let mut cached = self.riven_weapons.read().unwrap_or_else(|e| e.into_inner()).clone().or_else(|| {
-            let raw: Value = config::read_json(&file)?;
-            let weapons = raw["data"].as_array()?.clone();
-            Some((raw["t"].as_f64().unwrap_or(0.0), weapons))
-        });
+        let in_memory = self.riven_weapons.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let mut cached = match in_memory {
+            Some(found) => Some(found),
+            None => {
+                let file = file.clone();
+                let read = move || -> Option<(f64, Vec<Value>)> {
+                    let raw: Value = config::read_json(&file)?;
+                    let weapons = raw["data"].as_array()?.clone();
+                    Some((raw["t"].as_f64().unwrap_or(0.0), weapons))
+                };
+                tokio::task::spawn_blocking(read).await.ok().flatten()
+            }
+        };
         let fresh = cached.as_ref().is_some_and(|(t, w)| !w.is_empty() && now() - *t < RIVEN_WEAPONS_MAX_AGE);
         if !fresh {
-            match self.get("/riven/weapons", None) {
+            match self.get("/riven/weapons", None).await {
                 Ok(v) if v["data"].as_array().is_some_and(|a| !a.is_empty()) => {
                     let fetched = now();
-                    let weapons = v["data"].as_array().unwrap().clone();
-                    let _ = config::write_json(&file, &json!({"t": fetched, "data": weapons}));
+                    let weapons = v["data"].as_array().cloned().unwrap_or_default();
+                    let saved = json!({"t": fetched, "data": weapons});
+                    let _ = tokio::task::spawn_blocking(move || config::write_json(&file, &saved)).await;
                     cached = Some((fetched, weapons));
                 }
                 Ok(_) => eprintln!("warframe.market sent no riven weapons"),
@@ -559,22 +606,24 @@ impl Market {
 
     /// Rivens for the same weapon with at least these positives (warframe.market's attribute
     /// slugs), sold at a fixed price. One search per riven read, through the shared rate limit.
-    pub fn riven_listings(&self, uid: &str, name: &str, positives: &[&str]) -> anyhow::Result<RivenListings> {
+    pub async fn riven_listings(&self, uid: &str, name: &str, positives: &[&str]) -> anyhow::Result<RivenListings> {
         let weapon = self
             .riven_weapon_slug(uid, name)
+            .await
             .ok_or_else(|| anyhow::anyhow!("warframe.market lists no rivens for {name}"))?;
         if !valid_slug(&weapon) || !positives.iter().all(|s| valid_slug(s)) {
             anyhow::bail!("warframe.market riven query contained an invalid slug");
         }
         let stats = positives.join(",");
         let query = format!("type=riven&weapon_url_name={weapon}&positive_stats={stats}&sort_by=price_asc");
-        self.wait_for_slot(None)?;
+        self.wait_for_slot(None).await?;
         let headers = Self::headers_for(self.platform());
         let found = net::get_json(
             &format!("{API_V1}/auctions/search?{query}&buyout_policy=direct"),
             &headers,
             Duration::from_secs(20),
-        )?;
+        )
+        .await?;
         let auctions = found["payload"]["auctions"].as_array().cloned().unwrap_or_default();
         let live = |a: &&Value| a["visible"].as_bool() != Some(false) && a["closed"].as_bool() != Some(true);
         let price = |a: &Value| a["buyout_price"].as_i64().filter(|p| *p > 0);

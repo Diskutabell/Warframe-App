@@ -8,6 +8,7 @@
 
 mod accounts;
 mod api;
+mod app;
 mod arbitration;
 mod art;
 mod bus;
@@ -27,13 +28,14 @@ mod ocr;
 mod process;
 mod relics;
 mod rivens;
+mod services;
 mod sources;
 mod standing;
-mod state;
 mod tasks;
 mod tray_icon;
 mod update;
 mod views;
+mod watch;
 mod world;
 
 // The parts that talk to the desktop differ per system. On Windows the same module names load
@@ -163,16 +165,9 @@ fn main() -> ExitCode {
     }
 }
 
+/// Calls the running app's own API (`trigger`, `quit`, the single-instance check).
 fn local(port: u16, path: &str, post: bool, timeout: Duration) -> Result<Value> {
-    let url = format!("http://127.0.0.1:{port}/api/{path}");
-    let agent: ureq::Agent =
-        ureq::Agent::config_builder().timeout_global(Some(timeout)).http_status_as_error(false).build().into();
-    let mut resp = if post {
-        agent.post(&url).header("Content-Type", "application/json").send("{}")?
-    } else {
-        agent.get(&url).call()?
-    };
-    Ok(serde_json::from_slice(&resp.body_mut().read_to_vec()?)?)
+    net::local::call(port, path, post, timeout)
 }
 
 fn running(port: u16) -> bool {
@@ -208,21 +203,22 @@ fn run(settings: config::Settings, browser: bool, headless: bool, offline: bool)
             config::settings_file().display()
         ))
     })?;
-    // The engine's background tasks are spawned onto the runtime from here on.
+    // The engine's background tasks are spawned onto the runtime from here on, also from the
+    // desktop shell's callbacks on this thread.
     let _runtime = runtime.enter();
-    let state = state::State::new(settings);
+    let state = app::App::new(settings);
     state.start();
     let server = runtime.spawn(api::serve(listener, Arc::clone(&state), state.stop.clone()));
     runtime.spawn(quit_on_signal(Arc::clone(&state)));
     #[cfg(windows)]
     {
         if let Err(e) = state.install_hotkeys() {
-            state.event(&format!("Hotkeys not registered: {e}"), "warn");
+            state.accounts.event(&format!("Hotkeys not registered: {e}"), "warn");
         }
         let me = Arc::clone(&state);
         std::thread::Builder::new().name("unpack-ocr".into()).spawn(move || {
             if let Err(e) = compositor::unpack_tesseract() {
-                me.event(&format!("The built-in OCR could not be unpacked: {e:#}"), "warn");
+                me.accounts.event(&format!("The built-in OCR could not be unpacked: {e:#}"), "warn");
             }
         })?;
     }
@@ -250,15 +246,15 @@ fn run(settings: config::Settings, browser: bool, headless: bool, offline: bool)
         if tokio::time::timeout(SHUTDOWN_GRACE, server).await.is_err() {
             eprintln!("the server did not stop in time; quitting anyway");
         }
+        state.shutdown(SHUTDOWN_GRACE).await;
     });
-    state.shutdown();
     drop(_runtime);
     runtime.shutdown_timeout(Duration::from_secs(1));
     result
 }
 
 /// Ctrl+C in the terminal, or SIGTERM from the system, quits like the window's Quit button.
-async fn quit_on_signal(state: Arc<state::State>) {
+async fn quit_on_signal(state: Arc<app::App>) {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
@@ -328,7 +324,9 @@ fn riven(port: u16) -> Result<()> {
 fn replay(frames: &[PathBuf], riven: bool, scale: Option<f64>) -> Result<()> {
     #[cfg(windows)]
     compositor::unpack_tesseract()?;
-    let catalog = gamedata::load(false).context("the game data is needed to know what to look for")?;
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let catalog =
+        runtime.block_on(gamedata::load(false)).context("the game data is needed to know what to look for")?;
     // The scale the frames were taken at: as given, else the game's own now, else any.
     let scales: Vec<f64> = match scale {
         Some(percent) => vec![percent / 100.0],

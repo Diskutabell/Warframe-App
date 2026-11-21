@@ -57,11 +57,7 @@ pub async fn serve(State(_engine): State<Engine>, q: Query) -> Response {
     let Ok(_slot) = SLOTS.acquire().await else {
         return text(StatusCode::INTERNAL_SERVER_ERROR, "art worker unavailable");
     };
-    match tokio::task::spawn_blocking(move || art::get(&url, size)).await {
-        Ok(found) => answer(found),
-        // A panic in the download or the scaling: a bug, but only this picture is lost.
-        Err(_) => text(StatusCode::NOT_FOUND, ""),
-    }
+    answer(art::get(&url, size).await)
 }
 
 /// A scaled image never changes, so the page may keep it for a day. A miss is a plain 404 and the

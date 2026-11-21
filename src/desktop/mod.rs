@@ -16,9 +16,10 @@ use webkit2gtk::{
     URIRequestExt, WebContext, WebView, WebViewExt,
 };
 
+use crate::app::App;
 use crate::compositor;
 use crate::config::{OverlayBackend, Settings};
-use crate::state::{State, UiEvent};
+use crate::services::shell::UiEvent;
 
 /// How the overlays stay above the game.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,7 +122,7 @@ fn hide_main_window(window: &gtk::Window, tray: &RefCell<tray::Tray>) {
 }
 
 /// Runs the GTK main loop until the main window closes.
-pub fn run(state: Arc<State>, url: &str, backend: Backend) -> Result<()> {
+pub fn run(state: Arc<App>, url: &str, backend: Backend) -> Result<()> {
     glib::set_prgname(Some("warframeproject"));
     glib::set_application_name("warframeproject");
     // Before GTK starts: Pango builds its font list once, and fonts added later are not in it.

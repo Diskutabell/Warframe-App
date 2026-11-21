@@ -28,7 +28,7 @@ pub async fn stream(
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     // Subscribe before computing the first summary: a change made meanwhile is then sent too,
     // never lost between the two.
-    let rx = engine.bus.subscribe();
+    let rx = engine.events().subscribe();
     let summary = {
         let engine = engine.clone();
         tokio::task::spawn_blocking(move || engine.summary()).await.ok()

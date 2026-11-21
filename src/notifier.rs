@@ -57,12 +57,14 @@ pub struct Notifier {
 pub type Build = (String, String, f64);
 
 impl Notifier {
-    pub fn fissures(&mut self, platform: crate::config::Platform, watch: &[String]) {
+    /// Announces watched fissures that opened since the last look. `raw` is the worldstate;
+    /// `err` says the copy is stale (then fissures it lacks are not forgotten yet).
+    pub fn fissures(&mut self, raw: Option<&serde_json::Value>, err: Option<&str>, watch: &[String]) {
         if watch.is_empty() {
             return;
         }
-        let (fissures, err) = world::fissures(platform);
-        if err.is_none() {
+        let fissures = world::fissures(raw);
+        if err.is_none() && raw.is_some() {
             let active: HashSet<&str> = fissures.iter().filter_map(|f| f["id"].as_str()).collect();
             self.fissures.retain(|id| active.contains(id.as_str()));
         }

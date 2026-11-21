@@ -204,12 +204,13 @@ pub fn valid_account_id(id: &str) -> bool {
 
 /// Fetches the public profile. The caller enforces the cooldown: DE temporarily IP-blocks game
 /// login for clients that query profiles too often.
-pub fn fetch_profile(account_id: &str, platform: Platform) -> Result<Profile> {
+pub async fn fetch_profile(account_id: &str, platform: Platform) -> Result<Profile> {
     if !valid_account_id(account_id) {
         return Err(UserError::new("The account id is not valid. Check it in Settings.").into());
     }
     let url = format!("{}/cdn/getProfileViewingData.php?playerId={account_id}", profile_host(platform));
     let resp = net::get(&url, &[("Accept", "application/json")], Duration::from_secs(20))
+        .await
         .map_err(|e| UserError::new(format!("Could not reach DE's profile service: {e}")))?;
     let refused = ProfileRefused::new;
     match resp.status {

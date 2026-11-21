@@ -2,144 +2,27 @@
 //! open-world cycles, Baro Ki'Teer, sortie, archon hunt, Steel Path, Nightwave, Darvo, the
 //! Circuit and Archimedea; with what Duviri offers the account, from its log (`eelog.rs`).
 
-use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
-
 use serde_json::{Value, json};
 
 use crate::clock;
-use crate::config::Platform;
 use crate::eelog::DuviriOffers;
 use crate::gamedata::{self, Catalog};
+use crate::now;
 use crate::views::View;
-use crate::{net, now};
 
-const API: &str = "https://api.warframestat.us/{platform}?language=en";
-const MAX_AGE: f64 = 60.0;
-const ERROR_RETRY_AFTER: f64 = 15.0;
-
-struct Cache {
-    t: f64,
-    platform: Option<Platform>,
-    raw: Option<Arc<Value>>,
-    error: Option<String>,
-    in_flight: Option<Platform>,
-}
-
-struct WorldCache {
-    state: Mutex<Cache>,
-    done: Condvar,
-}
-
-impl WorldCache {
-    const fn new() -> WorldCache {
-        WorldCache {
-            state: Mutex::new(Cache { t: f64::NEG_INFINITY, platform: None, raw: None, error: None, in_flight: None }),
-            done: Condvar::new(),
-        }
-    }
-
-    fn get(
-        &self,
-        platform: Platform,
-        fetch: impl FnOnce(Platform) -> anyhow::Result<Value>,
-    ) -> (Option<Arc<Value>>, Option<String>) {
-        {
-            let mut c = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            while c.in_flight == Some(platform) {
-                c = self.done.wait(c).unwrap_or_else(|e| e.into_inner());
-            }
-            let fresh = now() - c.t < MAX_AGE && c.platform == Some(platform);
-            if fresh {
-                return (c.raw.clone(), c.error.clone());
-            }
-            if c.platform != Some(platform) {
-                // Another platform's world is no stand-in.
-                c.raw = None;
-                c.error = None;
-            }
-            c.platform = Some(platform);
-            c.in_flight = Some(platform);
-        }
-        // Guarantees waiting threads are woken even if `fetch` unwinds on a panic.
-        struct FlightGuard<'a> {
-            cache: &'a WorldCache,
-            platform: Platform,
-            armed: bool,
-        }
-        impl Drop for FlightGuard<'_> {
-            fn drop(&mut self) {
-                if self.armed {
-                    let mut c = self.cache.state.lock().unwrap_or_else(|e| e.into_inner());
-                    if c.in_flight == Some(self.platform) {
-                        c.in_flight = None;
-                    }
-                    self.cache.done.notify_all();
-                }
-            }
-        }
-        let mut guard = FlightGuard { cache: self, platform, armed: true };
-        let fetched = fetch(platform);
-        let mut c = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        guard.armed = false;
-        if c.in_flight == Some(platform) {
-            c.in_flight = None;
-        }
-        let result = if c.platform == Some(platform) {
-            match fetched {
-                Ok(raw) => {
-                    c.raw = Some(Arc::new(raw));
-                    c.error = None;
-                    c.t = now();
-                }
-                Err(e) => {
-                    c.error = Some(format!("World state unavailable: {e}"));
-                    // Short backoff on failure so a transient outage recovers soon without spinning.
-                    c.t = now() - (MAX_AGE - ERROR_RETRY_AFTER).max(0.0);
-                }
-            }
-            (c.raw.clone(), c.error.clone())
-        } else {
-            // The platform changed while this fetch was in flight: return what we fetched for our
-            // caller without overwriting the newly selected platform's cache.
-            match fetched {
-                Ok(raw) => (Some(Arc::new(raw)), None),
-                Err(e) => (None, Some(format!("World state unavailable: {e}"))),
-            }
-        };
-        self.done.notify_all();
-        result
-    }
-}
-
-static CACHE: WorldCache = WorldCache::new();
-
-/// The whole worldstate, fetched at most once a minute. A failed fetch keeps the last good copy.
-///
-/// The fetch runs with the cache unlocked, while concurrent callers for the same platform wait on
-/// the condition variable instead of observing an empty in-flight cache.
-fn worldstate(platform: Platform) -> (Option<Arc<Value>>, Option<String>) {
-    CACHE.get(platform, |p| net::get_json(&API.replace("{platform}", p.as_str()), &[], Duration::from_secs(20)))
-}
-
-/// The worldstate as the cache holds it (fetched when older than a minute). The `Arc` changes
-/// with every fetch, which is how a fresh one is told from the same one.
-pub fn raw(platform: Platform) -> (Option<Arc<Value>>, Option<String>) {
-    worldstate(platform)
-}
+/// The worldstate of a platform: `{platform}` is `Platform::as_str`.
+pub const API: &str = "https://api.warframestat.us/{platform}?language=en";
 
 /// The syndicate tag of the running Nightwave season, as the profile names it: the API spaces it
 /// out ("Radio Legion Intermission16 Syndicate" for "RadioLegionIntermission16Syndicate").
-pub fn nightwave_tag(platform: Platform) -> Option<String> {
-    let (raw, _) = worldstate(platform);
-    let tag: String = raw.as_deref()?["nightwave"]["tag"].as_str()?.chars().filter(|c| !c.is_whitespace()).collect();
+pub fn nightwave_tag(raw: &Value) -> Option<String> {
+    let tag: String = raw["nightwave"]["tag"].as_str()?.chars().filter(|c| !c.is_whitespace()).collect();
     (!tag.is_empty()).then_some(tag)
 }
 
 /// When the running Duviri spiral began. Duviri's loadout picks are rolled anew with each one.
-pub fn spiral_began(platform: Platform) -> Option<f64> {
-    let (raw, _) = worldstate(platform);
-    raw.as_deref()?["duviriCycle"]["activation"].as_str().and_then(clock::parse_iso)
+pub fn spiral_began(raw: &Value) -> Option<f64> {
+    raw["duviriCycle"]["activation"].as_str().and_then(clock::parse_iso)
 }
 
 /// The game's equipment slots in the order the page lists them.
@@ -170,10 +53,8 @@ pub fn duviri_picks(view: &View, offers: &DuviriOffers, spiral_began: Option<f64
 }
 
 /// The fissures open right now, normal ones first, then by tier and expiry.
-pub fn fissures(platform: Platform) -> (Vec<Value>, Option<String>) {
-    let (raw, err) = worldstate(platform);
+pub fn fissures(raw: Option<&Value>) -> Vec<Value> {
     let mut data: Vec<Value> = raw
-        .as_deref()
         .and_then(|r| r["fissures"].as_array())
         .into_iter()
         .flatten()
@@ -196,7 +77,7 @@ pub fn fissures(platform: Platform) -> (Vec<Value>, Option<String>) {
         };
         key(a).cmp(&key(b))
     });
-    (data, err)
+    data
 }
 
 /// The key a fissure is watched by: tier, mission and kind ("normal", "steel" or "storm").
@@ -294,9 +175,9 @@ fn archimedea(a: &Value) -> Value {
     json!({"name": name, "expiry": a["expiry"], "missions": missions, "modifiers": modifiers})
 }
 
-/// Everything the world panel shows.
-pub fn summary(platform: Platform) -> Value {
-    let (raw, err) = worldstate(platform);
+/// Everything the world panel shows, from the worldstate `raw` (None when there is none, with
+/// `err` saying why).
+pub fn summary(raw: Option<&Value>, err: Option<String>) -> Value {
     let Some(raw) = raw else {
         return json!({"error": err});
     };
@@ -323,7 +204,7 @@ pub fn summary(platform: Platform) -> Value {
     json!({
         "fetched": raw["timestamp"],
         "cycles": cycles,
-        "baro": baro(&raw),
+        "baro": baro(raw),
         "sortie": {"boss": sortie["boss"], "faction": sortie["faction"], "expiry": sortie["expiry"],
                    "missions": sortie["variants"].as_array().into_iter().flatten()
                        .map(|m| json!({"type": m["missionType"], "node": m["node"], "modifier": m["modifier"]}))
@@ -461,7 +342,7 @@ mod tests {
     fn duviri_picks_are_named_and_grouped_by_slot() {
         use crate::eelog::{DuviriOffers, DuviriPick};
         use std::collections::HashSet;
-        use std::sync::{Arc, RwLock};
+        use std::sync::Arc;
         let cat = gamedata::build(&indexmap::IndexMap::from([
             (
                 "Warframes".to_string(),
@@ -474,10 +355,7 @@ mod tests {
             profile: None,
             inv: None,
             manual: Arc::new(crate::accounts::Manual::default()),
-            market: crate::market::Market::new(
-                Arc::new(RwLock::new(crate::config::Settings::default())),
-                crate::bus::Bus::new(),
-            ),
+            market: crate::market::Market::for_tests(),
             foundry: HashSet::new(),
         };
         let pick = |uid: &str, category, owned| DuviriPick { uid: uid.into(), category, owned };
@@ -551,54 +429,5 @@ mod tests {
         assert_eq!(baro(&here)["active"], true);
         let later = json!({"voidTrader": {"activation": future, "expiry": future}});
         assert_eq!(baro(&later)["active"], false);
-    }
-
-    #[test]
-    fn concurrent_cold_fetches_wait_and_platform_switch_does_not_clobber() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let cache = Arc::new(WorldCache::new());
-        let calls = Arc::new(AtomicUsize::new(0));
-        let results: Vec<_> = std::thread::scope(|s| {
-            let handles: Vec<_> = (0..4)
-                .map(|_| {
-                    let cache = Arc::clone(&cache);
-                    let calls = Arc::clone(&calls);
-                    s.spawn(move || {
-                        cache.get(Platform::Pc, |_| {
-                            calls.fetch_add(1, Ordering::SeqCst);
-                            std::thread::sleep(Duration::from_millis(40));
-                            Ok(json!({"platform": "pc"}))
-                        })
-                    })
-                })
-                .collect();
-            handles.into_iter().map(|h| h.join().unwrap()).collect()
-        });
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "only one fetch runs for concurrent cold callers");
-        for (raw, err) in results {
-            assert!(err.is_none());
-            assert_eq!(raw.unwrap()["platform"], "pc");
-        }
-
-        // Switching platforms mid-fetch: the slower old platform fetch must not clobber the new one.
-        let cache = Arc::new(WorldCache::new());
-        let (started_tx, started_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let c1 = Arc::clone(&cache);
-        let t1 = std::thread::spawn(move || {
-            c1.get(Platform::Pc, |_| {
-                let _ = started_tx.send(());
-                let _ = release_rx.recv();
-                Ok(json!({"platform": "pc"}))
-            })
-        });
-        started_rx.recv().unwrap();
-        let (ps4, _) = cache.get(Platform::Ps4, |_| Ok(json!({"platform": "ps4"})));
-        assert_eq!(ps4.unwrap()["platform"], "ps4");
-        let _ = release_tx.send(());
-        let (pc_ret, _) = t1.join().unwrap();
-        assert_eq!(pc_ret.unwrap()["platform"], "pc");
-        let (cached_ps4, _) = cache.get(Platform::Ps4, |_| panic!("ps4 should still be cached"));
-        assert_eq!(cached_ps4.unwrap()["platform"], "ps4");
     }
 }

@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 
+use crate::watch::Wakeups;
 use crate::{clock, now};
 
 #[cfg(unix)]
@@ -518,6 +520,8 @@ pub enum LogEvent {
     Sync,
     /// The log as it was when the watcher found it has been read back.
     Replayed,
+    /// The game writes to its log again after a quiet spell (or for the first time): it runs.
+    Active,
 }
 
 /// What the UI shows about the log.
@@ -584,6 +588,21 @@ impl LineBuffer {
 type PathGetter = Box<dyn Fn() -> Option<PathBuf> + Send>;
 type Handler = Box<dyn Fn(LogEvent) + Send>;
 
+/// With the system's file notifications, the log is also looked at this often on its own, in
+/// case a notification was missed. Windows reports writes to a file another program holds open
+/// late or not at all, so it looks often there.
+#[cfg(unix)]
+const LOOK_WATCHED: Duration = Duration::from_secs(2);
+#[cfg(windows)]
+const LOOK_WATCHED: Duration = Duration::from_millis(250);
+/// Without notifications the log is looked at this often: the reward screen is read the moment
+/// its cards are up and its prices hidden the moment it closes. A look is one stat call.
+const LOOK_POLLED: Duration = Duration::from_millis(100);
+/// After a notification, the rest of a burst of writes is waited for this long.
+const SETTLE: Duration = Duration::from_millis(30);
+/// No log yet: look for one this often.
+const LOOK_MISSING: Duration = Duration::from_secs(5);
+
 pub struct LogWatcher {
     path_of: PathGetter,
     emit: Handler,
@@ -594,7 +613,9 @@ pub struct LogWatcher {
 }
 
 impl LogWatcher {
-    pub fn spawn(path_of: PathGetter, emit: Handler) -> Arc<Mutex<LogStatus>> {
+    /// Follows the log on a thread of its own until `stop` is cancelled. `path_of` says where the
+    /// log is (asked again whenever it is missing); `emit` gets what its lines mean, in order.
+    pub fn spawn(path_of: PathGetter, emit: Handler, stop: CancellationToken) -> Arc<Mutex<LogStatus>> {
         let status = Arc::new(Mutex::new(LogStatus::default()));
         let mut watcher = LogWatcher {
             path_of,
@@ -604,7 +625,7 @@ impl LogWatcher {
             reward_active: false,
             duviri: DuviriRoll::default(),
         };
-        std::thread::Builder::new().name("eelog".into()).spawn(move || watcher.run()).expect("spawning eelog");
+        std::thread::Builder::new().name("eelog".into()).spawn(move || watcher.run(&stop)).expect("spawning eelog");
         status
     }
 
@@ -612,22 +633,26 @@ impl LogWatcher {
         self.status.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn run(&mut self) {
+    fn run(&mut self, stop: &CancellationToken) {
         let mut current: Option<PathBuf> = None;
+        let mut wakeups: Option<Wakeups> = None;
         let (mut pos, mut inode) = (0u64, 0u64);
         let mut lines = LineBuffer::default();
-        loop {
+        while !stop.is_cancelled() {
             let path = (self.path_of)().filter(|p| p.is_file());
             let Some(path) = path else {
                 current = None;
+                wakeups = None;
                 self.status().path = None;
-                std::thread::sleep(Duration::from_secs(5));
+                std::thread::sleep(LOOK_MISSING);
                 continue;
             };
             if current.as_ref() != Some(&path) {
                 self.reward_active = false;
                 self.duviri = DuviriRoll::default();
                 self.status().path = Some(path.clone());
+                // Before reading back: a line written meanwhile then wakes the first wait.
+                wakeups = Some(Wakeups::new(&path));
                 let meta = fs::metadata(&path).ok();
                 pos = meta.as_ref().map_or(0, |m| m.len());
                 inode = meta.as_ref().map_or(0, file_id);
@@ -645,7 +670,15 @@ impl LogWatcher {
                     self.duviri = DuviriRoll::default();
                 }
                 if meta.len() > pos {
-                    self.status().last_activity = now();
+                    let woke = {
+                        let mut status = self.status();
+                        let was_active = status.game_active();
+                        status.last_activity = now();
+                        !was_active
+                    };
+                    if woke {
+                        (self.emit)(LogEvent::Active);
+                    }
                     let mut chunk = Vec::new();
                     if let Ok(mut f) = fs::File::open(&path) {
                         if f.seek(SeekFrom::Start(pos)).is_ok() {
@@ -658,9 +691,13 @@ impl LogWatcher {
                     }
                 }
             }
-            // The reward screen is read the moment its cards are up and its prices hidden the
-            // moment it closes, so the log is looked at often; a look is one stat call.
-            std::thread::sleep(Duration::from_millis(100));
+            // Until the game writes again (or the next look of our own).
+            match &wakeups {
+                Some(w) if w.watching() => {
+                    w.wait(LOOK_WATCHED, SETTLE);
+                }
+                _ => std::thread::sleep(LOOK_POLLED),
+            }
         }
     }
 

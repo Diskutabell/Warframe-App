@@ -43,8 +43,8 @@ pub fn is_newer(latest: &str, running: &str) -> bool {
 
 /// The latest release, when it is newer than this build: `{version, current, name, url, notes,
 /// published}`. `Ok(None)` when this build is up to date.
-pub fn check() -> Result<Option<Value>> {
-    let release = net::get_json(LATEST, &[], Duration::from_secs(20))?;
+pub async fn check() -> Result<Option<Value>> {
+    let release = net::get_json(LATEST, &[], Duration::from_secs(20)).await?;
     Ok(newer_release(&release, env!("CARGO_PKG_VERSION")))
 }
 

@@ -22,23 +22,23 @@ type Import = JsonBody<MAX_IMPORT_BODY>;
 pub fn api(engine: Engine, stop: CancellationToken) -> Router<Engine> {
     // What needs the game data: while it is still downloading, these say so instead.
     let catalog = Router::new()
-        .route("/api/mastery", get(|s: State<Engine>| view(s, |e| Ok(e.view().mastery()))))
-        .route("/api/primes", get(|s: State<Engine>| view(s, |e| Ok(e.view().primes()))))
-        .route("/api/inventory", get(|s: State<Engine>| view(s, |e| Ok(e.view().inventory()))))
+        .route("/api/mastery", get(|s: State<Engine>| view(s, |e| Ok(e.accounts.view().mastery()))))
+        .route("/api/primes", get(|s: State<Engine>| view(s, |e| Ok(e.accounts.view().primes()))))
+        .route("/api/inventory", get(|s: State<Engine>| view(s, |e| Ok(e.accounts.view().inventory()))))
         .route("/api/foundry", get(|s: State<Engine>| view(s, |e| Ok(foundry(e)))))
         .route("/api/relics", get(relics))
         .route("/api/trade", get(|s: State<Engine>| view(s, |e| Ok(e.trade()))))
         .route("/api/find", get(find))
         .route("/api/find-task", get(find_task))
-        .route("/api/tasks", get(|s: State<Engine>| view(s, |e| Ok(e.tasks()))))
+        .route("/api/tasks", get(|s: State<Engine>| view(s, |e| Ok(crate::tasks::board(&e.accounts.view())))))
         .route("/api/task", get(task))
         .route("/api/item", get(item))
         .route("/api/history", get(|s: State<Engine>| view(s, |e| Ok(e.history()))))
         .route("/api/hotkeys", get(|s: State<Engine>| view(s, |e| Ok(e.hotkeys()))))
         .route("/api/riven", get(riven_table))
-        .route("/api/rivens", get(|s: State<Engine>| view(s, |e| Ok(e.rivens()))))
-        .route("/api/fissures", get(|s: State<Engine>| view(s, |e| Ok(e.fissures()))))
-        .route("/api/standing", get(|s: State<Engine>| view(s, |e| Ok(e.standing()))))
+        .route("/api/rivens", get(|State(e): State<Engine>| async move { answer(e.rivens().await) }))
+        .route("/api/fissures", get(|State(e): State<Engine>| async move { answer(e.fissures().await) }))
+        .route("/api/standing", get(|State(e): State<Engine>| async move { answer(e.standing().await) }))
         .route("/api/syndicate", get(syndicate))
         .route("/api/search", get(search))
         .route_layer(middleware::from_fn_with_state(engine, loading_guard));
@@ -48,42 +48,45 @@ pub fn api(engine: Engine, stop: CancellationToken) -> Router<Engine> {
         .merge(catalog)
         .route("/api/state", get(|s: State<Engine>| view(s, |e| Ok(e.summary()))))
         .route("/api/settings", get(|s: State<Engine>| view(s, |e| Ok(serde_json::to_value(e.settings())?))))
-        .route("/api/world", get(|s: State<Engine>| view(s, |e| Ok(e.world()))))
+        .route("/api/world", get(|State(e): State<Engine>| async move { answer(e.world_view().await) }))
         .route("/api/rewards", get(|s: State<Engine>| view(s, |e| Ok(result_json(e.rewards())))))
         .route("/api/riven/result", get(|s: State<Engine>| view(s, |e| Ok(result_json(e.riven())))))
         .route("/api/art", get(super::art::serve))
         .route("/api/events", get(move |s: State<Engine>| super::events::stream(s, events_stop.clone())))
         // Changes.
-        .route("/api/settings", post(|s: State<Engine>, JsonBody(b): Body| change(s, move |e| e.update_settings(&b))))
+        .route(
+            "/api/settings",
+            post(|State(e): State<Engine>, JsonBody(b): Body| async move { done(e.update_settings(b).await) }),
+        )
         .route("/api/account/set", post(account_set))
         .route(
             "/api/account/switch",
             post(|s: State<Engine>, JsonBody(b): Body| {
-                change(s, move |e| e.switch_account(b["key"].as_str().unwrap_or("")))
+                change(s, move |e| e.accounts.switch_account(b["key"].as_str().unwrap_or("")))
             }),
         )
         .route(
             "/api/account/forget",
             post(|s: State<Engine>, JsonBody(b): Body| {
-                change(s, move |e| e.forget_account(b["key"].as_str().unwrap_or("")))
+                change(s, move |e| e.accounts.forget_account(b["key"].as_str().unwrap_or("")))
             }),
         )
         .route("/api/profile/refresh", post(profile_refresh))
         .route(
             "/api/profile/import",
-            post(|s: State<Engine>, JsonBody(b): Import| change(s, move |e| e.import_profile(&b))),
+            post(|s: State<Engine>, JsonBody(b): Import| change(s, move |e| e.accounts.import_profile(&b))),
         )
         .route(
             "/api/inventory/import",
             post(|s: State<Engine>, JsonBody(b): Import| {
-                change(s, move |e| e.import_inventory(&b, "imported file").map(|_| ()))
+                change(s, move |e| e.accounts.import_inventory(&b, "imported file").map(|_| ()))
             }),
         )
         .route(
             "/api/inventory/clear",
             post(|s: State<Engine>, _: Body| {
                 change(s, |e| {
-                    e.clear_inventory();
+                    e.accounts.clear_inventory();
                     Ok(())
                 })
             }),
@@ -91,33 +94,37 @@ pub fn api(engine: Engine, stop: CancellationToken) -> Router<Engine> {
         .route(
             "/api/manual/count",
             post(|s: State<Engine>, JsonBody(b): Body| {
-                change(s, move |e| e.set_manual_count(&uid(&b)?, b["count"].as_f64().map(|c| c as i64)))
+                change(s, move |e| e.accounts.set_manual_count(&uid(&b)?, b["count"].as_f64().map(|c| c as i64)))
             }),
         )
         .route(
             "/api/manual/pin",
             post(|s: State<Engine>, JsonBody(b): Body| {
-                change(s, move |e| e.set_pinned(&uid(&b)?, b["pinned"].as_bool().unwrap_or(false)))
+                change(s, move |e| e.accounts.set_pinned(&uid(&b)?, b["pinned"].as_bool().unwrap_or(false)))
             }),
         )
         .route("/api/manual/task", post(manual_task))
         .route(
             "/api/manual/mastered",
             post(|s: State<Engine>, JsonBody(b): Body| {
-                change(s, move |e| e.set_manual_mastered(&uid(&b)?, b["mastered"].as_bool().unwrap_or(false)))
+                change(s, move |e| e.accounts.set_manual_mastered(&uid(&b)?, b["mastered"].as_bool().unwrap_or(false)))
             }),
         )
         .route(
             "/api/tasks/clear",
-            post(|s: State<Engine>, _: Body| view(s, |e| Ok(json!({"removed": e.clear_done_tasks()?})))),
+            post(|s: State<Engine>, _: Body| view(s, |e| Ok(json!({"removed": e.accounts.clear_done_tasks()?})))),
         )
         .route(
             "/api/rewards/scan",
-            post(|s: State<Engine>, _: Body| view(s, |e| Ok(serde_json::to_value(&*e.scan_rewards())?))),
+            post(|State(e): State<Engine>, _: Body| async move {
+                answer(serde_json::to_value(&*e.scans.scan_rewards().await).map_err(Into::into))
+            }),
         )
         .route(
             "/api/riven/scan",
-            post(|s: State<Engine>, _: Body| view(s, |e| Ok(serde_json::to_value(&*e.scan_riven())?))),
+            post(|State(e): State<Engine>, _: Body| async move {
+                answer(serde_json::to_value(&*e.scans.scan_riven().await).map_err(Into::into))
+            }),
         )
         .route("/api/riven/grade", post(|s: State<Engine>, JsonBody(b): Body| view(s, move |e| e.grade_riven(&b))))
         .route(
@@ -158,18 +165,7 @@ pub fn api(engine: Engine, stop: CancellationToken) -> Router<Engine> {
         )
         .route("/api/overlay/test", post(|s: State<Engine>, _: Body| change(s, |e| e.test_overlay())))
         .route("/api/hotkeys/register", post(|s: State<Engine>, _: Body| view(s, |e| e.install_hotkeys())))
-        .route(
-            "/api/data/reload",
-            post(|s: State<Engine>, _: Body| {
-                change(s, |e| {
-                    e.load_static(true);
-                    match e.catalog_error() {
-                        Some(err) => Err(UserError::new(err).into()),
-                        None => Ok(()),
-                    }
-                })
-            }),
-        )
+        .route("/api/data/reload", post(|State(e): State<Engine>, _: Body| async move { done(e.reload_data().await) }))
         .route("/api/{*rest}", get(unknown).post(unknown))
         .method_not_allowed_fallback(|| async {
             json_response(StatusCode::METHOD_NOT_ALLOWED, &json!({"error": "method not allowed"}))
@@ -194,10 +190,21 @@ async fn change(
     Ok(ok_json(&json!({"ok": true})))
 }
 
+/// An answer computed by async engine work.
+fn answer(result: anyhow::Result<Value>) -> ApiResult {
+    Ok(ok_json(&result?))
+}
+
+/// A finished async change: `{"ok": true}`.
+fn done(result: anyhow::Result<()>) -> ApiResult {
+    result?;
+    Ok(ok_json(&json!({"ok": true})))
+}
+
 /// The pages that need the game data say "loading" until it is there.
 async fn loading_guard(State(engine): State<Engine>, req: Request, next: Next) -> Response {
-    if engine.catalog().loaded_at.is_none() {
-        return ok_json(&json!({"loading": true, "error": engine.catalog_error()}));
+    if !engine.catalog.ready() {
+        return ok_json(&json!({"loading": true, "error": engine.catalog.error()}));
     }
     next.run(req).await
 }
@@ -216,7 +223,7 @@ fn result_json<T: serde::Serialize>(r: Option<Arc<T>>) -> Value {
 }
 
 fn foundry(e: &Engine) -> Value {
-    let v = e.view();
+    let v = e.accounts.view();
     let mut items = v.craftable();
     if let Some(list) = items.as_array_mut() {
         list.extend(v.crafts());
@@ -226,23 +233,23 @@ fn foundry(e: &Engine) -> Value {
 
 async fn relics(s: State<Engine>, q: Query) -> ApiResult {
     let owned = q.str("owned") == "1";
-    view(s, move |e| Ok(e.view().relics(owned))).await
+    view(s, move |e| Ok(e.accounts.view().relics(owned))).await
 }
 
 async fn find(s: State<Engine>, q: Query) -> ApiResult {
-    view(s, move |e| Ok(e.view().find(q.str("q")))).await
+    view(s, move |e| Ok(e.accounts.view().find(q.str("q")))).await
 }
 
 async fn find_task(s: State<Engine>, q: Query) -> ApiResult {
-    view(s, move |e| Ok(crate::tasks::find(&e.view(), q.str("q")))).await
+    view(s, move |e| Ok(crate::tasks::find(&e.accounts.view(), q.str("q")))).await
 }
 
-async fn task(s: State<Engine>, q: Query) -> ApiResult {
-    view(s, move |e| e.task(q.str("uid"))).await
+async fn task(State(e): State<Engine>, q: Query) -> ApiResult {
+    answer(e.task(q.str("uid").to_string()).await)
 }
 
-async fn item(s: State<Engine>, q: Query) -> ApiResult {
-    view(s, move |e| e.detail(q.str("key"))).await
+async fn item(State(e): State<Engine>, q: Query) -> ApiResult {
+    answer(e.detail(q.str("key").to_string()).await)
 }
 
 async fn syndicate(s: State<Engine>, q: Query) -> ApiResult {
@@ -274,18 +281,16 @@ async fn riven_table(s: State<Engine>, q: Query) -> ApiResult {
 }
 
 async fn account_set(s: State<Engine>, JsonBody(b): Body) -> ApiResult {
-    change(s, move |e| e.set_account_id(b["id"].as_str().unwrap_or(""), b["key"].as_str())).await
+    change(s, move |e| e.accounts.set_account_id(b["id"].as_str().unwrap_or(""), b["key"].as_str())).await
 }
 
-async fn profile_refresh(s: State<Engine>, _: Body) -> ApiResult {
-    change(s, |e| {
-        let key = e
-            .active_key()
-            .ok_or_else(|| UserError::new("No account yet: start the game once, or enter an account id."))?;
-        e.refresh_profile(&key, false)?;
-        Ok(())
-    })
-    .await
+async fn profile_refresh(State(e): State<Engine>, _: Body) -> ApiResult {
+    let key = e
+        .accounts
+        .active_key()
+        .ok_or_else(|| UserError::new("No account yet: start the game once, or enter an account id."))?;
+    e.accounts.refresh_profile(&key, false).await?;
+    Ok(ok_json(&json!({"ok": true})))
 }
 
 /// `{uid, onBoard: bool}` puts a task on the board or takes it off; `{uid, target: n | null}`
@@ -294,10 +299,10 @@ async fn manual_task(s: State<Engine>, JsonBody(b): Body) -> ApiResult {
     change(s, move |e| {
         let uid = uid(&b)?;
         if let Some(on) = b["onBoard"].as_bool() {
-            e.set_task(&uid, on)?;
+            e.accounts.set_task(&uid, on)?;
         }
         if let Some(target) = b.get("target") {
-            e.set_task_target(&uid, target.as_f64().map(|n| n.round() as i64))?;
+            e.accounts.set_task_target(&uid, target.as_f64().map(|n| n.round() as i64))?;
         }
         Ok(())
     })
