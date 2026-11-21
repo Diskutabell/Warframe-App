@@ -154,7 +154,7 @@ pub fn run(state: Arc<App>, url: &str, backend: Backend) -> Result<()> {
     }
     window.show_all();
 
-    let overlays = Rc::new(overlay::Overlays::new(backend, Arc::clone(&state)));
+    let overlays = Rc::new(overlay::overlays(backend, Arc::clone(&state)));
     let (tx, rx) = async_channel::unbounded::<UiEvent>();
     if !state.set_ui(tx) {
         // Told to quit while the window was being made.

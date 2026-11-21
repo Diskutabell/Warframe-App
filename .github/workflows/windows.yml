@@ -37,6 +37,11 @@ jobs:
       - name: Test
         run: cargo test
 
+      # Makes real overlay windows (ignored in ordinary test runs): styles, placement, drawing
+      # through UpdateLayeredWindow, and no focus taken.
+      - name: Test the overlay windows
+        run: cargo test overlay_window -- --ignored
+
       # `cargo test` writes the API's TypeScript types; the committed ones must be the same.
       - name: Check the UI's API types
         shell: bash

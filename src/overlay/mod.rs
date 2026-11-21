@@ -10,7 +10,11 @@ mod panels;
 
 use tiny_skia::Pixmap;
 
+use std::sync::Arc;
+
+use crate::app::App;
 use crate::compositor::Rect;
+use crate::config::PanelPosition;
 use crate::ocr::{reward, riven};
 use crate::services::scans::{RewardResult, RivenResult};
 
@@ -58,6 +62,87 @@ impl Screen {
 pub struct Drawn {
     pub rect: Rect,
     pub pixels: Pixmap,
+    /// Pixels per unit of `rect` (`Screen::display`); always 1 on Windows.
+    #[cfg_attr(windows, allow(dead_code))]
+    pub scale: f64,
+}
+
+/// One overlay window on a platform: it shows drawn pixels where they belong, and hides.
+pub trait Presenter {
+    fn visible(&self) -> bool;
+    /// Shows `drawn`, taken down after `secs` seconds.
+    fn show(&self, drawn: &Drawn, secs: u32);
+    /// New pixels for a panel that is up (a price arrived); it keeps its time.
+    fn update(&self, drawn: &Drawn);
+    fn hide(&self);
+}
+
+/// The two overlays and when they show, the same on every platform. `screen` says where the
+/// game is, for an interface scale.
+pub struct Overlays<P: Presenter> {
+    pub state: Arc<App>,
+    pub strip: P,
+    pub riven: P,
+    pub screen: Box<dyn Fn(f64) -> Screen>,
+}
+
+impl<P: Presenter> Overlays<P> {
+    fn ui_scale(&self) -> f64 {
+        self.state.ui_scales().first().copied().unwrap_or(1.0)
+    }
+
+    /// The price panels for a reward screen. `fresh` is false for a later reading of the same
+    /// screen (more names, prices): it updates panels that are up and never brings back ones
+    /// taken down with their screen.
+    pub fn show_rewards(&self, r: &RewardResult, fresh: bool) {
+        if !self.state.settings().overlay_enabled || (r.items.is_empty() && r.error.is_none()) {
+            return;
+        }
+        self.put_rewards(r, fresh);
+    }
+
+    /// The sample panels, shown even with the reward overlay switched off.
+    pub fn show_test(&self) {
+        self.put_rewards(&RewardResult::sample(self.ui_scale()), true);
+    }
+
+    fn put_rewards(&self, r: &RewardResult, fresh: bool) {
+        if !fresh && !self.strip.visible() {
+            return;
+        }
+        let s = self.state.settings();
+        let screen = (self.screen)(r.scale.unwrap_or_else(|| self.ui_scale()));
+        let drawn = rewards(r, screen, s.overlay_position == PanelPosition::Above);
+        if fresh {
+            self.strip.show(&drawn, s.overlay_seconds.max(4));
+        } else {
+            self.strip.update(&drawn);
+        }
+    }
+
+    /// The grades beside the riven card. `fresh` is false when only the market listings
+    /// arrived, which must not bring back a panel that has timed out.
+    pub fn show_riven(&self, r: &RivenResult, fresh: bool) {
+        if !fresh && !self.riven.visible() {
+            return;
+        }
+        let drawn = riven(r, (self.screen)(self.ui_scale()));
+        if fresh {
+            self.riven.show(&drawn, self.state.settings().riven_overlay_seconds.max(5));
+        } else {
+            self.riven.update(&drawn);
+        }
+    }
+
+    /// The reward screen has closed: its prices are of no use any more.
+    pub fn hide_rewards(&self) {
+        self.strip.hide();
+    }
+
+    pub fn hide_all(&self) {
+        self.strip.hide();
+        self.riven.hide();
+    }
 }
 
 /// The price panels: one under (or above) each card, as the game draws the cards at the scale
@@ -88,7 +173,7 @@ pub fn rewards(r: &RewardResult, screen: Screen, above: bool) -> Drawn {
         .collect();
     let size = ((rect.width as f64 * display).round() as u32, (rect.height as f64 * display).round() as u32);
     let pixels = panels::rewards(r, size, &boxes, (text_u * display) as f32);
-    Drawn { rect, pixels }
+    Drawn { rect, pixels, scale: display }
 }
 
 /// The grades beside the riven card, which the game draws in the middle of the screen, sized with
@@ -104,7 +189,7 @@ pub fn riven(r: &RivenResult, screen: Screen) -> Drawn {
     // Beside the card, clear of the "fits in" box further right.
     let x = (game.x as f64 + game.width as f64 / 2.0 + (riven::CARD_HALF_W + riven::PANEL_GAP) * u).round() as i32;
     let y = (game.y as f64 + game.height as f64 / 2.0 - riven::PANEL_TOP * u).round() as i32;
-    Drawn { rect: fit(game, width.round() as i32, height, x, y), pixels }
+    Drawn { rect: fit(game, width.round() as i32, height, x, y), pixels, scale: display }
 }
 
 /// How the panels look with made-up values, for the screenshots and the tests.

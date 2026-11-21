@@ -15,9 +15,7 @@ use gtk_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use super::Backend;
 use crate::app::App;
 use crate::compositor::{self, Rect};
-use crate::config::PanelPosition;
 use crate::overlay::{self, Drawn, Screen};
-use crate::services::scans::{RewardResult, RivenResult};
 
 const CSS: &str = r#"
 window.wfp-overlay { background-color: transparent; }
@@ -205,137 +203,107 @@ fn monitor_at(display: &gdk::Display, x: i32, y: i32) -> Option<gdk::Monitor> {
         .or_else(|| display.monitor(0))
 }
 
-pub struct Overlays {
+/// One overlay window, made the first time it shows something.
+pub struct LazyPanel {
     backend: Backend,
-    state: Arc<App>,
-    strip: RefCell<Option<Rc<Panel>>>,
-    riven: RefCell<Option<Rc<Panel>>>,
+    namespace: &'static str,
+    panel: RefCell<Option<Rc<Panel>>>,
 }
 
-impl Overlays {
-    pub fn new(backend: Backend, state: Arc<App>) -> Overlays {
-        let css = gtk::CssProvider::new();
-        if css.load_from_data(CSS.as_bytes()).is_ok() {
-            if let Some(screen) = gdk::Screen::default() {
-                gtk::StyleContext::add_provider_for_screen(&screen, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
-            }
-        }
-        Overlays { backend, state, strip: RefCell::new(None), riven: RefCell::new(None) }
-    }
-
-    fn panel(&self, slot: &RefCell<Option<Rc<Panel>>>, namespace: &str) -> Rc<Panel> {
+impl LazyPanel {
+    fn get(&self) -> Rc<Panel> {
         // Both sit over the game while it is played: clicks go through to it.
-        slot.borrow_mut().get_or_insert_with(|| Panel::new(self.backend, namespace, true)).clone()
+        self.panel.borrow_mut().get_or_insert_with(|| Panel::new(self.backend, self.namespace, true)).clone()
+    }
+}
+
+impl overlay::Presenter for LazyPanel {
+    fn visible(&self) -> bool {
+        self.panel.borrow().as_ref().is_some_and(|p| p.visible())
     }
 
-    /// Where Warframe's window is, in GDK coordinates.
-    ///
-    /// The compositor reports it in layout coordinates. GDK on Wayland uses the same ones; GDK on
-    /// X11 uses XWayland's layout, which orders the monitors differently (here DP-1 sits at 0 for
-    /// XWayland and at 4480 for Hyprland), so the rect is re-based onto the same monitor's X11
-    /// origin. Without a game window, the primary monitor stands in.
-    fn game_rect(&self) -> Rect {
-        let display = gdk::Display::default();
-        let fallback = || {
-            display
-                .as_ref()
-                .and_then(|d| d.primary_monitor().or_else(|| d.monitor(0)))
-                .map(|m| {
-                    let g = m.geometry();
-                    Rect { x: g.x(), y: g.y(), width: g.width(), height: g.height() }
-                })
-                .unwrap_or(Rect { x: 0, y: 0, width: 1920, height: 1080 })
-        };
-        let Some(game) = compositor::game_rect() else { return fallback() };
-        if self.backend == Backend::LayerShell {
-            return game;
-        }
-        let output = compositor::game_output();
-        let on = compositor::monitors().into_iter().find(|m| output.as_deref() == Some(m.name.as_str()));
-        let gdk_monitor = on.as_ref().and_then(|m| {
-            let d = display.as_ref()?;
-            (0..d.n_monitors()).filter_map(|i| d.monitor(i)).find(|g| g.model().is_some_and(|model| model == m.name))
-        });
-        match (on, gdk_monitor) {
-            (Some(m), Some(g)) => {
-                let o = g.geometry();
-                Rect { x: o.x() + (game.x - m.x), y: o.y() + (game.y - m.y), ..game }
-            }
-            _ => game,
-        }
+    fn show(&self, drawn: &Drawn, secs: u32) {
+        let panel = self.get();
+        panel.set(drawn, drawn.scale.round().max(1.0) as i32);
+        panel.show(self.backend, drawn.rect, secs);
     }
 
-    /// The game and how GDK draws over it: its monitor's scale (GDK coordinates are logical).
-    fn screen(&self, ui_scale: f64) -> Screen {
-        let game = self.game_rect();
-        let display = gdk::Display::default();
-        let scale = display
+    fn update(&self, drawn: &Drawn) {
+        let panel = self.get();
+        panel.set(drawn, drawn.scale.round().max(1.0) as i32);
+        panel.place(self.backend, drawn.rect);
+        panel.window.show_all();
+    }
+
+    fn hide(&self) {
+        if let Some(p) = self.panel.borrow().as_ref() {
+            p.hide();
+        }
+    }
+}
+
+pub type Overlays = overlay::Overlays<LazyPanel>;
+
+pub fn overlays(backend: Backend, state: Arc<App>) -> Overlays {
+    let css = gtk::CssProvider::new();
+    if css.load_from_data(CSS.as_bytes()).is_ok() {
+        if let Some(screen) = gdk::Screen::default() {
+            gtk::StyleContext::add_provider_for_screen(&screen, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+        }
+    }
+    let panel = |namespace| LazyPanel { backend, namespace, panel: RefCell::new(None) };
+    overlay::Overlays {
+        state,
+        strip: panel("warframeproject-rewards"),
+        riven: panel("warframeproject-riven"),
+        screen: Box::new(move |ui_scale| screen(backend, ui_scale)),
+    }
+}
+
+/// Where Warframe's window is, in GDK coordinates.
+///
+/// The compositor reports it in layout coordinates. GDK on Wayland uses the same ones; GDK on
+/// X11 uses XWayland's layout, which orders the monitors differently (here DP-1 sits at 0 for
+/// XWayland and at 4480 for Hyprland), so the rect is re-based onto the same monitor's X11
+/// origin. Without a game window, the primary monitor stands in.
+fn game_rect(backend: Backend) -> Rect {
+    let display = gdk::Display::default();
+    let fallback = || {
+        display
             .as_ref()
-            .and_then(|d| monitor_at(d, game.x + game.width / 2, game.y + game.height / 2))
-            .map_or(1, |m| m.scale_factor().max(1)) as f64;
-        Screen { game, display: scale, dpi: scale, ui_scale }
+            .and_then(|d| d.primary_monitor().or_else(|| d.monitor(0)))
+            .map(|m| {
+                let g = m.geometry();
+                Rect { x: g.x(), y: g.y(), width: g.width(), height: g.height() }
+            })
+            .unwrap_or(Rect { x: 0, y: 0, width: 1920, height: 1080 })
+    };
+    let Some(game) = compositor::game_rect() else { return fallback() };
+    if backend == Backend::LayerShell {
+        return game;
     }
-
-    pub fn hide_all(&self) {
-        for slot in [&self.strip, &self.riven] {
-            if let Some(p) = slot.borrow().as_ref() {
-                p.hide();
-            }
+    let output = compositor::game_output();
+    let on = compositor::monitors().into_iter().find(|m| output.as_deref() == Some(m.name.as_str()));
+    let gdk_monitor = on.as_ref().and_then(|m| {
+        let d = display.as_ref()?;
+        (0..d.n_monitors()).filter_map(|i| d.monitor(i)).find(|g| g.model().is_some_and(|model| model == m.name))
+    });
+    match (on, gdk_monitor) {
+        (Some(m), Some(g)) => {
+            let o = g.geometry();
+            Rect { x: o.x() + (game.x - m.x), y: o.y() + (game.y - m.y), ..game }
         }
+        _ => game,
     }
+}
 
-    /// The reward screen has closed: its prices are of no use any more.
-    pub fn hide_rewards(&self) {
-        if let Some(panel) = self.strip.borrow().as_ref() {
-            panel.hide();
-        }
-    }
-
-    pub fn show_rewards(&self, r: &RewardResult, fresh: bool) {
-        if !self.state.settings().overlay_enabled || (r.items.is_empty() && r.error.is_none()) {
-            return;
-        }
-        self.put_rewards(r, fresh);
-    }
-
-    pub fn show_test(&self) {
-        // The test panels always show, even with the reward overlay switched off.
-        let scale = self.state.ui_scales().first().copied().unwrap_or(1.0);
-        self.put_rewards(&RewardResult::sample(scale), true);
-    }
-
-    fn put_rewards(&self, r: &RewardResult, fresh: bool) {
-        let panel = self.panel(&self.strip, "warframeproject-rewards");
-        if !fresh && !panel.visible() {
-            return; // a price update for panels already taken down with their screen
-        }
-        let settings = self.state.settings();
-        let ui_scale = r.scale.or_else(|| self.state.ui_scales().first().copied()).unwrap_or(1.0);
-        let screen = self.screen(ui_scale);
-        let drawn = overlay::rewards(r, screen, settings.overlay_position == PanelPosition::Above);
-        self.put(&panel, &drawn, screen, fresh, settings.overlay_seconds);
-    }
-
-    /// The grades beside the riven card. `fresh` is false when only the market listings arrived,
-    /// which must not bring back a panel that has timed out.
-    pub fn show_riven(&self, r: &RivenResult, fresh: bool) {
-        let panel = self.panel(&self.riven, "warframeproject-riven");
-        if !fresh && !panel.visible() {
-            return;
-        }
-        let s = self.state.settings();
-        let screen = self.screen(self.state.ui_scales().first().copied().unwrap_or(1.0));
-        let drawn = overlay::riven(r, screen);
-        self.put(&panel, &drawn, screen, fresh, s.riven_overlay_seconds.max(5));
-    }
-
-    fn put(&self, panel: &Rc<Panel>, drawn: &Drawn, screen: Screen, fresh: bool, secs: u32) {
-        panel.set(drawn, screen.display as i32);
-        if fresh || !panel.visible() {
-            panel.show(self.backend, drawn.rect, secs);
-        } else {
-            panel.place(self.backend, drawn.rect);
-            panel.window.show_all();
-        }
-    }
+/// The game and how GDK draws over it: its monitor's scale (GDK coordinates are logical).
+fn screen(backend: Backend, ui_scale: f64) -> Screen {
+    let game = game_rect(backend);
+    let display = gdk::Display::default();
+    let scale = display
+        .as_ref()
+        .and_then(|d| monitor_at(d, game.x + game.width / 2, game.y + game.height / 2))
+        .map_or(1, |m| m.scale_factor().max(1)) as f64;
+    Screen { game, display: scale, dpi: scale, ui_scale }
 }
