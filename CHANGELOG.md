@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.0.0 - 2026-11-21
+
+### Added
+
+- **Two Windows release builds.** Releases now include both `warframeproject-windows-x64.exe`
+  (built without the memory scan, with no process-reading imports) and
+  `warframeproject-windows-x64-memscan.exe` (with the optional memory scan included, still off by
+  default). Both bundle Tesseract and link the C runtime statically.
+- **Reward picks and marked builds.** Mark which reward you picked in reward history or mark an
+  item as built in its details panel; the changes sit on top of the last inventory read and settle
+  automatically once a newer inventory includes them.
+- **Pre-built daily game catalog.** CI builds and validates the static game data once a day into a
+  single compressed bundle (`catalog` release) checked against its SHA-256, replacing dozens of
+  separate upstream downloads on startup (with upstream fallback if unavailable).
+
+### Changed
+
+- **Async engine, live updates, and OS file watching.** Moved the engine from blocking threads and
+  5-second polling to Tokio, Axum, async `reqwest`, a Server-Sent Events push stream
+  (`/api/events`), OS file watchers (`inotify` / `ReadDirectoryChangesW`) for `EE.log` and watched
+  inventory files, and coordinated graceful shutdown that flushes pending writes before exit.
+- **SQLite storage and modular services.** Consolidated accounts, profiles, inventories, hand-set
+  counts, farming tasks, pins, market prices, and unbounded reward history into a single SQLite WAL
+  database (`warframeproject.db`), with automatic one-time migration of existing JSON/JSONL files.
+  Split the monolithic state into focused domain services.
+- **Typed API and Svelte 5 + TypeScript interface.** Replaced untyped JSON responses and
+  `innerHTML` rendering with typed Rust API structs, generated TypeScript types checked in CI, and
+  a compiled reactive Svelte 5 frontend embedded in the binary.
+- **Shared native overlay renderer.** Both Linux and Windows now render price and riven overlays
+  with a single `tiny-skia` + `ab_glyph` renderer (GTK layer-shell/X11 on Linux, plain click-through
+  Win32 layered windows via `UpdateLayeredWindow` on Windows), removing `web/overlay.html` and the
+  two extra WebView2 overlay processes on Windows. Long reward names wrap cleanly instead of clipping.
+- **Direct Linux compositor IPC and Wayland capture.** Hyprland and Sway talk over their Unix
+  sockets instead of spawning `hyprctl`/`swaymsg`, and Wayland screen capture uses `wlr-screencopy`
+  in-process with `grim` as fallback.
+- **Memory scan isolated as an optional build feature.** Windows game window detection now matches
+  by window class and title instead of enumerating processes, and builds without the `memscan`
+  feature compile with zero process-reading code and report it as absent in Settings and Inventory.
+
 ## 0.9.5 - 2026-11-20
 
 ### Added
