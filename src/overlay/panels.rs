@@ -70,7 +70,8 @@ pub fn rewards(r: &RewardResult, size: (u32, u32), boxes: &[[f32; 4]], u: f32) -
 
 /// One card's panel: the name it was read as (so a misread shows itself), the platinum it
 /// fetches, its ducats, and how many are owned, needed and whether it is vaulted.
-fn item_panel(c: &mut Canvas, b: [f32; 4], u: f32, it: &RewardItem, best: bool) {
+/// Where its content ends, so a dry run measures how tall it has to be.
+fn item_panel(c: &mut Canvas, b: [f32; 4], u: f32, it: &RewardItem, best: bool) -> f32 {
     let (fill, edge) = if best { (PANEL_BEST, GOLD) } else { (PANEL, EDGE) };
     let [x, mut y, w, _] = frame(c, b, u, fill, edge);
 
@@ -80,7 +81,10 @@ fn item_panel(c: &mut Canvas, b: [f32; 4], u: f32, it: &RewardItem, best: bool) 
     let tag_w = if best { tag.width("BEST") + 8.0 * u } else { 0.0 };
     let h = if best { name.line().max(tag.line()) } else { name.line() };
     let room = w - if best { tag_w + 6.0 * u } else { 0.0 };
-    c.text(name, x, baseline(name, y, h), &name.fit(&it.name, room));
+    // The whole name matters (it shows a misread): a second line before an ellipsis.
+    let first = name.wrap(&it.name, room).into_iter().next().unwrap_or_default();
+    let rest = it.name[first.len().min(it.name.len())..].trim();
+    c.text(name, x, baseline(name, y, h), &name.fit(&first, room));
     if best {
         let tx = x + w - tag_w;
         let ty = y + (h - tag.line()) / 2.0;
@@ -88,6 +92,10 @@ fn item_panel(c: &mut Canvas, b: [f32; 4], u: f32, it: &RewardItem, best: bool) 
         c.text(tag, tx + 4.0 * u, ty + tag.ascent(), "BEST");
     }
     y += h;
+    if !rest.is_empty() && name.width(&first) <= room {
+        c.text(name, x, y + name.ascent(), &name.fit(rest, w));
+        y += name.line();
+    }
 
     // Platinum on the left, ducats on the right. In a narrow panel the price gets smaller
     // before the two can meet, and the ducats give way if even that is not enough.
@@ -156,6 +164,27 @@ fn item_panel(c: &mut Canvas, b: [f32; 4], u: f32, it: &RewardItem, best: bool) 
             px = c.text(*style, px, baseline(plain, y, line), text);
         }
     }
+    y + line
+}
+
+/// How tall the price panels have to be, `widths` wide (pixels), so every one shows all it has:
+/// the tallest one's height, for all of them alike.
+pub fn rewards_height(r: &RewardResult, widths: &[f32], u: f32) -> f32 {
+    let mut tallest: f32 = 0.0;
+    for (k, &w) in widths.iter().enumerate() {
+        let item = r.items.iter().enumerate().find(|(i, it)| it.slot.unwrap_or(*i) == k).map(|(_, it)| it);
+        if let Some(it) = item {
+            let end = item_panel(
+                &mut Canvas::measure(),
+                [0.0, 0.0, w, 0.0],
+                u,
+                it,
+                r.best.as_deref() == Some(it.name.as_str()),
+            );
+            tallest = tallest.max(end + 5.0 * u + 1.0);
+        }
+    }
+    tallest
 }
 
 /// A message in place of the panels: why nothing was recognised.

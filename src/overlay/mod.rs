@@ -154,10 +154,12 @@ pub fn rewards(r: &RewardResult, screen: Screen, above: bool) -> Drawn {
     let cards = if r.items.is_empty() { 0 } else { r.cards.unwrap_or(r.items.len()).max(1) };
     let (u, text_u) = screen.units();
     let g = (game.x as f64, game.y as f64, game.width as f64, game.height as f64);
-    let rects: Vec<[f64; 4]> = reward::panel_places(cards, above)
-        .iter()
-        .map(|p| reward::panel_rect(p, g, u, reward::PANEL_H * text_u))
-        .collect();
+    let places = reward::panel_places(cards, above);
+    // As tall as the tallest panel's content (a name on two lines), never less than usual.
+    let widths: Vec<f32> = places.iter().map(|p| (p.width * u * display) as f32).collect();
+    let needed = panels::rewards_height(r, &widths, (text_u * display) as f32) as f64 / display;
+    let h = (reward::PANEL_H * text_u).max(needed);
+    let rects: Vec<[f64; 4]> = places.iter().map(|p| reward::panel_rect(p, g, u, h)).collect();
     let x0 = rects.iter().map(|r| r[0]).fold(f64::INFINITY, f64::min);
     let y0 = rects.iter().map(|r| r[1]).fold(f64::INFINITY, f64::min);
     let x1 = rects.iter().map(|r| r[0] + r[2]).fold(f64::NEG_INFINITY, f64::max);
