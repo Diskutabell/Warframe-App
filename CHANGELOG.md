@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.1 - 2026-11-25
+
+### Added
+
+- **Hotkeys on KDE Plasma.** *Install hotkeys* registers the keys as KDE global shortcuts. They
+  show up under System Settings → Keyboard → Shortcuts, work while the app runs and come back on
+  every start. A key another shortcut already uses is not taken from it: the app names that
+  shortcut instead.
+
+### Fixed
+
+- **Overlays on KDE sit over the game.** The app now asks KWin where Warframe's window is; before,
+  the panels were placed on the primary monitor.
+- **Spectacle captures only the monitor in use.** On a desk with several monitors the whole-desktop
+  capture put the reward cards off-centre and nothing was read. It also writes PPM now, which
+  takes a third of the time PNG did.
+- **The daily game catalog builds again.** DE's export index is fetched from its content CDN, like
+  the export files: the origin server answered GitHub's runners with HTTP 403, so the `catalog`
+  release was never published and the app fell back to the separate downloads.
+
 ## 1.0.0 - 2026-11-21
 
 ### Added
