@@ -28,7 +28,11 @@ const REGIONS_URL: &str =
     "https://raw.githubusercontent.com/calamity-inc/warframe-public-export-plus/senpai/ExportRegions.json";
 /// DE's own Public Export, current with every game update. An LZMA-packed index names each file
 /// with a hash of its contents; the export above is a copy that is regenerated now and then.
-const DE_INDEX_URL: &str = "https://origin.warframe.com/PublicExport/index_en.txt.lzma";
+/// The index comes from DE's content CDN, like the files: the origin server serves the same bytes
+/// but answered GitHub's runners with 403 on every daily catalog run (2026-11-22 to 11-25). It is
+/// asked only when the CDN fails.
+const DE_INDEX_URL: &str = "https://content.warframe.com/PublicExport/index_en.txt.lzma";
+const DE_INDEX_ORIGIN_URL: &str = "https://origin.warframe.com/PublicExport/index_en.txt.lzma";
 const DE_FILES_URL: &str = "https://content.warframe.com/PublicExport/Manifest/";
 /// Syndicates from the same export: ranks, their standing ranges and costs, daily pools,
 /// offerings and medallions (`standing.rs`). Names are keys into `dict.en.json` (3.9 MB).
@@ -664,8 +668,14 @@ async fn fetch_manifest_json(
 /// ingredients}, ...]`.
 async fn de_recipes(force: bool) -> Result<Vec<Value>> {
     let cache = config::dirs().cache.clone();
-    let index =
-        download_file(DE_INDEX_URL, &cache.join("de_index_en.txt.lzma"), force, Arc::new(|b: &[u8]| unlzma(b))).await?;
+    let index_path = cache.join("de_index_en.txt.lzma");
+    let read_index: Reader<String> = Arc::new(|b: &[u8]| unlzma(b));
+    let index = match download_file(DE_INDEX_URL, &index_path, force, Arc::clone(&read_index)).await {
+        Ok(index) => index,
+        Err(cdn) => download_file(DE_INDEX_ORIGIN_URL, &index_path, force, read_index)
+            .await
+            .map_err(|origin| anyhow!("{cdn:#}; from the origin server: {origin:#}"))?,
+    };
     // "ExportRecipes_en.json!00_oac+LCAtIyqDxZF8Qe1ZZA"
     let file = index
         .lines()
