@@ -1,5 +1,5 @@
 //! Asking the compositor where the game is, floating the main window, and installing the scan
-//! hotkeys.
+//! hotkeys. Hyprland and Sway are asked over their sockets (`ipc`), KDE Plasma over D-Bus (`kde`).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use crate::{UserError, ipc};
+use crate::{UserError, ipc, kde};
 
 /// Warframe under Proton: the window class is stable, the title is not localised.
 const GAME_CLASSES: [&str; 3] = ["steam_app_230410", "Warframe.x64.exe", "Warframe.exe"];
@@ -40,6 +40,8 @@ fn sway_json(kind: ipc::SwayMessage) -> Option<Value> {
 enum Running {
     Hyprland,
     Sway,
+    /// KDE Plasma (KWin), on Wayland or X11.
+    Kde,
 }
 
 fn running() -> Option<Running> {
@@ -48,6 +50,8 @@ fn running() -> Option<Running> {
         Some(Running::Hyprland)
     } else if set("SWAYSOCK") {
         Some(Running::Sway)
+    } else if kde::is_session() {
+        Some(Running::Kde)
     } else {
         None
     }
@@ -103,7 +107,11 @@ fn sway_game<'a>(n: &'a Value, output: Option<&'a str>) -> Option<(&'a Value, Op
 
 pub fn game_rect() -> Option<Rect> {
     let at = |v: &Value, i: usize| v[i].as_i64().unwrap_or(0) as i32;
-    if running()? == Running::Hyprland {
+    let compositor = running()?;
+    if compositor == Running::Kde {
+        return kde::game_window(is_game);
+    }
+    if compositor == Running::Hyprland {
         let clients = hypr_json("clients")?;
         let c = hypr_game(&clients)?;
         return Some(Rect {
@@ -145,8 +153,14 @@ pub fn game_output() -> Option<String> {
     output
 }
 
+/// Hyprland and Sway only: on KDE the screen is captured by spectacle, which takes the monitor in
+/// use, and the overlays need only the game's rectangle.
 fn ask_game_output() -> Option<String> {
-    if running()? == Running::Hyprland {
+    let compositor = running()?;
+    if compositor == Running::Kde {
+        return None;
+    }
+    if compositor == Running::Hyprland {
         let clients = hypr_json("clients")?;
         let hit = hypr_game(&clients)?;
         let monitors = hypr_json("monitors")?;
@@ -169,8 +183,13 @@ pub struct Monitor {
     pub y: i32,
 }
 
+/// Hyprland's and Sway's monitors, for placing X11 overlays (none needed on KDE, where the
+/// overlays use the layer shell, or KWin's coordinates are X11's on an X11 session).
 pub fn monitors() -> Vec<Monitor> {
     let Some(compositor) = running() else { return Vec::new() };
+    if compositor == Running::Kde {
+        return Vec::new();
+    }
     if compositor == Running::Hyprland {
         let Some(list) = hypr_json("monitors") else { return Vec::new() };
         return list
@@ -281,6 +300,8 @@ pub enum Flavour {
     HyprlandLua,
     Hyprland,
     Sway,
+    /// KDE's global shortcuts: registered by the app, not written to a config file.
+    Kde,
 }
 
 impl Flavour {
@@ -289,6 +310,7 @@ impl Flavour {
             Flavour::HyprlandLua => "hyprland-lua",
             Flavour::Hyprland => "hyprland",
             Flavour::Sway => "sway",
+            Flavour::Kde => "kde",
         }
     }
 }
@@ -312,6 +334,7 @@ pub fn detect_flavour() -> Option<Flavour> {
     match running()? {
         Running::Hyprland => Some(if hyprland_uses_lua() { Flavour::HyprlandLua } else { Flavour::Hyprland }),
         Running::Sway => Some(Flavour::Sway),
+        Running::Kde => Some(Flavour::Kde),
     }
 }
 
@@ -322,16 +345,18 @@ const MAIN_WINDOW_CLASS: &str = "(?i)^warframeproject$";
 /// The command that makes the compositor float the main window from the moment it opens. The
 /// syntax is Hyprland 0.56's (checked with `Hyprland --verify-config`); older releases spell
 /// rules differently and refuse this one.
-/// Hyprland takes it as a request on its socket, Sway as a command.
-fn float_rule(flavour: Flavour, pid: u32) -> String {
-    match flavour {
+/// Hyprland takes it as a request on its socket, Sway as a command. None where windows float
+/// anyway (KDE).
+fn float_rule(flavour: Flavour, pid: u32) -> Option<String> {
+    Some(match flavour {
         Flavour::HyprlandLua => format!(
             "/eval hl.window_rule({{ name = \"warframeproject-float\", match = {{ class = \"{MAIN_WINDOW_CLASS}\" }}, float = true }})"
         ),
         Flavour::Hyprland => format!("/keyword windowrule match:class {MAIN_WINDOW_CLASS}, float on"),
         // Sway's criteria can name the process, which covers an XWayland window as well.
         Flavour::Sway => format!("for_window [pid={pid}] floating enable"),
-    }
+        Flavour::Kde => return None,
+    })
 }
 
 /// Has a tiling compositor (Hyprland, Sway) float the main window, so it keeps its own size and
@@ -341,11 +366,20 @@ fn float_rule(flavour: Flavour, pid: u32) -> String {
 /// compositor's config drops it, so every start sets it again. Other desktops float windows anyway.
 pub fn float_main_window() -> Result<()> {
     let Some(flavour) = detect_flavour() else { return Ok(()) };
-    let rule = float_rule(flavour, std::process::id());
+    let Some(rule) = float_rule(flavour, std::process::id()) else { return Ok(()) };
     if flavour == Flavour::Sway {
         return ipc::sway_command(&rule, ipc::TIMEOUT);
     }
     ipc::hyprland_ok(&rule, ipc::TIMEOUT).context("Hyprland refused the rule")
+}
+
+/// What the hotkey of an API path does, for people.
+fn action_text(path: &str) -> &'static str {
+    match path {
+        "riven/scan" => "Grade the riven on screen",
+        "window/toggle" => "Show or hide the window",
+        _ => "Read the reward screen",
+    }
 }
 
 /// The config lines for the given (key, API path) pairs.
@@ -380,6 +414,8 @@ pub fn hotkey_lines(flavour: Option<Flavour>, port: u16, keys: &[(&str, &str)]) 
                     };
                     format!("bindsym {combo} exec {}", cmd(p))
                 }
+                // Nothing to bind: the app holds the keys itself.
+                Some(Flavour::Kde) => format!("{} -> {}", k.trim(), action_text(p).to_lowercase()),
                 None => format!("{k} -> {}", cmd(p)),
             };
             Some(line)
@@ -392,6 +428,9 @@ pub fn hotkey_note(flavour: Option<Flavour>) -> String {
     match flavour {
         Some(Flavour::HyprlandLua) => "Writes these into a marked block in ~/.config/hypr/lua/keybindings.lua \
                                        (replacing that block on later installs), then reloads Hyprland."
+            .into(),
+        Some(Flavour::Kde) => "Registers these as KDE global shortcuts. They work while the app runs and are listed \
+                               under System Settings > Keyboard > Shortcuts; change them here and press Install again."
             .into(),
         Some(f) => format!(
             "Writes these to a file of their own and adds one line to your {} config that includes it, then reloads.",
@@ -412,6 +451,7 @@ fn reload(running: Running) -> Result<()> {
     match running {
         Running::Sway => ipc::sway_command("reload", ipc::RELOAD_TIMEOUT),
         Running::Hyprland => ipc::hyprland_ok("/reload", ipc::RELOAD_TIMEOUT),
+        Running::Kde => Ok(()),
     }
     .map_err(|e| failed(format!("{e:#}")).into())
 }
@@ -486,8 +526,27 @@ pub fn install_hotkeys(flavour: Option<Flavour>, lines: &[String]) -> Result<Ins
             reload(running)?;
             Ok(Installed { file: target, sourced: added })
         }
-        None => Err(UserError::new("No supported compositor found (Hyprland or Sway).").into()),
+        Some(Flavour::Kde) => Err(anyhow::anyhow!("KDE's hotkeys are registered (register_kde_hotkeys), not written")),
+        None => Err(UserError::new("No supported desktop found (Hyprland, Sway or KDE Plasma).").into()),
     }
+}
+
+/// Registers the hotkeys with KDE's global shortcuts; a press calls the API on `port`, the port
+/// this run serves (the keys live as long as the app does).
+pub fn register_kde_hotkeys(port: u16, keys: &[(&str, &str)]) -> Result<()> {
+    let shortcuts: Vec<kde::Shortcut> =
+        keys.iter().map(|&(key, path)| kde::Shortcut { key, path, text: action_text(path) }).collect();
+    kde::register(port, &shortcuts)
+}
+
+/// KDE only: the hotkeys were registered in an earlier run and are to be activated again.
+pub fn kde_hotkeys_installed() -> bool {
+    running() == Some(Running::Kde) && kde::installed()
+}
+
+/// Lets go of the keys KDE holds for this run (nothing to do elsewhere: compositor binds stay).
+pub fn release_hotkeys() {
+    kde::release();
 }
 
 #[cfg(test)]
@@ -563,6 +622,10 @@ mod tests {
             hotkey_lines(Some(Flavour::Sway), 1, &keys),
             ["bindsym F9 exec curl -s -X POST http://127.0.0.1:1/api/rewards/scan"]
         );
+        assert_eq!(
+            hotkey_lines(Some(Flavour::Kde), 8642, &[("F9", "rewards/scan"), ("ctrl + F8", "window/toggle")]),
+            ["F9 -> read the reward screen", "ctrl + F8 -> show or hide the window"]
+        );
 
         let modded = [("SUPER + F9", "rewards/scan"), ("ctrl + shift + F10", "riven/scan")];
         assert_eq!(
@@ -592,11 +655,17 @@ mod tests {
     fn float_rules_per_flavour() {
         let rule = |f| float_rule(f, 4242);
         assert_eq!(
-            rule(Flavour::HyprlandLua),
-            "/eval hl.window_rule({ name = \"warframeproject-float\", \
-             match = { class = \"(?i)^warframeproject$\" }, float = true })"
+            rule(Flavour::HyprlandLua).as_deref(),
+            Some(
+                "/eval hl.window_rule({ name = \"warframeproject-float\", \
+                 match = { class = \"(?i)^warframeproject$\" }, float = true })"
+            )
         );
-        assert_eq!(rule(Flavour::Hyprland), "/keyword windowrule match:class (?i)^warframeproject$, float on");
-        assert_eq!(rule(Flavour::Sway), "for_window [pid=4242] floating enable");
+        assert_eq!(
+            rule(Flavour::Hyprland).as_deref(),
+            Some("/keyword windowrule match:class (?i)^warframeproject$, float on")
+        );
+        assert_eq!(rule(Flavour::Sway).as_deref(), Some("for_window [pid=4242] floating enable"));
+        assert_eq!(rule(Flavour::Kde), None, "KDE floats windows anyway");
     }
 }

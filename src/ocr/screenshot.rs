@@ -122,11 +122,11 @@ fn available(tool: ScreenshotTool) -> bool {
 
 #[cfg(unix)]
 /// A file only this capture uses, in the app's own cache directory (not a guessable name in /tmp).
-fn private_file() -> PathBuf {
+fn private_file(extension: &str) -> PathBuf {
     static N: AtomicU64 = AtomicU64::new(0);
     let dir = config::dirs().cache.join("capture");
     let _ = fs::create_dir_all(&dir);
-    dir.join(format!("shot-{}-{}.png", std::process::id(), N.fetch_add(1, Ordering::Relaxed)))
+    dir.join(format!("shot-{}-{}.{extension}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)))
 }
 
 #[cfg(unix)]
@@ -168,10 +168,15 @@ pub fn capture(setting: ScreenshotTool) -> Result<Rgb> {
         }
         return decode(&out.stdout);
     }
-    let file = private_file();
+    // Spectacle writes the format the name asks for: PPM took 0.27 s for a 2560x1440 monitor
+    // where PNG took 0.83 s (nested KWin 6.8). The decoder reads either by its content.
+    let file = private_file(if tool == ScreenshotTool::Spectacle { "ppm" } else { "png" });
     let path = file.to_string_lossy().into_owned();
     let args: Vec<&str> = match tool {
-        ScreenshotTool::Spectacle => vec!["-b", "-n", "-f", "-o", &path],
+        // The monitor in use (KWin's active output: the one under the pointer, which the game
+        // holds while it is played), not the whole desktop: the reader expects the game's screen,
+        // and a desktop of three monitors puts its middle somewhere else.
+        ScreenshotTool::Spectacle => vec!["-b", "-n", "-m", "-o", &path],
         ScreenshotTool::GnomeScreenshot => vec!["-f", &path],
         ScreenshotTool::Maim => vec![&path],
         ScreenshotTool::Scrot => vec!["-o", &path],

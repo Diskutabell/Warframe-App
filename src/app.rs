@@ -746,12 +746,20 @@ impl App {
         Ok(HotkeysInstalled { file: None, sourced: false, lines })
     }
 
+    /// Linux: Hyprland's and Sway's binds are written to their config; KDE's are registered with
+    /// its global shortcuts and, like Windows', call the port bound now.
     #[cfg(unix)]
     pub fn install_hotkeys(&self) -> Result<HotkeysInstalled> {
         let flavour = compositor::detect_flavour();
         let (port, keys) = self.hotkey_keys();
         let pairs: Vec<(&str, &str)> = keys.iter().map(|(k, p)| (k.as_str(), *p)).collect();
         let lines = compositor::hotkey_lines(flavour, port, &pairs);
+        if flavour == Some(compositor::Flavour::Kde) {
+            compositor::register_kde_hotkeys(self.port, &pairs)?;
+            let names: Vec<&str> = pairs.iter().map(|(k, _)| k.trim()).filter(|k| !k.is_empty()).collect();
+            self.accounts.event(&format!("Hotkeys registered with KDE: {}", names.join(", ")), "info");
+            return Ok(HotkeysInstalled { file: None, sourced: false, lines });
+        }
         let done = compositor::install_hotkeys(flavour, &lines)?;
         let name = done.file.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
         self.accounts.event(&format!("Hotkeys written to {name} and the compositor reloaded"), "info");

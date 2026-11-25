@@ -103,7 +103,7 @@ else in `%LOCALAPPDATA%\warframeproject`.
   | Desktop | Screenshot tool |
   |---|---|
   | Hyprland, Sway | `grim` |
-  | KDE | `spectacle` |
+  | KDE | `spectacle` (captures the monitor in use) |
   | GNOME | `gnome-screenshot` |
   | X11 | `maim`, `scrot` or ImageMagick `import` |
 
@@ -144,8 +144,8 @@ sed "s|/path/to/warframeproject|$PWD|" warframeproject.desktop > ~/.local/share/
 
 1. Start the app, then Warframe. The app finds `EE.log` on its own.
 2. Link your account for mastery data (see below).
-3. Install the hotkeys under Settings → Hotkeys (Hyprland and Sway; on other desktops bind the
-   commands below yourself; on Windows they are already active).
+3. Install the hotkeys under Settings → Hotkeys (Hyprland, Sway and KDE Plasma; on other desktops
+   bind the commands below yourself; on Windows they are already active).
 4. Optional: import an `inventory.json` or turn on the memory scan to get part, relic and
    currency counts.
 
@@ -163,6 +163,10 @@ then watches the screen until the cards turn over: the log itself reaches the di
 often seconds late. The prices go as soon as the cards leave the screen. F9 scans whenever you
 press it.
 `warframeproject trigger` and `warframeproject riven` do the same from a terminal.
+
+On KDE Plasma the keys become global shortcuts of the app: they are listed under System Settings →
+Keyboard → Shortcuts and work while the app runs. Change them in the app's Settings and press
+Install again.
 
 On Hyprland, Sway and KDE the overlays sit on the compositor's overlay layer, above fullscreen
 games. On GNOME and X11 they are popup windows, and on Windows always-on-top windows that never

@@ -56,6 +56,8 @@ mod desktop;
 mod desktop;
 #[cfg(unix)]
 mod ipc;
+#[cfg(unix)]
+mod kde;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -242,6 +244,19 @@ fn run(settings: config::Settings, browser: bool, headless: bool, offline: bool)
             Err(e) => me.accounts.event(&format!("The built-in OCR could not be unpacked: {e:#}"), "warn"),
         })?;
     }
+    // KDE holds the hotkeys only while the app runs: the ones installed before are activated
+    // again (the other Linux desktops keep their binds in their own config).
+    #[cfg(unix)]
+    {
+        let me = Arc::clone(&state);
+        runtime.spawn_blocking(move || {
+            if compositor::kde_hotkeys_installed() {
+                if let Err(e) = me.install_hotkeys() {
+                    me.accounts.event(&format!("Hotkeys not registered: {e}"), "warn");
+                }
+            }
+        });
+    }
     let url = format!("http://127.0.0.1:{port}/");
     println!("warframeproject {} engine on {url}", env!("CARGO_PKG_VERSION"));
 
@@ -262,6 +277,8 @@ fn run(settings: config::Settings, browser: bool, headless: bool, offline: bool)
     // The window is gone: stop the background work, let running requests finish, and write what
     // is not on disk yet. Returning from `main` then ends whatever is left.
     state.stop.cancel();
+    #[cfg(unix)]
+    compositor::release_hotkeys();
     // Scans looking for cards give up now, so the requests waiting on them end too.
     state.scans.stop_scans();
     runtime.block_on(async {
