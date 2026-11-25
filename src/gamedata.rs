@@ -29,8 +29,8 @@ const REGIONS_URL: &str =
 /// DE's own Public Export, current with every game update. An LZMA-packed index names each file
 /// with a hash of its contents; the export above is a copy that is regenerated now and then.
 /// The index comes from DE's content CDN, like the files: the origin server serves the same bytes
-/// but answered GitHub's runners with 403 on every daily catalog run (2026-11-22 to 11-25). It is
-/// asked only when the CDN fails.
+/// (the same ETag too) but answered GitHub's runners with 403 on every daily catalog run
+/// (2026-11-22 to 11-25). It is asked only when the CDN fails; the cached copy only when both do.
 const DE_INDEX_URL: &str = "https://content.warframe.com/PublicExport/index_en.txt.lzma";
 const DE_INDEX_ORIGIN_URL: &str = "https://origin.warframe.com/PublicExport/index_en.txt.lzma";
 const DE_FILES_URL: &str = "https://content.warframe.com/PublicExport/Manifest/";
@@ -670,12 +670,8 @@ async fn de_recipes(force: bool) -> Result<Vec<Value>> {
     let cache = config::dirs().cache.clone();
     let index_path = cache.join("de_index_en.txt.lzma");
     let read_index: Reader<String> = Arc::new(|b: &[u8]| unlzma(b));
-    let index = match download_file(DE_INDEX_URL, &index_path, force, Arc::clone(&read_index)).await {
-        Ok(index) => index,
-        Err(cdn) => download_file(DE_INDEX_ORIGIN_URL, &index_path, force, read_index)
-            .await
-            .map_err(|origin| anyhow!("{cdn:#}; from the origin server: {origin:#}"))?,
-    };
+    let (index, _) =
+        fetch_cached_from(&[DE_INDEX_URL, DE_INDEX_ORIGIN_URL], &index_path, force, &Network, read_index).await?;
     // "ExportRecipes_en.json!00_oac+LCAtIyqDxZF8Qe1ZZA"
     let file = index
         .lines()
@@ -827,6 +823,19 @@ pub(crate) async fn fetch_cached<T: Send + 'static>(
     fetch: &dyn Fetch,
     read: Reader<T>,
 ) -> Result<(T, bool)> {
+    fetch_cached_from(&[url], path, force, fetch, read).await
+}
+
+/// `fetch_cached` from the first of `urls` that answers (2xx, or 304 to the cached copy's ETag);
+/// a failed request or an error status moves on to the next. The cached copy stands in only when
+/// the last one fails too. The URLs must serve the same file: they share the cache and its ETag.
+pub(crate) async fn fetch_cached_from<T: Send + 'static>(
+    urls: &[&str],
+    path: &Path,
+    force: bool,
+    fetch: &dyn Fetch,
+    read: Reader<T>,
+) -> Result<(T, bool)> {
     let cached = {
         let (path, read) = (path.to_path_buf(), Arc::clone(&read));
         blocking(move || read_cache(&path, force, &*read)).await?
@@ -836,9 +845,27 @@ pub(crate) async fn fetch_cached<T: Send + 'static>(
         Cached::Stale { data, etag } => (data, etag),
     };
     let headers: Vec<(&str, &str)> = etag.iter().map(|tag| ("If-None-Match", tag.as_str())).collect();
-    let answer = fetch.get(url, &headers, Duration::from_secs(60)).await;
+    let (last, others) = urls.split_last().context("no URL to download from")?;
+    let mut failed = Vec::new();
+    let mut answer = None;
+    for url in others {
+        match fetch.get(url, &headers, Duration::from_secs(60)).await {
+            Ok(resp) if resp.status == 304 || (200..300).contains(&resp.status) => {
+                answer = Some((url, Ok(resp)));
+                break;
+            }
+            Ok(resp) => failed.push(format!("{url}: HTTP {}", resp.status)),
+            Err(e) => failed.push(format!("{url}: {e:#}")),
+        }
+    }
+    let (url, answer) = match answer {
+        Some(answer) => answer,
+        None => (last, fetch.get(last, &headers, Duration::from_secs(60)).await),
+    };
     let (url, path) = (url.to_string(), path.to_path_buf());
-    blocking(move || settle(&url, &path, data, answer, &*read)).await?
+    let settled = blocking(move || settle(&url, &path, data, answer, &*read)).await?;
+    // With no cached copy either, the error names what each source said.
+    if failed.is_empty() { settled } else { settled.with_context(|| failed.join("; ")) }
 }
 
 // Riven base values are per weapon class, not per WFCD category: shotguns sit inside Primary,
@@ -1562,6 +1589,54 @@ mod tests {
             let answer = (self.0.lock().unwrap())(url, headers, timeout);
             Box::pin(std::future::ready(answer))
         }
+    }
+
+    #[tokio::test]
+    async fn the_next_source_is_asked_before_the_cache() {
+        let cache = TestCache::new();
+        let path = cache.path();
+        fs::write(&path, r#"{"old":true}"#).unwrap();
+        fs::write(path.with_extension("etag"), "\"old\"").unwrap();
+        let mut asked = Vec::new();
+        let get = |url: &str, _: &[(&str, &str)], _: Duration| {
+            asked.push(url.to_string());
+            match url {
+                "cdn" => Ok(response(403, "denied", None)),
+                _ => Ok(response(200, r#"{"new":true}"#, Some("\"new\""))),
+            }
+        };
+        let (data, fresh) =
+            fetch_cached_from(&["cdn", "origin"], &path, true, &Mock(std::sync::Mutex::new(get)), json_reader())
+                .await
+                .unwrap();
+        assert_eq!((data, fresh), (json!({"new": true}), true), "the origin's answer, not the cached copy");
+        assert_eq!(asked, ["cdn", "origin"]);
+
+        let (data, fresh) = fetch_cached_from(
+            &["cdn", "origin"],
+            &path,
+            true,
+            &Mock(std::sync::Mutex::new(|_: &str, _: &[(&str, &str)], _: Duration| Err(anyhow!("offline")))),
+            json_reader(),
+        )
+        .await
+        .unwrap();
+        assert_eq!((data, fresh), (json!({"new": true}), false), "both down: the cached copy");
+
+        fs::remove_file(&path).unwrap();
+        let err = fetch_cached_from(
+            &["cdn", "origin"],
+            &path,
+            true,
+            &Mock(std::sync::Mutex::new(|url: &str, _: &[(&str, &str)], _: Duration| {
+                Ok(response(if url == "cdn" { 403 } else { 503 }, "", None))
+            })),
+            json_reader(),
+        )
+        .await
+        .unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("cdn: HTTP 403") && text.contains("HTTP 503"), "{text}");
     }
 
     async fn download_to_with<F>(url: &str, path: &Path, force: bool, get: F) -> Result<Value>

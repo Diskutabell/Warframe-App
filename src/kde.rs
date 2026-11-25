@@ -11,7 +11,8 @@
 //! KWin 6.8 export (checked by introspection and against `kglobalacceld.h`).
 
 use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use gtk::gio;
@@ -37,6 +38,8 @@ const NO_AUTOLOADING: u32 = 4;
 
 /// KWin answers in milliseconds; this only guards against a compositor that is stuck.
 const TIMEOUT_MS: i32 = 2000;
+/// All of `game_window`'s calls together: it runs on the window's thread.
+const LOOKUP_BUDGET: Duration = Duration::from_secs(1);
 
 /// A Plasma session (Wayland or X11), from what the session tells its programs.
 pub fn is_session() -> bool {
@@ -56,6 +59,18 @@ fn call(
     method: &str,
     args: Variant,
 ) -> Result<Variant> {
+    call_within(conn, dest, path, iface, method, args, TIMEOUT_MS)
+}
+
+fn call_within(
+    conn: &gio::DBusConnection,
+    dest: &str,
+    path: &str,
+    iface: &str,
+    method: &str,
+    args: Variant,
+    timeout_ms: i32,
+) -> Result<Variant> {
     conn.call_sync(
         Some(dest),
         path,
@@ -64,7 +79,7 @@ fn call(
         Some(&args),
         None,
         gio::DBusCallFlags::NO_AUTO_START,
-        TIMEOUT_MS,
+        timeout_ms,
         gio::Cancellable::NONE,
     )
     .map_err(|e| anyhow!("{method}: {}", e.message()))
@@ -77,17 +92,31 @@ fn call(
 /// KWin has no call that lists windows, but its window search for KRunner (`/WindowsRunner`)
 /// answers with the ids of the windows whose title matches, and `getWindowInfo` describes one by
 /// id: its class, title, geometry and state. Both only read. The search finds browser tabs and
-/// chats that name the game too, so each hit is checked with `is_game`.
+/// chats that name the game too (and this app's own window), so each hit is checked with
+/// `is_game`.
+///
+/// The overlays are placed from the window's thread, so all the calls share one short budget and
+/// the first failure ends the search: each answers in a millisecond unless KWin is stuck.
 pub fn game_window(is_game: impl Fn(&str, &str) -> bool) -> Option<Rect> {
+    let deadline = Instant::now() + LOOKUP_BUDGET;
+    let left = || {
+        let ms = deadline.saturating_duration_since(Instant::now()).as_millis();
+        (ms > 0).then(|| ms.min(i32::MAX as u128) as i32)
+    };
     let conn = session_bus().ok()?;
-    let hits = call(&conn, KWIN, "/WindowsRunner", "org.kde.krunner1", "Match", ("warframe",).to_variant()).ok()?;
+    let hits =
+        call_within(&conn, KWIN, "/WindowsRunner", "org.kde.krunner1", "Match", ("warframe",).to_variant(), left()?)
+            .ok()?;
     // a(sssida{sv}): match id "0_{uuid}", text, icon, type, relevance, properties.
-    hits.child_value(0).iter().find_map(|hit| {
-        let id = hit.try_child_value(0)?.str()?.to_owned();
-        let (_, uuid) = id.split_once('_')?;
-        let info = call(&conn, KWIN, "/KWin", KWIN, "getWindowInfo", (uuid,).to_variant()).ok()?.child_value(0);
-        window_rect(&info, &is_game)
-    })
+    for hit in hits.child_value(0).iter() {
+        let Some(id) = hit.try_child_value(0).and_then(|v| v.str().map(str::to_owned)) else { continue };
+        let Some((_, uuid)) = id.split_once('_') else { continue };
+        let info = call_within(&conn, KWIN, "/KWin", KWIN, "getWindowInfo", (uuid,).to_variant(), left()?).ok()?;
+        if let Some(rect) = window_rect(&info.child_value(0), &is_game) {
+            return Some(rect);
+        }
+    }
+    None
 }
 
 /// The geometry from a `getWindowInfo` answer (`a{sv}`), when it describes a shown game window.
@@ -197,8 +226,22 @@ pub struct Shortcut<'a> {
     pub text: &'a str,
 }
 
-/// The actions this run holds live, to let go of when the app quits.
-static LIVE: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// What this run holds in kglobalaccel. The lock is kept for a whole registration and for the
+/// release at exit, so they never interleave: a registration finishing after the release would
+/// leave keys grabbed with no program behind them, and two at once could undo each other.
+struct Held {
+    /// Live actions, recorded as each one goes live, so that one registered by a registration that
+    /// failed halfway is let go of too.
+    live: Vec<String>,
+    /// The app is quitting: nothing is registered any more.
+    released: bool,
+}
+
+static HELD: Mutex<Held> = Mutex::new(Held { live: Vec::new(), released: false });
+
+fn held() -> std::sync::MutexGuard<'static, Held> {
+    HELD.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Whether the shortcuts were registered once (in this or an earlier run): kglobalaccel still
 /// knows the component. A start only activates them again then, as Hyprland and Sway keep an
@@ -219,25 +262,34 @@ pub fn installed() -> bool {
 /// taken from it - kglobalaccel itself would hand it out twice (seen with KWin's Meta+W): the
 /// others are registered, and the error names what has it, as System Settings would.
 pub fn register(port: u16, shortcuts: &[Shortcut]) -> Result<()> {
-    let mut wanted = Vec::new();
+    let mut wanted: Vec<(String, Option<i32>, &Shortcut)> = Vec::new();
     for s in shortcuts {
         let key = s.key.trim();
-        let code =
-            if key.is_empty() {
-                None
-            } else {
-                Some(qt_key(key).ok_or_else(|| {
-                    UserError::new(format!("\"{key}\" is not a key KDE can bind (try F9 or ctrl+F9)."))
-                })?)
-            };
+        let code = if key.is_empty() {
+            None
+        } else {
+            let code = qt_key(key)
+                .ok_or_else(|| UserError::new(format!("\"{key}\" is not a key KDE can bind (try F9 or ctrl+F9).")))?;
+            if let Some((_, _, other)) = wanted.iter().find(|(_, c, _)| *c == Some(code)) {
+                return Err(UserError::new(format!(
+                    "{key} is set for both \"{}\" and \"{}\": give each its own key.",
+                    other.text, s.text
+                ))
+                .into());
+            }
+            Some(code)
+        };
         wanted.push((action_name(s.path), code, s));
     }
     if wanted.iter().all(|(_, code, _)| code.is_none()) {
         return Err(UserError::new("Set at least one key first.").into());
     }
+    let mut held = held();
+    if held.released {
+        return Ok(());
+    }
     let conn = session_bus()?;
     let accel = |method: &str, args: Variant| call(&conn, ACCEL, ACCEL_PATH, ACCEL_IFACE, method, args);
-
     let mut taken = Vec::new();
     for (_, code, s) in &mut wanted {
         let Some(key) = *code else { continue };
@@ -246,6 +298,12 @@ pub fn register(port: u16, shortcuts: &[Shortcut]) -> Result<()> {
             *code = None;
         }
     }
+    // An action leaves KDE's list altogether when its key is cleared, taken or refused.
+    let drop_action = |held: &mut Held, action: &str| -> Result<()> {
+        accel("unregister", (COMPONENT, action).to_variant())?;
+        held.live.retain(|a| a != action);
+        Ok(())
+    };
     // Our own keys go first, so that two actions can swap keys without colliding with each other.
     for (action, code, s) in &wanted {
         if code.is_some() {
@@ -254,12 +312,13 @@ pub fn register(port: u16, shortcuts: &[Shortcut]) -> Result<()> {
                 "setShortcutKeys",
                 (action_id(action, s.text), Vec::<(Vec<i32>,)>::new(), SET_PRESENT | NO_AUTOLOADING).to_variant(),
             )?;
+            if !held.live.contains(action) {
+                held.live.push(action.clone());
+            }
         } else {
-            // A cleared or taken key: the action leaves KDE's list altogether.
-            accel("unregister", (COMPONENT, action.as_str()).to_variant())?;
+            drop_action(&mut held, action)?;
         }
     }
-    let mut live = Vec::new();
     for (action, code, s) in &wanted {
         let Some(code) = *code else { continue };
         let set = accel(
@@ -271,14 +330,14 @@ pub fn register(port: u16, shortcuts: &[Shortcut]) -> Result<()> {
             .child_value(0)
             .iter()
             .any(|seq| seq.child_value(0).try_child_value(0).and_then(|k| k.get::<i32>()) == Some(code));
-        if got {
-            live.push(action.clone());
-        } else {
+        if !got {
             taken.push(format!("{} is already a KDE shortcut", s.key.trim()));
+            drop_action(&mut held, action)?;
         }
     }
-    *LIVE.lock().unwrap_or_else(|e| e.into_inner()) = live;
-    listen(&conn, port)?;
+    if !held.live.is_empty() {
+        listen(&conn, port)?;
+    }
     if !taken.is_empty() {
         return Err(UserError::new(format!(
             "{}. Pick another key, or free it in System Settings > Keyboard > Shortcuts.",
@@ -304,9 +363,11 @@ fn holder(accel: &impl Fn(&str, Variant) -> Result<Variant>, key: i32) -> Option
 
 /// Lets go of the keys when the app quits: kglobalaccel keeps grabbing a live action's keys until
 /// told otherwise, also after the program that registered it is gone. They stay in KDE's list and
-/// come back on the next start.
+/// come back on the next start. Waits for a registration under way; any later one does nothing.
 pub fn release() {
-    let actions = std::mem::take(&mut *LIVE.lock().unwrap_or_else(|e| e.into_inner()));
+    let mut held = held();
+    held.released = true;
+    let actions = std::mem::take(&mut held.live);
     if actions.is_empty() {
         return;
     }
@@ -318,13 +379,10 @@ pub fn release() {
 
 /// Starts (once) the thread that answers presses: kglobalaccel sends `globalShortcutPressed` on
 /// the component's object, and a press calls the API path of its action, as the hotkeys on the
-/// other desktops do.
+/// other desktops do. Called under `HELD`'s lock, so two registrations cannot start two.
 fn listen(conn: &gio::DBusConnection, port: u16) -> Result<()> {
-    // Held until the thread listens: the start's registration and an Install pressed at the same
-    // moment must not start two listeners (each press would then scan twice).
-    static STARTED: Mutex<bool> = Mutex::new(false);
-    let mut started = STARTED.lock().unwrap_or_else(|e| e.into_inner());
-    if *started {
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    if STARTED.load(Ordering::Acquire) {
         return Ok(());
     }
     let path = call(conn, ACCEL, ACCEL_PATH, ACCEL_IFACE, "getComponent", (COMPONENT,).to_variant())?
@@ -339,7 +397,7 @@ fn listen(conn: &gio::DBusConnection, port: u16) -> Result<()> {
         // has its own, so presses arrive whether or not the GTK window runs.
         let context = glib::MainContext::new();
         let run = context.with_thread_default(|| {
-            conn.signal_subscribe(
+            let subscription = conn.signal_subscribe(
                 Some(ACCEL),
                 Some(COMPONENT_IFACE),
                 Some("globalShortcutPressed"),
@@ -360,7 +418,12 @@ fn listen(conn: &gio::DBusConnection, port: u16) -> Result<()> {
                     });
                 },
             );
-            let _ = ready.send(());
+            // Nobody waits any more (it took too long): a later registration starts another, so
+            // this one must not answer presses as well.
+            if ready.send(()).is_err() {
+                conn.signal_unsubscribe(subscription);
+                return;
+            }
             glib::MainLoop::new(Some(&context), false).run();
         });
         if run.is_err() {
@@ -368,7 +431,7 @@ fn listen(conn: &gio::DBusConnection, port: u16) -> Result<()> {
         }
     })?;
     wait.recv_timeout(Duration::from_secs(5)).context("the KDE hotkey listener did not start")?;
-    *started = true;
+    STARTED.store(true, Ordering::Release);
     Ok(())
 }
 
