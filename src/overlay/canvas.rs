@@ -24,8 +24,8 @@ impl Colour {
     }
 }
 
-/// The bundled typeface (web/public/fonts), as the main window uses it: one variable font, Hubot
-/// Sans, at four widths and weights.
+/// The bundled typeface (web/public/fonts), as the main window uses it: one variable font, Archivo,
+/// at four widths and weights. Its zero is plain, so prices and counts read at a glance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Face {
     /// Semibold and a little narrow: names, small figures.
@@ -39,7 +39,7 @@ pub enum Face {
 }
 
 /// The variable font every face is an instance of.
-const FONT: &str = "HubotSans-Variable.ttf";
+const FONT: &str = "Archivo-Variable.ttf";
 
 struct Fonts {
     label: FontArc,
@@ -53,7 +53,7 @@ fn load(name: &str) -> FontVec {
     FontVec::try_from_vec(file.data.into_owned()).unwrap_or_else(|e| panic!("font {name}: {e}"))
 }
 
-/// The font at a width (75-125, percent of normal) and a weight (200-900).
+/// The font at a width (62-125, percent of normal) and a weight (100-900).
 fn instance(width: f32, weight: f32) -> FontArc {
     let mut font = load(FONT);
     font.set_variation(b"wdth", width);

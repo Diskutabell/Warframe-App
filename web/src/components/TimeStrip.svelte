@@ -1,25 +1,17 @@
 <!-- The next hours of the Origin System on one scale, now at the left edge: the arbitration of each
-     hour, the fissures that fit relics you hold, the open-world cycles, and the resets. Everything
-     here is drawn where it ends, so what overlaps is plain to see. -->
-<script lang="ts" module>
-  type Fissure = { mission: string | null; node: string | null; expiry: string | null };
-  /** One tier's fissures that fit a relic you hold, and the best of those relics. */
-  export type Crack = { tier: string; hard: boolean; best: { name: string }; missions: Fissure[] };
-</script>
-
+     hour, the open-world cycles, and the resets. Only timers: everything here is drawn where it
+     ends, so what overlaps is plain to see. -->
 <script lang="ts">
-  import { clock, openDetails } from "../lib/app.svelte";
+  import { clock } from "../lib/app.svelte";
   import { epoch } from "../lib/format";
   import type { Arbitrations } from "../types/Arbitrations";
   import type { Cycle } from "../types/Cycle";
   import type { Resets } from "../types/Resets";
   import type { Slot } from "../types/Slot";
-  import Era from "./Era.svelte";
 
-  let { arbitration = null, cycles = [], crack = [], resets = null }: {
+  let { arbitration = null, cycles = [], resets = null }: {
     arbitration?: Arbitrations | null;
     cycles?: Cycle[];
-    crack?: Crack[];
     resets?: Resets | null;
   } = $props();
 
@@ -58,7 +50,7 @@
 
   // ---------------------------------------------------------------- the lanes
   // `key` stays the same while `from` follows now, so a segment is kept, not drawn anew.
-  type Seg = { key: string; from: number; to: number; cls: string; label: string; strong?: string; era?: string; title: string; href?: string; open?: () => void };
+  type Seg = { key: string; from: number; to: number; cls: string; label: string; strong?: string; title: string; href: string };
   type Lane = { label: string; thin?: boolean; segs: Seg[] };
 
   const LIGHT = new Set(["day", "warm", "fass"]);
@@ -78,19 +70,6 @@
         title: `${s.tier ? `${s.tier} tier: ` : ""}${s.mission} on ${s.node}, ${s.planet}. ${hhmm(s.start)} to ${hhmm(s.end)}`,
       })) });
     }
-    // Fissures that fit a relic you hold: open until the last of them closes.
-    crack.slice(0, 3).forEach((g, i) => {
-      const ends = g.missions.map((m) => epoch(m.expiry)).filter((t) => Number.isFinite(t) && t > now);
-      if (!ends.length) return;
-      const last = Math.max(...ends);
-      const kinds = [...new Set(g.missions.map((m) => m.mission).filter(Boolean))].join(", ");
-      out.push({ label: i ? "" : "Crack now", segs: [{
-        // A relic's name starts with its era; the tier is only news when it differs (Omnia).
-        key: "relic", from: now, to: Math.min(last, end), cls: "relic", era: g.best.name.startsWith(g.tier) ? "" : g.tier, strong: g.best.name, label: `${kinds}${g.hard ? ", Steel Path" : ""}`,
-        open: () => openDetails(g.best.name),
-        title: `${g.best.name} Relic in ${g.missions.map((m) => `${m.mission} on ${m.node} until ${hhmm(epoch(m.expiry))}`).join("; ")}`,
-      }] });
-    });
     // The open worlds: this half until it turns, then the name of the next. How long that one lasts
     // is not in the world state, so no bar claims it.
     for (const c of cycles) {
@@ -121,7 +100,7 @@
 </script>
 
 {#if lanes.length}
-  <div class="strip" class:drawn={entering} class:narrow bind:clientWidth={width} role="group" aria-label="The next {hours} hours">
+  <div class="strip" class:drawn={entering} class:narrow class:marked={marks.length > 0} bind:clientWidth={width} role="group" aria-label="The next {hours} hours">
     <div></div>
     <div class="strip-hours" aria-hidden="true">
       <span class="now" style:left="0">Now {hhmm(now)}</span>
@@ -131,11 +110,8 @@
       <div class="strip-label">{lane.label}</div>
       <div class="strip-lane" class:thin={lane.thin}>
         {#each lane.segs as s (s.key)}
-          {@const style = s.cls === "relic" ? `--bar:${x(s.to)}%;--lane:${i}` : `left:${x(s.from)}%;width:calc(${x(s.to) - x(s.from)}% - 3px);--lane:${i}`}
-          {#snippet body()}{#if s.era}<Era era={s.era} />{/if}{#if s.strong}<b>{s.strong}</b>{/if}<span>{s.label}</span>{/snippet}
-          {#if s.open}<button type="button" class="tseg {s.cls}" {style} title={s.title} aria-label={s.title} onclick={s.open}>{@render body()}</button>
-          {:else if s.href}<a class="tseg {s.cls}" {style} href={s.href} title={s.title} aria-label={s.title}>{@render body()}</a>
-          {:else}<span class="tseg {s.cls}" {style} title={s.title}>{@render body()}</span>{/if}
+          <a class="tseg {s.cls}" style="left:{x(s.from)}%;width:calc({x(s.to) - x(s.from)}% - 3px);--lane:{i}" href={s.href} title={s.title} aria-label={s.title}>
+            {#if s.strong}<b>{s.strong}</b>{/if}<span>{s.label}</span></a>
         {/each}
       </div>
     {/each}

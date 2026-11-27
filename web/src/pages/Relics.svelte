@@ -50,14 +50,14 @@
         <label class="check"><input type="checkbox" bind:checked={st.unvaulted} />Not vaulted</label>
         <span class="count">{fmt(rows.length)} relics</span>
       </div>
-      <div class="cards">
+      <div class="cards relic-grid">
         {#each rows.slice(0, 400) as r (r.name)}
-          {@const owned = Object.entries(r.counts).filter(([, n]) => n).map(([k, n]) => `${n}× ${k}`).join(", ")}
+          {@const owned = Object.entries(r.counts).filter(([, n]) => n).map(([k, n]) => `${n} ${k.toLowerCase()}`).join(", ")}
           <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-          <div class="icard" onclick={() => openDetails(r.name)}>
-            <div class="relic-art"><Art src={r.image} cls="lg" />{#if r.total}<span class="relic-qty num">{r.total}</span>{/if}</div>
+          <div class="icard relic-card" onclick={() => openDetails(r.name)}>
+            <Art src={r.image} cls="lg" />
             <div class="body">
-              <div class="row"><span class="name grow">{r.name}</span><Era era={r.era} /></div>
+              <div class="row"><span class="name grow">{r.name}</span>{#if r.total}<span class="pill qty" title="{fmt(r.total)} held">×{fmt(r.total)}</span>{/if}<Era era={r.era} /></div>
               <div class="pips">
                 {#each r.rewards as x}
                   <span class="pip" class:ok={x.have > 0} class:want={x.needed > x.have}
@@ -65,10 +65,11 @@
                 {/each}
               </div>
               <div class="meta"><span><Plat n={r.ev.Radiant} /> radiant</span><span><Plat n={r.ev.Intact} /> intact</span></div>
-              <div class="meta">{#if isOpen(r)}<span class="pill" title="A fissure that takes this relic is open now"><Icon name="fissures" /> Fissure open</span>{/if}
-                {#if r.needsCount}<span class="pill lotus">{r.needsCount} {r.needsCount === 1 ? "drop" : "drops"} needed</span>{/if}
+              <!-- One line each, so every card is the same height; the full text is in the tooltips. -->
+              <div class="meta tags">{#if isOpen(r)}<span class="pill" title="A fissure that takes this relic is open now"><Icon name="fissures" /> Crack now</span>{/if}
+                {#if r.needsCount}<span class="pill lotus" title="{r.needsCount} of its drops you still need">{r.needsCount} needed</span>{/if}
                 {#if r.vaulted}<span class="pill vaulted">Vaulted</span>{/if}</div>
-              {#if owned}<div class="meta">{owned}</div>{/if}
+              <div class="meta owned" title={owned}>{owned}</div>
             </div>
           </div>
         {:else}

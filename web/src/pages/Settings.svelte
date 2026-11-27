@@ -239,9 +239,9 @@
         </div>
 
         <div class="card" id="sec-hotkeys"><div class="card-head"><h2>Tray and hotkeys</h2></div>
-          {@render toggle(s, "minimize_to_tray", "Minimize to system tray", linux
-            ? "Closing the window hides it to your system tray or status bar instead of quitting. Click the tray icon or press the window hotkey below to bring it back."
-            : "Closing the window hides it to the system tray instead of quitting. Click the tray icon or press the window hotkey below to bring it back.")}
+          {@render toggle(s, "minimize_to_tray", "Close to tray", linux
+            ? "Closing the window hides it to your system tray or status bar instead of quitting. Click the tray icon or press the window hotkey below to bring it back; quit from the tray icon's menu or with Quit app at the end of this page."
+            : "Closing the window hides it to the system tray instead of quitting. Click the tray icon or press the window hotkey below to bring it back; quit from the tray icon's menu or with Quit app at the end of this page.")}
           {@render text(s, "hotkey_window", "Show or hide the window", "Toggles the window between the tray and your screen. Clear to disable.", "")}
           {@render text(s, "hotkey_rewards", "Read the reward screen", "", "")}
           {@render text(s, "hotkey_riven", "Grade the riven on screen", "", "")}
