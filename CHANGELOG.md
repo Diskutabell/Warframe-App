@@ -5,21 +5,24 @@
 ### Changed
 
 - **A new look, built around time.** Warframe runs on clocks, so the Overview now opens with the
-  next hours on one scale: the arbitration of each hour, the fissures that take relics you hold
-  (until the last of them closes), each open world's cycle until it turns, and the daily reset.
-  What lies further out (Baro, the weekly reset, the next S-tier arbitration) is listed beside it.
-  The Fissures page draws each fissure's time left on the same kind of scale.
-- **One colour means "worth doing now".** The window is a petrol green-blue (Lotus night) with
-  bone text. Amber marks only what is worth doing now: an S-tier arbitration, a build ready to
-  claim, a rank-up, the best pick on a reward screen. Aqua marks what is yours (drops you still
-  need, what you watch or pinned), coral what is short or missing. Relic eras, factions and
-  syndicates keep their own colours.
-- **One typeface, Hubot Sans**, in the window and the overlays, replacing Rajdhani and Source
-  Sans 3. Its zero is barred and its capital I has serifs, so relic names like Neo O1 read right.
-  Labels are in sentence case.
-- **The sidebar shows the key that opens each page** (1-9, 0 for Settings), and sections name the
-  page they lead to with its key instead of "Open".
-- **The overlays and the tray icon match the window**: panels on the same ground, the best pick in
+  next hours on one scale: the arbitration of each hour, each open world's cycle until it turns,
+  and the daily reset. What lies further out (Baro, the weekly reset, the next S-tier arbitration)
+  is listed beside the other sections. The Fissures page draws each fissure's time left on the
+  same kind of scale.
+- **A neutral charcoal base with teal accents**, so the colours that mean something stand out: amber
+  marks only what is worth doing now (an S-tier arbitration, a build ready to claim, a rank-up, the
+  best pick on a reward screen), teal what is yours (drops you still need, what you watch or
+  pinned), coral what is short or missing, green what is done. Relic eras, factions and syndicates
+  keep their own colours. Sections sit on cards with a fine edge.
+- **One typeface, Archivo**, in the window and the overlays, replacing Rajdhani and Source Sans 3:
+  tabular figures with a plain zero, so prices and counts read at a glance. Labels are in sentence
+  case.
+- **The sidebar** keeps its icons; the key that opens a page (1-9, 0 for Settings) shows when you
+  point at it. What the engine is doing (game, profile, inventory) is one pill at the bottom, with
+  the details when you point at it. The Hide to tray and Quit buttons are gone: *Minimize to system
+  tray* is now *Close to tray* in Settings, and Quit is in the tray icon's menu and in Settings.
+- **Relic cards** are all the same height, and how many you hold sits beside the relic's era.
+- **The overlays and the tray icon match the window**: panels on the same charcoal, the best pick in
   amber, prices in plain figures.
 
 ### Fixed

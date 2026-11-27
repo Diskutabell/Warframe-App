@@ -1,7 +1,7 @@
 //! Windows system tray icon (`Shell_NotifyIconW`) with a left-click toggle and right-click menu.
 //!
 //! Runs a tiny hidden message-only window on its own thread so tray events stay independent of
-//! tao's window loop and toggling "Minimize to system tray" in Settings adds or removes the icon
+//! tao's window loop and toggling "Close to tray" in Settings adds or removes the icon
 //! live without restarting.
 
 use std::sync::Arc;

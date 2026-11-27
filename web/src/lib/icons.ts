@@ -1,7 +1,8 @@
 // Simple line icons drawn for this app (24x24, stroked).
 export const PATHS = {
   home: "M3 11 12 4l9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z",
-  mastery: "M12 3 4.5 7v10L12 21l7.5-4V7z M12 8l3 2v4l-3 2-3-2v-4z",
+  // A rank medal: the relic glyph below is a hexagon, so this one is not.
+  mastery: "M12 3.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11z M8.6 13.4 7 21l5-2.6 5 2.6-1.6-7.6 M12 6.8l.9 1.8 2 .3-1.45 1.4.35 2-1.8-.95-1.8.95.35-2L9.1 8.9l2-.3z",
   primes: "M4 7h16M4 12h16M4 17h10 M18 15l2 2-2 2",
   relics: "M12 2 20 7v10l-8 5-8-5V7z M12 7l4 2.5v5L12 17l-4-2.5v-5z",
   fissures: "M13 2 4 14h7l-1 8 9-12h-7z",

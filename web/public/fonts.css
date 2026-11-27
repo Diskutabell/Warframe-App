@@ -1,10 +1,10 @@
-/* Bundled so the app renders offline and never contacts Google. License: fonts/OFL-HubotSans.txt.
+/* Bundled so the app renders offline and never contacts Google. License: fonts/OFL-Archivo.txt.
    TrueType rather than WOFF2: the same file serves the overlays, which cannot read WOFF fonts.
-   One variable family: width (75-125) and weight (200-900) do the work two typefaces used to. */
+   One variable family: width (62-125) and weight (100-900) do the work two typefaces used to. */
 @font-face {
-  font-family: "Hubot Sans";
-  font-weight: 200 900;
-  font-stretch: 75% 125%;
+  font-family: "Archivo";
+  font-weight: 100 900;
+  font-stretch: 62% 125%;
   font-display: swap;
-  src: url("fonts/HubotSans-Variable.ttf") format("truetype");
+  src: url("fonts/Archivo-Variable.ttf") format("truetype");
 }

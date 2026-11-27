@@ -8,26 +8,27 @@ use crate::rivens::Graded;
 use crate::services::scans::{RewardItem, RewardResult, RivenResult};
 
 const NOTHING_READ: &str = "No reward names recognized.";
-// The window's palette (web/src/app.css): panels on its ground, Lotus night, and the best pick in
-// reactant amber, the one colour that means "this one".
-const PANEL: Colour = Colour(17, 41, 43, 0.96);
+// The window's palette (web/src/app.css): panels like its cards, a neutral charcoal that is softer
+// than black and leaves the colours that mean something their contrast, and the best pick in amber,
+// the one colour that means "this one".
+const PANEL: Colour = Colour(34, 37, 41, 0.96);
 const PANEL_BEST: Colour = Colour(52, 40, 15, 0.97);
-const EDGE: Colour = Colour(152, 179, 176, 0.32);
-const RULE: Colour = Colour(152, 179, 176, 0.2);
+const EDGE: Colour = Colour(163, 170, 178, 0.3);
+const RULE: Colour = Colour(163, 170, 178, 0.18);
 const NOW: Colour = Colour::hex(0xfab340);
-const NAME: Colour = Colour::hex(0xbfd3ce);
+const NAME: Colour = Colour::hex(0xc9ced4);
 const INK: Colour = Colour::hex(0x2e1e0a);
-const PLAT: Colour = Colour::hex(0xe6efeb);
-const NONE: Colour = Colour::hex(0x789292);
-const DUCATS: Colour = Colour::hex(0xbfd3ce);
-const MUTED: Colour = Colour::hex(0x98b3b0);
-const NEEDED: Colour = Colour::hex(0x9ce3d9);
-const VAULTED: Colour = Colour::hex(0xe6efeb);
+const PLAT: Colour = Colour::hex(0xebedf0);
+const NONE: Colour = Colour::hex(0x878d95);
+const DUCATS: Colour = Colour::hex(0xc9ced4);
+const MUTED: Colour = Colour::hex(0xa3aab2);
+const NEEDED: Colour = Colour::hex(0x56d7ca);
+const VAULTED: Colour = Colour::hex(0xebedf0);
 const ERROR: Colour = Colour::hex(0xfc917a);
-const RIVEN: Colour = Colour::hex(0xb9a6f2);
-const WEAPON: Colour = Colour::hex(0xe6efeb);
-const STAT: Colour = Colour::hex(0xe6efeb);
-const DARK: Colour = Colour::hex(0x0a1f21);
+const RIVEN: Colour = Colour::hex(0xb9a6f3);
+const WEAPON: Colour = Colour::hex(0xebedf0);
+const STAT: Colour = Colour::hex(0xebedf0);
+const DARK: Colour = Colour::hex(0x141619);
 
 fn grade_colour(grade: &str) -> Colour {
     match grade.chars().next() {

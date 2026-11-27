@@ -1,4 +1,4 @@
-<!-- Overview: who you are, the next hours of the Origin System, and what to do about them. -->
+<!-- Overview: who you are, the next hours of the Origin System, and what to do now. -->
 <script lang="ts">
   import Art from "../components/Art.svelte";
   import Card from "../components/Card.svelte";
@@ -8,7 +8,7 @@
   import Icon from "../components/Icon.svelte";
   import Img from "../components/Img.svelte";
   import Plat from "../components/Plat.svelte";
-  import TimeStrip, { type Crack } from "../components/TimeStrip.svelte";
+  import TimeStrip from "../components/TimeStrip.svelte";
   import { act } from "../lib/api";
   import { changed, clock, openDetails } from "../lib/app.svelte";
   import { ago, epoch, fmt } from "../lib/format";
@@ -62,8 +62,10 @@
   );
 
   // Crack now: per tier (and Steel Path), the best relic you hold for the fissures open.
-  const crack = $derived.by((): (Crack & { best: NonNullable<NonNullable<Fissures["fissures"][number]["relics"]>["best"]>; owned: number })[] => {
-    const groups = new Map<string, Crack & { best: NonNullable<NonNullable<Fissures["fissures"][number]["relics"]>["best"]>; owned: number }>();
+  type Row = Fissures["fissures"][number];
+  type Group = { tier: string; hard: boolean; best: NonNullable<NonNullable<Row["relics"]>["best"]>; owned: number; missions: Row[] };
+  const crack = $derived.by((): Group[] => {
+    const groups = new Map<string, Group>();
     for (const f of fissures.data?.fissures ?? []) {
       if (f.storm || !f.relics || !f.relics.owned || !f.relics.best) continue;
       const key = `${f.tier}|${f.hard}`;
@@ -133,7 +135,7 @@
       <div class="mr">
         <span><b>{mr == null ? "MR ?" : `MR ${shown}`}</b></span>
         <span title={breakdown}><b class="num">{fmt(toNext)}</b> mastery XP to {rankName(m.rank + 1)}</span>
-        <span class="bar" title="{Math.round(within * 100)}% of the way from {rankName(m.rank)} to {rankName(m.rank + 1)}"><i style:width="{(within * 100).toFixed(1)}%"></i></span>
+        <span class="bar lotus" title="{Math.round(within * 100)}% of the way from {rankName(m.rank)} to {rankName(m.rank + 1)}"><i style:width="{(within * 100).toFixed(1)}%"></i></span>
         <span><b class="num">{fmt(S.mastered)}</b> of {fmt(S.total)} items mastered</span>
       </div>
     </div>
@@ -145,22 +147,13 @@
   </header>
   {#if hint}<p class="overview-foot">{hint}</p>{/if}
 
-  <div class="strip-wrap">
-    <div>
-      <TimeStrip arbitration={arb} cycles={w?.cycles ?? []} {crack} resets={w?.resets ?? null} />
-      {#if !arb?.current && !w && !crack.length}
-        <div class="empty"><b>The world state isn't loaded</b>{world.data?.error || world.error || "It comes from api.warframestat.us."} The Overview asks again every minute, and the strip fills in once it answers.</div>
+  <div class="timeline">
+    <Card title="Next hours" link="world">
+      <TimeStrip arbitration={arb} cycles={w?.cycles ?? []} resets={w?.resets ?? null} />
+      {#if !arb?.current && !w}
+        <div class="empty"><b>The world state isn't loaded</b>{world.data?.error || world.error || "It comes from api.warframestat.us."} The Overview asks again every minute, and the timeline fills in once it answers.</div>
       {/if}
-    </div>
-    {#if w || arb?.current}<aside class="later">
-      <h2>Later</h2>
-      <div class="list">
-        {#each later as l (l.name)}
-          <a class="list-row plain" href={l.href}><div class="main"><div class="t">{l.name}</div>{#if l.sub}<div class="s">{l.sub}</div>{/if}</div>
-            <div class="when"><b>{day(l.t)}</b><span><Countdown until={l.t} /></span></div></a>
-        {:else}<div class="muted">Nothing scheduled past the next {STRIP_HOURS} hours.</div>{/each}
-      </div>
-    </aside>{/if}
+    </Card>
   </div>
 
   <div class="grid cols-2">
@@ -227,6 +220,17 @@
     </div>
 
     <div class="stack">
+      {#if w || arb?.current}
+        <div class="later"><Card title="Later">
+          <div class="list">
+            {#each later as l (l.name)}
+              <a class="list-row plain" href={l.href}><div class="main"><div class="t">{l.name}</div>{#if l.sub}<div class="s">{l.sub}</div>{/if}</div>
+                <div class="when"><b>{day(l.t)}</b><span><Countdown until={l.t} /></span></div></a>
+            {:else}<div class="muted">Nothing scheduled past the next {STRIP_HOURS} hours.</div>{/each}
+          </div>
+        </Card></div>
+      {/if}
+
       <Card title="Standing left today" link="standing">
         {#if !st || !st.loaded}
           <div class="empty"><b>No syndicate data yet</b>It comes with the game data.</div>
