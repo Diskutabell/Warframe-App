@@ -73,7 +73,7 @@
         {/if}
       {:else}
         {@const c = data.currencies}
-        <div class="page-head"><div><h1>Inventory</h1><p>{fmt(data.items.length)} stacks · {data.source || ""} {ago(data.imported)}</p></div></div>
+        <div class="page-head"><div><h1>Inventory</h1><p>{fmt(data.items.length)} stacks{data.source ? `, from the ${data.source}` : ""}, read {ago(data.imported)}.</p></div></div>
         <div class="tiles cur-row">
           {#each [["platinum", c?.platinum, "Platinum"], ["credits", c?.credits, "Credits"], ["endo", c?.endo, "Endo"], ["ducats", c?.ducats, "Ducats"]] as [icon, n, label]}
             {#if n != null}<div class="tile cur"><img src="icons/{icon}.png" alt="" width="26" height="26" /><div><b>{fmt(n as number)}</b><span>{label}</span></div></div>{/if}

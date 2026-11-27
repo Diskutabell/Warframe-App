@@ -25,7 +25,7 @@
 
 {#snippet row(o: OfferRow, title: number)}
   <div class="list-row" class:dim={!o.available}><Art src={o.image} cls="sm" />
-    <div class="main"><div class="t">{o.name}</div><div class="s">{fmt(o.standing)} standing{o.level > title ? ` · needs rank ${o.level}` : ""}</div></div>
+    <div class="main"><div class="t">{o.name}</div><div class="s">{fmt(o.standing)} standing{o.level > title ? `, needs rank ${o.level}` : ""}</div></div>
     <div style="text-align:right">{#if o.slug}<Plat n={o.price} />{:else}<span class="faint">not tradable</span>{/if}
       {#if o.perK != null}<div class="faint num" style="font-size:12.5px">{o.perK}p / 1k</div>{/if}</div></div>
 {/snippet}
@@ -41,7 +41,7 @@
   <div class="dhead"><Img src={s.rankIcon || s.icon} px={96} cls="gi" /><div class="grow">
     <h2>{s.name}</h2>
     <div class="row wrap"><span class="pill" style={s.colour ? `color:color-mix(in srgb, ${s.colour} 65%, #fff 35%);border-color:color-mix(in srgb, ${s.colour} 45%, transparent)` : null}>{s.rankName}</span>
-      {#if s.atCap}<span class="pill gold">Rank up ready</span>{/if}{#if s.full}<span class="pill warn">Full - spend it</span>{/if}</div></div></div>
+      {#if s.atCap}<span class="pill gold">Rank up ready</span>{/if}{#if s.full}<span class="pill warn">Full: spend some</span>{/if}</div></div></div>
   <div class="kv">
     <div><span>Standing</span><b>{fmt(s.standing)}</b></div>
     <div><span>This rank</span><b>{s.steps ? `${s.progress} / ${s.size}` : s.size ? `${fmt(s.progress)} / ${fmt(s.size)}` : "–"}</b></div>
@@ -52,7 +52,7 @@
       {#each s.allies as a}<span class="chip res" class:owned={a.share > 0}>{a.share > 0 ? "+" : "−"}{Math.abs(Math.round(a.share * 100))}% {a.name}</span>{/each}
     </div></div>
   {/if}
-  <div class="dsec"><h2>What standing buys <span class="count">{tradable.length} tradable</span>{#if s.pricing}<span class="muted" style="letter-spacing:0;text-transform:none;font-weight:400"> pricing {s.pricing}…</span>{/if}</h2>
+  <div class="dsec"><h2>What standing buys <span class="count">{tradable.length} tradable</span>{#if s.pricing}<span class="muted" style="font-weight:400">, pricing {s.pricing}…</span>{/if}</h2>
     <p class="muted" style="margin:-4px 0 8px;font-size:13px">What you can buy at your rank first, by platinum per 1,000 standing (the lowest sell order on warframe.market).</p>
     <div class="list">{#each tradable as o}{@render row(o, s.title)}{:else}<div class="muted">Nothing this syndicate offers sells on warframe.market.</div>{/each}</div>
     {#if other.length}<details class="more"><summary>{other.length} more that cannot be traded</summary><div class="list">{#each other as o}{@render row(o, s.title)}{/each}</div></details>{/if}

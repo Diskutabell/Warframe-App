@@ -1,10 +1,11 @@
-<!-- An open-world cycle as a tile over a picture of the place. -->
+<!-- An open-world cycle as a tile over a picture of the place: where, what it is now, and when that
+     changes. -->
 <script lang="ts">
   import Countdown from "./Countdown.svelte";
   import GameImg from "./GameImg.svelte";
   import { DARK, ICON, factionIcon, placeScene, tex } from "../lib/game";
   import type { Cycle } from "../types/Cycle";
-  let { c, withPlace = true }: { c: Cycle; withPlace?: boolean } = $props();
+  let { c }: { c: Cycle } = $props();
   const phase = $derived(String(c.state || "").toLowerCase());
   const scene = $derived(placeScene(c.name));
   let sceneGone = $state(false);
@@ -21,5 +22,5 @@
   {:else if c.name !== "Duviri"}<GameImg path={DARK.has(phase) ? ICON.moon : ICON.sun} px={26} cls="state" />{/if}
   <div class="n">{c.name}</div>
   <div class="s">{c.state}</div>
-  <div class="t"><Countdown until={c.expiry} done="changing" />{#if withPlace && c.place}<span class="faint"> · {c.place}</span>{/if}</div>
+  <div class="t">changes in <Countdown until={c.expiry} done="a moment" /></div>
 </div>

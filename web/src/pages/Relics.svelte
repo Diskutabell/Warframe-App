@@ -41,7 +41,7 @@
   {#snippet children(data)}
     <div class="page">
       <div class="page-head"><div><h1>Relics</h1>
-        <p>{st.owned ? `${fmt(data.reduce((a, r) => a + r.total, 0))} relics of ${fmt(data.length)} kinds` : `${fmt(data.length)} relics`} · value is the chance-weighted platinum of the drops</p></div></div>
+        <p>{st.owned ? `${fmt(data.reduce((a, r) => a + r.total, 0))} relics of ${fmt(data.length)} kinds.` : `${fmt(data.length)} relics.`} A relic's value is the platinum one crack is worth on average.</p></div></div>
       <div class="toolbar">
         <input type="search" placeholder="Relic or drop" aria-label="Search relics" bind:value={st.q} />
         <Seg options={ERAS} bind:value={st.era} label="Era" />
@@ -50,25 +50,26 @@
         <label class="check"><input type="checkbox" bind:checked={st.unvaulted} />Not vaulted</label>
         <span class="count">{fmt(rows.length)} relics</span>
       </div>
-      <div class="cards">
+      <div class="cards relic-grid">
         {#each rows.slice(0, 400) as r (r.name)}
-          {@const owned = Object.entries(r.counts).filter(([, n]) => n).map(([k, n]) => `${n}× ${k}`).join(", ")}
+          {@const owned = Object.entries(r.counts).filter(([, n]) => n).map(([k, n]) => `${n} ${k.toLowerCase()}`).join(", ")}
           <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-          <div class="icard" onclick={() => openDetails(r.name)}>
-            <div class="relic-art"><Art src={r.image} cls="lg" />{#if r.total}<span class="relic-qty num">{r.total}</span>{/if}</div>
+          <div class="icard relic-card" onclick={() => openDetails(r.name)}>
+            <Art src={r.image} cls="lg" />
             <div class="body">
-              <div class="row"><span class="name grow">{r.name}</span><Era era={r.era} /></div>
+              <div class="row"><span class="name grow">{r.name}</span>{#if r.total}<span class="pill qty" title="{fmt(r.total)} held">×{fmt(r.total)}</span>{/if}<Era era={r.era} /></div>
               <div class="pips">
                 {#each r.rewards as x}
                   <span class="pip" class:ok={x.have > 0} class:want={x.needed > x.have}
-                    title="{x.name} - {x.rarity || ''} · {x.price != null ? x.price + 'p' : 'no price'} · own {x.have}{x.needed > x.have ? ' · needed' : ''}"><Img src={x.image} px={24} /></span>
+                    title="{x.name}: {x.rarity || 'unknown rarity'}, {x.price != null ? x.price + 'p' : 'no price'}, {x.have} held{x.needed > x.have ? ', still needed' : ''}"><Img src={x.image} px={24} /></span>
                 {/each}
               </div>
-              <div class="meta"><span><Plat n={r.ev.Radiant} /> radiant · <Plat n={r.ev.Intact} /> intact</span>
-                {#if r.needsCount}<span class="pill lotus">{r.needsCount} needed</span>{/if}
-                {#if isOpen(r)}<span class="pill lotus"><Icon name="fissures" /> open now</span>{/if}
-                {#if r.vaulted}<span class="pill vaulted">vaulted</span>{/if}</div>
-              {#if owned}<div class="meta">{owned}</div>{/if}
+              <div class="meta"><span><Plat n={r.ev.Radiant} /> radiant</span><span><Plat n={r.ev.Intact} /> intact</span></div>
+              <!-- One line each, so every card is the same height; the full text is in the tooltips. -->
+              <div class="meta tags">{#if isOpen(r)}<span class="pill" title="A fissure that takes this relic is open now"><Icon name="fissures" /> Crack now</span>{/if}
+                {#if r.needsCount}<span class="pill lotus" title="{r.needsCount} of its drops you still need">{r.needsCount} needed</span>{/if}
+                {#if r.vaulted}<span class="pill vaulted">Vaulted</span>{/if}</div>
+              <div class="meta owned" title={owned}>{owned}</div>
             </div>
           </div>
         {:else}

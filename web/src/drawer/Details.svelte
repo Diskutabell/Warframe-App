@@ -70,24 +70,24 @@
       <div><span>{d.setPrice != null ? "Set price" : "Affinity"}</span><b>{#if d.setPrice != null}<Plat n={d.setPrice} />{:else}{fmt(d.xp)}{/if}</b></div>
     </div>
     <div class="bar lotus" style="margin-top:10px"><i style:width="{d.maxRank ? Math.round((d.rank / d.maxRank) * 100) : 0}%"></i></div>
-    <div class="row" style="margin-top:12px">
+    <div class="row wrap" style="margin-top:12px">
       <button onclick={() => mastered(d.uid, !d.manual)}><Icon name="check" /> {d.manual ? "Unmark as mastered" : "Mark as mastered"}</button>
       {#if d.task}<TaskButton uid={d.task.uid} onBoard={d.task.onBoard} />{/if}
       {#if d.parts.length}<button disabled={building} title="{d.building ? 'Collect it from the foundry' : 'Takes its parts and resources from your counts'} until the next inventory read"
         onclick={() => markBuilt(d.uid, d.name)}><Icon name="foundry" /> Mark built</button>{/if}
-      <span class="muted" style="font-size:13px">{d.manual ? "Marked by hand." : "If the profile is out of date."}</span>
+      <span class="muted" style="font-size:var(--t-13)">{d.manual ? "Marked by hand." : "For when the profile is out of date."}</span>
     </div>
     <Acquisition name={d.name} drops={d.drops} coverage={d.dropCoverage} />
     {#if d.parts.length}
-      <div class="dsec"><h2>Parts {#if d.buildable}<span class="pill good" title="Counts may include unbuilt blueprints; check the foundry and resources">parts collected</span>{/if}</h2>
+      <div class="dsec"><h2>Parts {#if d.buildable}<span class="pill good" title="Counts may include blueprints not built yet; check the foundry and resources">All collected</span>{/if}</h2>
         {#each d.parts as p (p.uid)}
           <div class="part">
             <div class="top"><Art src={p.image} cls="sm" />
               <div class="grow">
                 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                 <div class="ellipsis" style="cursor:pointer;font-weight:600" onclick={() => openDetails(p.uid)}>{p.name}</div>
-                <div class="meta"><Plat n={p.price} /> <Duc n={p.ducats} /> {#if p.vaulted}<span class="pill vaulted">vaulted</span>{/if}</div></div>
-              <div class="row"><span class="faint">need {p.need}</span><Stepper uid={p.uid} n={p.have} /></div>
+                <div class="meta"><Plat n={p.price} /><Duc n={p.ducats} />{#if p.vaulted}<span class="pill vaulted">Vaulted</span>{/if}</div></div>
+              <div class="row"><span class="muted">{p.need} needed</span><Stepper uid={p.uid} n={p.have} /></div>
             </div>
             {#if p.relics.length}<div class="chips"><RelicChips relics={p.relics} /></div>{/if}
             {#if p.drops.length}<details class="more"><summary>Where to get this part ({p.drops.length})</summary><div class="list"><DropRows drops={p.drops} /></div></details>{/if}
@@ -126,7 +126,7 @@
         {#each d.relics as r}
           <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
           <div class="list-row click" onclick={() => openDetails(r.relic)}><div class="main"><div class="t">{r.relic} Relic</div>
-            <div class="s">{r.rarity || ""}{r.chance != null ? ` · ${r.chance}% intact` : ""}{r.owned ? ` · you own ${r.owned}` : ""}</div></div>
+            <div class="s">{[r.rarity, r.chance != null ? `${r.chance}% intact` : "", r.owned ? `${r.owned} held` : ""].filter(Boolean).join(", ")}</div></div>
             {#if r.open}<span class="pill lotus">Fissure open</span>{/if}{#if r.vaulted}<span class="pill vaulted">Vaulted</span>{/if}</div>
         {/each}
       </div></div>
@@ -158,8 +158,8 @@
       {#each d.rewards as r}
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
         <div class="list-row click" onclick={() => openDetails(r.uid)}><Art src={r.image} cls="sm" />
-          <div class="main"><div class="t">{r.name}{#if r.needed > r.have}<span class="pill lotus">needed</span>{/if}</div>
-            <div class="s">{r.rarity || ""} · {pct(r.chance.Intact)} intact, {pct(r.chance.Radiant)} radiant{r.have ? ` · you have ${r.have}` : ""}</div></div>
+          <div class="main"><div class="t">{r.name}{#if r.needed > r.have}<span class="pill lotus" style="margin-left:6px">Needed</span>{/if}</div>
+            <div class="s">{r.rarity ? `${r.rarity}: ` : ""}{pct(r.chance.Intact)} intact, {pct(r.chance.Radiant)} radiant{r.have ? `, ${r.have} held` : ""}</div></div>
           <div style="text-align:right"><Plat n={r.price} /><div><Duc n={r.ducats} /></div></div></div>
       {/each}
     </div></div>

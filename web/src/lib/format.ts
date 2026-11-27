@@ -36,7 +36,7 @@ export const artUrl = (src: string, px: number) =>
 
 export const wiki = (name: string) => `https://wiki.warframe.com/w/${encodeURIComponent(name.replace(/ /g, "_"))}`;
 
-export const STATUS: Record<string, string> = { mastered: "Mastered", leveling: "Leveling", missing: "Not levelled" };
+export const STATUS: Record<string, string> = { mastered: "Mastered", leveling: "Levelling", missing: "Not levelled" };
 /** A farming task's colour (src/tasks.rs): red, yellow, green. */
 export const TASK_STATE: Record<string, string> = { missing: "Missing", resources: "Needs resources", done: "Done" };
 export const TASK_PILL: Record<string, string> = { missing: "bad", resources: "amber", done: "good" };

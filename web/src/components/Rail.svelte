@@ -1,11 +1,11 @@
-<!-- The sidebar: the account shown (and the others to switch to), the pages, and what the
-     engine is doing. -->
+<!-- The sidebar: the account shown (and the others to switch to), the pages, and one pill that says
+     what the engine is doing, with the details above it on hover. -->
 <script lang="ts">
   import { act } from "../lib/api";
   import { app, changed, route, ui } from "../lib/app.svelte";
   import { ago, rankText } from "../lib/format";
   import { ICON, mrBadge } from "../lib/game";
-  import { PAGES, pageKey } from "../lib/pages";
+  import { NAV, navKey } from "../lib/nav";
   import type { AccountRow } from "../types/AccountRow";
   import GameImg from "./GameImg.svelte";
   import Icon from "./Icon.svelte";
@@ -27,7 +27,28 @@
     document.addEventListener("click", close);
     return () => document.removeEventListener("click", close);
   });
+
+  /** What the engine is doing: the most pressing line in the pill, every line in its tip. */
+  type Line = { dot: string; text: string };
+  const status = $derived.by((): Line & { lines: Line[] } => {
+    if (!S) return app.connected ? { dot: "", text: "Connecting to the engine", lines: [] } : { dot: "warn", text: "The engine isn't answering", lines: [] };
+    const src = S.sources;
+    const elsewhere = src.eeLog.active && S.account.logName && !S.account.playing ? ` as ${S.account.logName}` : "";
+    const game: Line = { dot: src.eeLog.active ? "on" : "", text: src.eeLog.active ? `Game running${elsewhere}` : "Game not running" };
+    const profile: Line = { dot: S.account.id ? "on" : "warn", text: S.account.id ? "Profile linked" : "Account not linked" };
+    const inventory: Line = { dot: src.inventory.source ? "on" : "", text: src.inventory.source ? `Inventory read ${ago(src.inventory.imported)}` : "No inventory yet" };
+    const lines = [game, profile, inventory];
+    if (src.memscan.state === "scanning") {
+      const scan = { dot: "gold", text: `Reading the inventory, ${Math.round(src.memscan.progress * 100)}%` };
+      return { ...scan, lines: [...lines, scan] };
+    }
+    return { ...(S.account.id ? game : profile), lines };
+  });
 </script>
+
+{#snippet who(a: AccountRow)}
+  <div class="acct-txt"><b class="ellipsis">{a.name}</b><span>{rankText(a)}{#if a.playing}, <span class="lotus">in game</span>{/if}</span></div>
+{/snippet}
 
 <aside class="rail">
   <div class="acct" id="acct">
@@ -36,49 +57,38 @@
     {:else}
       {@const list = S?.accounts ?? []}
       <button class="acct-btn" type="button" aria-haspopup="true" aria-expanded={ui.accountMenu} title={list.length > 1 ? "Switch account" : "Account"} onclick={(e) => { e.stopPropagation(); ui.accountMenu = !ui.accountMenu; }}>
-        <GameImg path={badge(current)} px={30} />
-        <div class="acct-txt"><b class="ellipsis">{current.name}</b><span>{rankText(current)}{#if current.playing}{" "}· <span class="lotus">in game</span>{/if}</span></div>
+        <GameImg path={badge(current)} px={32} />
+        {@render who(current)}
         {#if list.length > 1}<Icon name="down" />{/if}
       </button>
       {#if ui.accountMenu}
         <div class="acct-menu" role="menu">
           {#each list as a (a.key)}
-            <button type="button" role="menuitem" class:on={a.active} onclick={() => choose(a)}><GameImg path={badge(a)} px={24} />
-              <div class="acct-txt"><b class="ellipsis">{a.name}</b><span>{rankText(a)}{#if a.playing}{" "}· <span class="lotus">in game</span>{/if}</span></div></button>
+            <button type="button" role="menuitem" class:on={a.active} onclick={() => choose(a)}><GameImg path={badge(a)} px={24} />{@render who(a)}</button>
           {/each}
           <a href="#settings" class="acct-manage" onclick={() => (ui.accountMenu = false)}>Manage accounts</a>
         </div>
       {/if}
     {/if}
   </div>
-  <button class="search-trigger" type="button" onclick={() => (ui.palette = true)}><Icon name="search" /><span>Quick jump…</span><kbd>Ctrl K</kbd></button>
-  <nav id="nav" aria-label="Sections">
-    {#each PAGES as p, i (p.id)}
-      {@const key = pageKey(p, i)}
-      {#if p.id === "settings"}<div class="sep"></div>{:else if p.group}<div class="nav-group">{p.group}</div>{/if}
-      <a href="#{p.id}" class:on={route.page === p.id} title="{p.title}{key ? ` (${key})` : ''}">
+  <button class="search-trigger" type="button" onclick={() => (ui.palette = true)}><Icon name="search" /><span>Search</span><kbd>Ctrl K</kbd></button>
+  <nav id="nav" aria-label="Pages">
+    {#each NAV as p (p.id)}
+      {@const key = navKey(p.id)}
+      {@const n = p.badge && S ? p.badge(S) : 0}
+      <a href="#{p.id}" class:on={route.page === p.id} class:group={p.group} aria-current={route.page === p.id ? "page" : undefined} aria-keyshortcuts={key || undefined}>
         <Icon name={p.icon} /><span>{p.title}</span>
-        {#if p.badge}
-          {@const n = S ? p.badge(S) : 0}
-          {#if n}<b class="nav-badge" title={p.badgeTitle?.(n) ?? ""}>{n > 99 ? "99+" : n}</b>{/if}
-        {:else if key}<span class="nav-k">{key}</span>{/if}
+        {#if n}<b class="nav-badge" title={p.badgeTitle?.(n) ?? ""}>{n > 99 ? "99+" : n} done</b>
+        {:else if key}<kbd class="key" aria-hidden="true">{key}</kbd>{/if}
       </a>
     {/each}
   </nav>
   <div class="rail-status">
-    {#if !S}
-      {#if app.connected}<div class="rail-stat"><span class="dot"></span><span>Connecting…</span></div>
-      {:else}<div class="rail-stat"><span class="dot warn"></span><span>Engine not responding</span></div>{/if}
-    {:else}
-      {@const src = S.sources}
-      <div class="rail-stat"><span class="dot" class:on={src.eeLog.active}></span><span>{src.eeLog.active ? "Game running" : "Game offline"}{#if src.eeLog.active && S.account.logName && !S.account.playing}<span class="faint"> ({S.account.logName})</span>{/if}</span></div>
-      <div class="rail-stat"><span class="dot {S.account.id ? 'on' : 'warn'}"></span><span>{S.account.id ? "Profile linked" : "Account not linked"}</span></div>
-      <div class="rail-stat"><span class="dot" class:on={!!src.inventory.source}></span><span>{src.inventory.source ? `Inventory ${ago(src.inventory.imported)}` : "No inventory"}</span></div>
-      {#if src.memscan.state === "scanning"}<div class="rail-stat"><span class="dot gold"></span><span>Reading inventory {Math.round(src.memscan.progress * 100)}%</span></div>{/if}
-      {#if S.desktop && S.minimizeToTray}
-        <div class="rail-actions"><button type="button" class="ghost" title="Hide window to system tray" onclick={() => act("window/hide")}><Icon name="tray" /><span>Hide to tray</span></button>
-          <button type="button" class="ghost icon" title="Quit warframeproject" aria-label="Quit" onclick={() => act("quit")}><Icon name="power" /></button></div>
-      {/if}
+    <a class="status-pill" href="#settings" aria-describedby="status-tip"><span class="dot {status.dot}"></span><span>{status.text}</span></a>
+    {#if status.lines.length}
+      <div class="status-tip" id="status-tip" role="tooltip">
+        {#each status.lines as l (l.text)}<div><span class="dot {l.dot}"></span><span>{l.text}</span></div>{/each}
+      </div>
     {/if}
   </div>
 </aside>

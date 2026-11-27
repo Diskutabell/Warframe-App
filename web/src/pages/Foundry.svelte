@@ -49,7 +49,7 @@
     {@const cats = [...new Set(d.items.map((r) => r.category))].sort()}
     {@const ready = d.items.filter((r) => r.buildable && (isCraft(r) || r.status !== "mastered")).length}
     <div class="page">
-      <div class="page-head"><div><h1>Foundry</h1><p>{d.pending.length} building · {ready} with listed requirements collected. Equipment counts may include unbuilt blueprints; check resources and the foundry.</p></div></div>
+      <div class="page-head"><div><h1>Foundry</h1><p>{d.pending.length} building, and {ready} with every listed part in hand. Part counts can include blueprints you have not built yet; the foundry in game shows the resources.</p></div></div>
       {#if d.pending.length}
         <div class="card" style="margin-bottom:16px"><div class="card-head"><h2>Building</h2></div>
           <div class="cards">
@@ -58,7 +58,7 @@
               <div class="icard" style={f.known ? null : "cursor:default"} onclick={() => f.known && openDetails(f.uid)}>
                 <Art src={f.image} />
                 <div class="body"><span class="name">{f.name}</span>
-                  <div class="meta">{#if f.done}{#if f.done <= clock.now}<span class="pill good">Ready to claim</span>{:else}Ready in <Countdown until={f.done} />{/if}{:else}building{/if}</div></div>
+                  <div class="meta">{#if f.done}{#if f.done <= clock.now}<span class="pill gold">Ready to claim</span>{:else}Ready in <Countdown until={f.done} />{/if}{:else}Building{/if}</div></div>
               </div>
             {/each}
           </div>
@@ -89,12 +89,12 @@
                     {#if p.image}<Img src={p.image} px={24} />{:else if p.have >= p.need}<Icon name="check" />{/if}{#if !craft && p.have > 1}<b>{p.have}</b>{/if}</span>
                 {/each}
               </div>
-              <div class="meta"><span>{r.have}/{r.need} {craft ? "needs met" : "parts"}</span>
+              <div class="meta"><span>{r.have} of {r.need} {craft ? "needs met" : "parts"}</span>
                 {#if craft}
-                  <span class="pill">{craft.category}</span>{#if craft.held}<span class="pill lotus">have {fmt(craft.held)}</span>{/if}{#if craft.quantity > 1}<span class="faint">makes {craft.quantity}</span>{/if}
+                  <span class="pill">{craft.category}</span>{#if craft.held}<span class="pill lotus">{fmt(craft.held)} held</span>{/if}{#if craft.quantity > 1}<span class="faint">makes {craft.quantity}</span>{/if}
                 {:else if "status" in r}<StatusPill status={r.status} />{/if}
-                {#if r.buildable && (craft || ("status" in r && r.status !== "mastered"))}<span class="pill good">{craft ? "needs met" : "parts collected"}</span>{/if}
-                {#if "vaulted" in r && r.vaulted}<span class="pill vaulted">vaulted</span>{/if}
+                {#if r.buildable && (craft || ("status" in r && r.status !== "mastered"))}<span class="pill good">{craft ? "Needs met" : "Parts collected"}</span>{/if}
+                {#if "vaulted" in r && r.vaulted}<span class="pill vaulted">Vaulted</span>{/if}
                 {#if craft}<a href={wiki(r.name)} target="_blank" rel="noopener" onclick={(e) => e.stopPropagation()}>Where to get</a>{/if}</div>
             </div>
           </div>

@@ -77,8 +77,8 @@ fn main_window(url: &str) -> gtk::Window {
     // Ephemeral: all state lives in the engine, so the page needs no persistent storage.
     let context = WebContext::new_ephemeral();
     let webview = WebView::with_context(&context);
-    // The page's own background (#0b0c0f), so nothing flashes white while it loads.
-    webview.set_background_color(&gdk::RGBA::new(11.0 / 255.0, 12.0 / 255.0, 15.0 / 255.0, 1.0));
+    // The page's own background (#1a1d20), so nothing flashes white while it loads.
+    webview.set_background_color(&gdk::RGBA::new(26.0 / 255.0, 29.0 / 255.0, 32.0 / 255.0, 1.0));
     if let Some(settings) = WebViewExt::settings(&webview) {
         // WARFRAMEPROJECT_DEBUG: the web inspector, and the page's console messages on stdout.
         let debug = std::env::var_os("WARFRAMEPROJECT_DEBUG").is_some();

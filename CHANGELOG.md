@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **A new look, built around time.** Warframe runs on clocks, so the Overview now opens with the
+  next hours on one scale: the arbitration of each hour, each open world's cycle until it turns,
+  and the daily reset. What lies further out (Baro, the weekly reset, the next S-tier arbitration)
+  is listed beside the other sections. The Fissures page draws each fissure's time left on the
+  same kind of scale.
+- **A neutral charcoal base with teal accents**, so the colours that mean something stand out: amber
+  marks only what is worth doing now (an S-tier arbitration, a build ready to claim, a rank-up, the
+  best pick on a reward screen), teal what is yours (drops you still need, what you watch or
+  pinned), coral what is short or missing, green what is done. Relic eras, factions and syndicates
+  keep their own colours. Sections sit on cards with a fine edge.
+- **One typeface, Archivo**, in the window and the overlays, replacing Rajdhani and Source Sans 3:
+  tabular figures with a plain zero, so prices and counts read at a glance. Labels are in sentence
+  case.
+- **The sidebar** keeps its icons; the key that opens a page (1-9, 0 for Settings) shows when you
+  point at it. What the engine is doing (game, profile, inventory) is one pill at the bottom, with
+  the details when you point at it. The Hide to tray and Quit buttons are gone: *Minimize to system
+  tray* is now *Close to tray* in Settings, and Quit is in the tray icon's menu and in Settings.
+- **Relic cards** are all the same height, and how many you hold sits beside the relic's era.
+- **The overlays and the tray icon match the window**: panels on the same charcoal, the best pick in
+  amber, prices in plain figures.
+
+### Fixed
+
+- Figures that had lost a space: daily standing read "10,020/ 28,000", a relic's count "Lith C13×9".
+- On a display with a scale other than 100%, the price panels' window could be a pixel shorter
+  than at 100%.
+
 ## 1.0.1 - 2026-11-25
 
 ### Added

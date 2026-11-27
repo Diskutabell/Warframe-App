@@ -34,14 +34,14 @@
   function next(r: MasteryRow): { text: string; cls: string } {
     if (r.status === "mastered") return { text: "", cls: "" };
     if (r.building) return { text: "In the foundry", cls: "lotus" };
-    if (r.owned) return { text: "Owned - level it", cls: "" };
+    if (r.owned) return { text: `Owned: level it to ${r.maxRank}`, cls: "" };
     const parts = r.parts ?? [];
-    if (r.status === "leveling") return { text: `${r.rank}/${r.maxRank}, keep levelling`, cls: "" };
+    if (r.status === "leveling") return { text: `Rank ${r.rank} of ${r.maxRank}`, cls: "" };
     if (!parts.length) return { text: r.requires?.length ? `Needs ${r.requires.join(", ")}` : "", cls: "" };
     if (r.buildable) return { text: "Parts collected", cls: "lotus" };
     const have = parts.filter((p) => p.have >= p.need).length;
     const farm = r.farm?.[0];
-    return { text: `${have}/${parts.length} parts${farm ? ` · ${farm.relics[0] || ""}` : ""}`, cls: "" };
+    return { text: `${have} of ${parts.length} parts${farm?.relics[0] ? `; crack ${farm.relics[0]}` : ""}`, cls: "" };
   }
   const pct = (r: MasteryRow) => `${((100 * r.rank) / Math.max(1, r.maxRank)).toFixed(0)}%`;
 </script>
@@ -50,7 +50,7 @@
   {#snippet children()}
     <div class="page">
       <div class="page-head"><div><h1>Mastery</h1>
-        <p>{fmt(S.mastered)} of {fmt(S.total)} mastered · {fmt(S.mastery.total)}{S.mastery.lacks ? "+" : ""} mastery XP · {fmt(S.mastery.points)} of {fmt(S.mastery.possible)} from gear<br />Choose an item to see its parts.</p></div></div>
+        <p>{fmt(S.mastered)} of {fmt(S.total)} items mastered, {fmt(S.mastery.total)}{S.mastery.lacks ? "+" : ""} mastery XP in all. Choose an item for its parts and where to farm them.</p></div></div>
       <div class="tiles" style="margin-bottom:14px">
         {#each S.mastery.byCategory as c}
           <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -79,7 +79,7 @@
               {@const n = next(r)}
               <tr class="click" onclick={() => openDetails(r.uid)}>
                 <td><div class="row"><Art src={r.image} cls="sm" /><span class="ellipsis" style="font-weight:600">{r.name}</span>
-                  {#if r.vaulted}<span class="pill vaulted">vaulted</span>{/if}{#if r.manual}<span class="pill">marked</span>{/if}</div></td>
+                  {#if r.vaulted}<span class="pill vaulted">Vaulted</span>{/if}{#if r.manual}<span class="pill">Marked</span>{/if}</div></td>
                 <td class="muted">{r.category}</td><td class="r num">{r.masteryReq || ""}</td>
                 <td><div class="row"><div class="bar thin grow" class:lotus={r.status !== "mastered"}><i style:width={pct(r)}></i></div>
                   <span class="num muted" style="font-size:12.5px;width:44px;text-align:right">{r.rank}/{r.maxRank}</span></div></td>
@@ -101,7 +101,7 @@
                 <span class="muted">{r.category}</span>
                 {#if r.parts?.length}<span class="pips"><PartPips parts={r.parts} /></span>{/if}
                 <span class="row"><span class="bar thin grow" class:lotus={r.status !== "mastered"}><i style:width={pct(r)}></i></span><span class="num muted">{r.rank}/{r.maxRank}</span></span>
-                <span class="meta"><StatusPill status={r.status} />{#if r.owned}<span class="pill good">owned</span>{/if}{#if r.vaulted}<span class="pill vaulted">vaulted</span>{/if}{#if r.manual}<span class="pill">marked</span>{/if}</span>
+                <span class="meta"><StatusPill status={r.status} />{#if r.owned}<span class="pill good">Owned</span>{/if}{#if r.vaulted}<span class="pill vaulted">Vaulted</span>{/if}{#if r.manual}<span class="pill">Marked</span>{/if}</span>
                 {#if n.text}<span class="muted"><span class={n.cls}>{n.text}</span></span>{/if}
               </span>
             </button>

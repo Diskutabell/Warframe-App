@@ -44,10 +44,10 @@
 
   function partLine(p: DetailPart): { text: string; cls: string } {
     const held = `${fmt(p.have)} / ${fmt(p.need)}`;
-    if (p.have < p.need) return { text: `${held} held · ${fmt(p.need - p.have)} missing`, cls: "warn-text" };
-    if (p.crafting) return { text: `${held} · ${fmt(p.crafting)} crafting in the foundry`, cls: "lotus" };
-    if (p.recipeUnknown) return { text: `${held} held · to craft, recipe unknown`, cls: "amber" };
-    if (p.builds) return { text: `${held} held · ${fmt(p.builds)} to craft`, cls: "lotus" };
+    if (p.have < p.need) return { text: `${held} held, ${fmt(p.need - p.have)} missing`, cls: "warn-text" };
+    if (p.crafting) return { text: `${held}, ${fmt(p.crafting)} crafting in the foundry`, cls: "lotus" };
+    if (p.recipeUnknown) return { text: `${held} held, to craft; recipe unknown`, cls: "amber" };
+    if (p.builds) return { text: `${held} held, ${fmt(p.builds)} to craft`, cls: "lotus" };
     return { text: `${held} held`, cls: "lotus" };
   }
 </script>
@@ -113,7 +113,7 @@
           {#if credits?.need}
             <div class="list-row res-row"><img class="res-pic" alt="" src="icons/credits.png" />
               <div class="main"><div class="t">Credits</div>
-                <div class="s">{credits.have == null ? "Held: unknown" : `${fmt(credits.have)} held`} · {fmt(credits.need)} required{#if credits.have != null && credits.have < credits.need}{" "}· <span class="warn-text">{fmt(credits.need - credits.have)} short</span>{/if}</div></div></div>
+                <div class="s">{credits.have == null ? "Held: unknown" : `${fmt(credits.have)} held`}, {fmt(credits.need)} needed{#if credits.have != null && credits.have < credits.need}, <span class="warn-text">{fmt(credits.need - credits.have)} short</span>{/if}</div></div></div>
           {/if}
         </div></div>
     {/if}

@@ -7,7 +7,7 @@
     recipe.credits != null ? `${fmt(recipe.credits)} credits` : "",
     recipe.seconds != null ? `${fmt(recipe.seconds / 3600)} hours` : "",
     recipe.quantity !== 1 ? `makes ${fmt(recipe.quantity)}` : "",
-  ].filter(Boolean).join(" · "));
+  ].filter(Boolean).join(", "));
 </script>
 
 <div class="dsec"><h3>Component recipe (per build)</h3>
