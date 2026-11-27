@@ -122,6 +122,9 @@ nix-env -f . -i
 Or try it without installing: `nix-build && ./result/bin/warframeproject`. On NixOS you can also
 add `(pkgs.callPackage /path/to/Warframe-App { })` to `environment.systemPackages`.
 
+To leave the [memory scan](#memory-scan) out of the build, add `--arg memscan false`
+(`nix-env -f . -i --arg memscan false`), or pass `{ memscan = false; }` to `callPackage`.
+
 ### Other distributions
 
 Install Rust, the development packages for GTK 3, WebKitGTK 4.1 and gtk-layer-shell, tesseract
@@ -191,7 +194,8 @@ while.
 
 There's no public API for your inventory, so tools that keep it up to date automatically read
 it from the game's memory. Here that is optional and **off by default** (and omitted altogether
-from `warframeproject-windows-x64.exe`, or any build made with `--no-default-features`):
+from `warframeproject-windows-x64.exe`, the Nix package built with `--arg memscan false`, or any
+build made with `--no-default-features`):
 
 - Read-only, through `/proc/<pid>/mem` on Linux and `ReadProcessMemory` on Windows. Nothing is
   written to or injected into the game.

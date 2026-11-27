@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Added
+
+- **A Nix build without the memory scan.** `nix-env -f . -i --arg memscan false` (or
+  `{ memscan = false; }` for `callPackage`) installs the app with no code that opens or reads
+  another process, like `warframeproject-windows-x64.exe` on Windows.
+
 ### Changed
 
 - **A new look, built around time.** Warframe runs on clocks, so the Overview now opens with the

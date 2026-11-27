@@ -1,10 +1,17 @@
 # warframeproject as a Nix package.
 #
-#   nix-build                     # then ./result/bin/warframeproject
-#   nix-env -f . -i               # install into your profile (menu entry included)
+#   nix-build                             # then ./result/bin/warframeproject
+#   nix-env -f . -i                       # install into your profile (menu entry included)
+#   nix-env -f . -i --arg memscan false   # the same, built without the memory scan
 #
 # or in a NixOS configuration: environment.systemPackages = [ (pkgs.callPackage /path/to/checkout { }) ];
-{ pkgs ? import <nixpkgs> { } }:
+# with `{ memscan = false; }` in place of `{ }` for the build without the memory scan.
+{
+  pkgs ? import <nixpkgs> { },
+  # The optional memory scan, off until it is switched on in Settings. `false` builds the app
+  # without it: no code that opens or reads another process is compiled in.
+  memscan ? true,
+}:
 let
   runtime = import ./nix/runtime.nix { inherit pkgs; };
   cargo = builtins.fromTOML (builtins.readFile ./Cargo.toml);
@@ -34,6 +41,9 @@ pkgs.rustPlatform.buildRustPackage {
   # Only what the build reads: not build output or local results.
   src = clean ./.;
   cargoLock.lockFile = ./Cargo.lock;
+  # `memscan` is the crate's only default feature, so leaving the defaults out leaves out just
+  # that, in the tests too.
+  buildNoDefaultFeatures = !memscan;
 
   preBuild = ''
     cp -r ${ui} web/dist
