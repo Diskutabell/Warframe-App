@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Building from a checkout with Nix takes only the files git tracks.** Everything else in the
+  folder, such as build output for other targets, used to be copied into the Nix store with the
+  source.
+
 ## 1.1.0 - 2026-11-27
 
 ### Added

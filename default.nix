@@ -13,13 +13,26 @@
   memscan ? true,
 }:
 let
+  inherit (pkgs) lib;
   runtime = import ./nix/runtime.nix { inherit pkgs; };
   cargo = builtins.fromTOML (builtins.readFile ./Cargo.toml);
-  # Neither build output nor installed dependencies go into a build.
-  clean = src: pkgs.lib.cleanSourceWith {
-    src = pkgs.lib.cleanSource src;
-    filter = path: _type: !(builtins.elem (baseNameOf path) [ "target" "result" "node_modules" "dist" ]);
-  };
+  # What a build reads. In a git checkout that is the files git tracks, so nothing else in the
+  # folder (build output for other targets, local files) is copied into the store; a new file
+  # needs `git add` before a build sees it. A tree without git (a `git archive` export, a
+  # tarball) holds only the project's files and is taken without build output.
+  tracked = lib.fileset.gitTracked ./.;
+  clean =
+    dir:
+    if builtins.pathExists ./.git then
+      lib.fileset.toSource {
+        root = dir;
+        fileset = lib.fileset.intersection tracked dir;
+      }
+    else
+      lib.cleanSourceWith {
+        src = lib.cleanSource dir;
+        filter = path: _type: !(builtins.elem (baseNameOf path) [ "target" "result" "node_modules" "dist" ]);
+      };
   # The UI (web/, Svelte), built once and embedded by the engine (src/api/mod.rs).
   ui = pkgs.buildNpmPackage {
     pname = "warframeproject-ui";
