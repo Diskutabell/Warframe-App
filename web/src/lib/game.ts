@@ -47,8 +47,9 @@ export const factionColor = (name: string | null | undefined) => faction(name)?.
 /** The world state's name for a faction as the game shows it: "Man in the Wall" is the Murmur. */
 export const foeName = (name: string | null | undefined) => (/man in the wall/i.test(name || "") ? "The Murmur" : name || "");
 
-// An arbitration node's community tier (arbi.guide, through browse.wf), gold for S down to grey.
-export const TIER_CLASS: Record<string, string> = { S: "gold", A: "good", B: "lotus", C: "", D: "missing", F: "missing" };
+// An arbitration node's community tier (arbi.guide, through browse.wf): S is worth doing now (solid
+// amber), A nearly so (tinted), B and C plain, D and F outlined.
+export const TIER_CLASS: Record<string, string> = { S: "gold", A: "amber", B: "", C: "", D: "missing", F: "missing" };
 
 const SYNDICATES: [RegExp, string][] = [
   [/ostron/i, "Syndicates/FactionSigilEidolonCetusElder.png"],

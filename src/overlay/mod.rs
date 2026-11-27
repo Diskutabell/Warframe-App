@@ -156,8 +156,11 @@ pub fn rewards(r: &RewardResult, screen: Screen, above: bool) -> Drawn {
     let g = (game.x as f64, game.y as f64, game.width as f64, game.height as f64);
     let places = reward::panel_places(cards, above);
     // As tall as the tallest panel's content (a name on two lines), never less than usual.
-    let widths: Vec<f32> = places.iter().map(|p| (p.width * u * display) as f32).collect();
-    let needed = panels::rewards_height(r, &widths, (text_u * display) as f32) as f64 / display;
+    // Measured at one pixel per unit, so a doubled display gets the same window with more pixels
+    // in it: the one-pixel edges would otherwise count half as much there, and round differently.
+    // Drawn larger, the content never needs more: text scales with the display, the edges do not.
+    let widths: Vec<f32> = places.iter().map(|p| (p.width * u) as f32).collect();
+    let needed = panels::rewards_height(r, &widths, text_u as f32) as f64;
     let h = (reward::PANEL_H * text_u).max(needed);
     let rects: Vec<[f64; 4]> = places.iter().map(|p| reward::panel_rect(p, g, u, h)).collect();
     let x0 = rects.iter().map(|r| r[0]).fold(f64::INFINITY, f64::min);

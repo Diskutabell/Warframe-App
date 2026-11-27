@@ -29,7 +29,7 @@
   {#snippet children(data)}
     <div class="page">
       <div class="page-head"><div><h1>Prime sets</h1>
-        <p>{data.filter((r) => r.complete).length} complete · {data.filter((r) => !r.complete && r.have > 0).length} in progress · {data.length} in total</p></div></div>
+        <p>{data.filter((r) => r.complete).length} complete and {data.filter((r) => !r.complete && r.have > 0).length} in progress, of {data.length} sets.</p></div></div>
       <div class="toolbar">
         <input type="search" placeholder="Search sets" aria-label="Search sets" bind:value={st.q} />
         <Seg options={SHOW} bind:value={st.show} label="Show" />
@@ -45,8 +45,8 @@
             <div class="body">
               <div class="row"><span class="name grow">{r.name}</span>{#if r.setPrice != null}<Plat n={r.setPrice} />{/if}</div>
               <div class="pips"><PartPips parts={r.parts} /></div>
-              <div class="meta"><span>{r.have}/{r.need} parts</span><StatusPill status={r.status} />
-                {#if r.owned}<span class="pill good">owned</span>{/if}{#if r.vaulted}<span class="pill vaulted">vaulted</span>{/if}</div>
+              <div class="meta"><span>{r.have} of {r.need} parts</span><StatusPill status={r.status} />
+                {#if r.owned}<span class="pill good">Owned</span>{/if}{#if r.vaulted}<span class="pill vaulted">Vaulted</span>{/if}</div>
             </div>
           </div>
         {:else}
