@@ -8,29 +8,31 @@ use crate::rivens::Graded;
 use crate::services::scans::{RewardItem, RewardResult, RivenResult};
 
 const NOTHING_READ: &str = "No reward names recognized.";
-const PANEL: Colour = Colour(8, 12, 17, 0.97);
-const PANEL_BEST: Colour = Colour(45, 37, 15, 0.97);
-const EDGE: Colour = Colour(150, 170, 186, 0.3);
-const RULE: Colour = Colour(150, 170, 186, 0.18);
-const GOLD: Colour = Colour::hex(0xd9b45a);
-const NAME: Colour = Colour::hex(0xa9b7c2);
-const INK: Colour = Colour::hex(0x1b1407);
-const PLAT: Colour = Colour::hex(0xf1d58b);
-const NONE: Colour = Colour::hex(0x6f7d89);
-const DUCATS: Colour = Colour::hex(0xc9aa65);
-const MUTED: Colour = Colour::hex(0x8a99a6);
-const NEEDED: Colour = Colour::hex(0x6fd1c6);
-const VAULTED: Colour = Colour::hex(0xe39a6b);
-const ERROR: Colour = Colour::hex(0xe2895f);
-const RIVEN: Colour = Colour::hex(0x9a80e8);
-const WEAPON: Colour = Colour::hex(0xeeeae0);
-const STAT: Colour = Colour::hex(0xe9e4d6);
-const DARK: Colour = Colour::hex(0x0b1016);
+// The window's palette (web/src/app.css): panels on its ground, Lotus night, and the best pick in
+// reactant amber, the one colour that means "this one".
+const PANEL: Colour = Colour(17, 41, 43, 0.96);
+const PANEL_BEST: Colour = Colour(52, 40, 15, 0.97);
+const EDGE: Colour = Colour(152, 179, 176, 0.32);
+const RULE: Colour = Colour(152, 179, 176, 0.2);
+const NOW: Colour = Colour::hex(0xfab340);
+const NAME: Colour = Colour::hex(0xbfd3ce);
+const INK: Colour = Colour::hex(0x2e1e0a);
+const PLAT: Colour = Colour::hex(0xe6efeb);
+const NONE: Colour = Colour::hex(0x789292);
+const DUCATS: Colour = Colour::hex(0xbfd3ce);
+const MUTED: Colour = Colour::hex(0x98b3b0);
+const NEEDED: Colour = Colour::hex(0x9ce3d9);
+const VAULTED: Colour = Colour::hex(0xe6efeb);
+const ERROR: Colour = Colour::hex(0xfc917a);
+const RIVEN: Colour = Colour::hex(0xb9a6f2);
+const WEAPON: Colour = Colour::hex(0xe6efeb);
+const STAT: Colour = Colour::hex(0xe6efeb);
+const DARK: Colour = Colour::hex(0x0a1f21);
 
 fn grade_colour(grade: &str) -> Colour {
     match grade.chars().next() {
-        Some('A') => Colour::hex(0x8ce39a),
-        Some('B') => GOLD,
+        Some('A') => Colour::hex(0xa2d774),
+        Some('B') => NOW,
         _ => ERROR,
     }
 }
@@ -43,8 +45,8 @@ fn baseline(style: Style, top: f32, h: f32) -> f32 {
 /// A panel's box: the background, its outline, and the inside left for content.
 fn frame(c: &mut Canvas, b: [f32; 4], u: f32, fill: Colour, edge: Colour) -> [f32; 4] {
     let [x, y, w, h] = b;
-    c.fill(x, y, w, h, 3.0 * u, fill);
-    c.outline(x, y, w, h, 3.0 * u, edge);
+    c.fill(x, y, w, h, 5.0 * u, fill);
+    c.outline(x, y, w, h, 5.0 * u, edge);
     [x + 1.0 + 9.0 * u, y + 1.0 + 5.0 * u, w - 2.0 - 18.0 * u, h - 2.0 - 10.0 * u]
 }
 
@@ -73,20 +75,20 @@ pub fn rewards(r: &RewardResult, size: (u32, u32), boxes: &[[f32; 4]], u: f32) -
 /// fetches, its ducats, and how many are owned, needed and whether it is vaulted.
 /// Where its content ends, so a dry run measures how tall it has to be.
 fn item_panel(c: &mut Canvas, b: [f32; 4], u: f32, it: &RewardItem, best: bool) -> f32 {
-    let (fill, edge) = if best { (PANEL_BEST, GOLD) } else { (PANEL, EDGE) };
+    let (fill, edge) = if best { (PANEL_BEST, NOW) } else { (PANEL, EDGE) };
     let [x, mut y, w, _] = frame(c, b, u, fill, edge);
 
-    // The name, and BEST at the right.
+    // The name, and "Best" at the right.
     let name = Style::new(Face::Label, 14.5 * u, NAME);
     let tag = Style::new(Face::Display, 12.0 * u, INK);
-    let tag_w = if best { tag.width("BEST") + 8.0 * u } else { 0.0 };
+    let tag_w = if best { tag.width("Best") + 8.0 * u } else { 0.0 };
     let h = if best { name.line().max(tag.line()) } else { name.line() };
     let room = w - if best { tag_w + 6.0 * u } else { 0.0 };
     // The whole name matters (it shows a misread): a second line before an ellipsis.
     let lines = name.wrap(&it.name, room);
     let first = lines.first().cloned().unwrap_or_default();
     let mut rest = lines.get(1..).unwrap_or_default().join(" ");
-    // A first word wider than the room beside BEST: the whole name goes below instead.
+    // A first word wider than the room beside "Best": the whole name goes below instead.
     let first = if name.fit(&first, room).is_empty() {
         rest = lines.join(" ");
         String::new()
@@ -97,8 +99,8 @@ fn item_panel(c: &mut Canvas, b: [f32; 4], u: f32, it: &RewardItem, best: bool) 
     if best {
         let tx = x + w - tag_w;
         let ty = y + (h - tag.line()) / 2.0;
-        c.fill(tx, ty, tag_w, tag.line(), 2.0, GOLD);
-        c.text(tag, tx + 4.0 * u, ty + tag.ascent(), "BEST");
+        c.fill(tx, ty, tag_w, tag.line(), 3.0 * u, NOW);
+        c.text(tag, tx + 4.0 * u, ty + tag.ascent(), "Best");
     }
     y += h;
     if !rest.is_empty() {
@@ -143,10 +145,10 @@ fn item_panel(c: &mut Canvas, b: [f32; 4], u: f32, it: &RewardItem, best: bool) 
     }
     y += h;
 
-    // owned N · needed · vaulted; in a narrow panel "N owned · need · vault", still in colour.
+    // "owned N, needed, vaulted"; in a narrow panel "N owned, need, vault", still in colour.
     let plain = Style::new(Face::Text, 13.0 * u, MUTED);
     let status = |short: bool| {
-        let sep = if short { " · " } else { "  ·  " };
+        let sep = ", ";
         let mut runs = vec![(plain, if short { format!("{} owned", it.have) } else { format!("owned {}", it.have) })];
         if it.needed > it.have {
             runs.push((plain, sep.into()));
@@ -234,9 +236,9 @@ pub fn riven(r: &RivenResult, width: u32, max_height: u32, u: f32) -> Pixmap {
 /// Draws the panel `w` wide (the background only when its `height` is known); its height.
 fn riven_into(c: &mut Canvas, r: &RivenResult, pic: Option<&Pixmap>, w: f32, height: Option<f32>, u: f32) -> f32 {
     if let Some(h) = height {
-        c.fill(0.0, 0.0, w, h, 3.0 * u, PANEL);
-        c.outline(0.0, 0.0, w, h, 3.0 * u, EDGE);
-        c.fill_top(0.0, 0.0, w, 3.0 * u, 3.0 * u, RIVEN);
+        c.fill(0.0, 0.0, w, h, 5.0 * u, PANEL);
+        c.outline(0.0, 0.0, w, h, 5.0 * u, EDGE);
+        c.fill_top(0.0, 0.0, w, 3.0 * u, 5.0 * u, RIVEN);
     }
     let pad = 9.0 * u;
     let x = 1.0 + pad;
@@ -292,16 +294,15 @@ fn riven_into(c: &mut Canvas, r: &RivenResult, pic: Option<&Pixmap>, w: f32, hei
     y + pad + 1.0
 }
 
-/// "3 positives + 1 negative · 1 not readable"
+/// "3 positives and 1 negative, 1 not readable"
 fn summary(r: &RivenResult) -> String {
     match (&r.error, r.positives, r.negatives) {
         (Some(_), _, _) => "Riven".to_string(),
         (None, Some(p), Some(n)) => {
-            let mut t = format!("{p} positives{}", if n > 0 { " + 1 negative" } else { "" });
+            let mut t = format!("{p} positives{}", if n > 0 { " and 1 negative" } else { "" });
             match r.unread {
                 0 => {}
-                1 => t.push_str(" · 1 not readable"),
-                k => t.push_str(&format!(" · {k} not readable")),
+                k => t.push_str(&format!(", {k} not readable")),
             }
             t
         }
@@ -368,9 +369,9 @@ fn prices(c: &mut Canvas, r: &RivenResult, x: f32, y: f32, w: f32, u: f32) -> f3
         (Some(m), _) if m.count > 0 => {
             px = c.text(price, px, baseline(price, y, h), &m.lowest.unwrap_or(0).to_string()) + 5.0 * u;
             match (m.median, m.lowest_online) {
-                (Some(med), Some(on)) => format!("lowest · {med} median · {on} in game · {} listed", m.count),
-                (Some(med), None) => format!("lowest · {med} median · {} listed", m.count),
-                _ => format!("lowest · {} listed", m.count),
+                (Some(med), Some(on)) => format!("lowest, {med} median, {on} in game, {} listed", m.count),
+                (Some(med), None) => format!("lowest, {med} median, {} listed", m.count),
+                _ => format!("lowest, {} listed", m.count),
             }
         }
         (Some(_), _) => "No listings with these positives".into(),
@@ -396,7 +397,7 @@ fn prices(c: &mut Canvas, r: &RivenResult, x: f32, y: f32, w: f32, u: f32) -> f3
     let traded = r.traded.as_ref();
     let sold =
         match (median(traded.and_then(|t| t.unrolled.as_ref())), median(traded.and_then(|t| t.rerolled.as_ref()))) {
-            (Some(a), Some(b)) => Some(format!("Sold lately: {a:.0} unrolled · {b:.0} rerolled")),
+            (Some(a), Some(b)) => Some(format!("Sold lately: {a:.0} unrolled, {b:.0} rerolled")),
             (Some(a), None) => Some(format!("Sold lately: {a:.0} unrolled")),
             (None, Some(b)) => Some(format!("Sold lately: {b:.0} rerolled")),
             (None, None) => None,

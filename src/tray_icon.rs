@@ -4,8 +4,9 @@
 
 pub const SIZE: u32 = 32;
 
-/// Renders a 32x32 RGBA8 icon: a crisp matte-obsidian badge with a brushed Orokin gold border
-/// and geometric diamond/lotus emblem that remains legible when scaled down to 16-18 px.
+/// Renders a 32x32 RGBA8 icon: a badge in the window's ground (Lotus night) with a bone rim and a
+/// geometric diamond/lotus emblem that remains legible when scaled down to 16-18 px, on dark and
+/// light panels alike.
 pub fn rgba() -> Vec<u8> {
     let n = SIZE as usize;
     let mut out = vec![0u8; n * n * 4];
@@ -50,32 +51,33 @@ fn sample(x: f32, y: f32) -> [f32; 4] {
         return [0.0, 0.0, 0.0, 0.0];
     }
 
-    // Matte obsidian backdrop matching the app window (#0f1116).
-    let mut color = [0.075, 0.086, 0.114, 1.0];
+    // The app window's ground, Lotus night (#11292b).
+    let mut color = [0.067, 0.161, 0.169, 1.0];
 
-    // Brushed gold rim.
+    // Bone rim (#e6efeb): the edge that carries the shape on any panel.
     if oct > 12.1 {
-        color = [0.812, 0.690, 0.420, 1.0];
+        color = [0.902, 0.937, 0.922, 1.0];
     }
 
     // Center lotus/diamond core: a tall vertical diamond flanked by two angled petals.
     let core = (ax / 4.4) + (ay / 9.2);
     let inner_cut = (ax / 2.2) + (ay / 4.2);
     if core <= 1.0 && inner_cut >= 1.0 {
-        // Warm highlight gold (#edd596).
-        color = [0.929, 0.835, 0.588, 1.0];
+        // Bone (#e6efeb).
+        color = [0.902, 0.937, 0.922, 1.0];
     }
 
     // Left and right swept petals.
     let wing_x = ax - 5.2;
     let wing_y = y + 1.2 - wing_x * 0.42;
     if (3.8..=10.6).contains(&ax) && wing_y.abs() <= 2.4 - (ax - 6.8).abs() * 0.36 {
-        color = [0.812, 0.690, 0.420, 1.0];
+        // Lichen (#98b3b0), quieter than the core.
+        color = [0.596, 0.702, 0.690, 1.0];
     }
 
-    // Small lotus teal accent pip at the heart (#5cc4be).
+    // The Lotus's aqua pip at the heart (#9ce3d9).
     if ax + ay <= 2.4 {
-        color = [0.361, 0.769, 0.745, 1.0];
+        color = [0.612, 0.890, 0.851, 1.0];
     }
 
     color

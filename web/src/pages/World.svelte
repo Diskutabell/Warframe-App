@@ -26,12 +26,12 @@
   /** When an hour of the schedule starts, in local time: "14:00", or "Tue 14:00" on another day. */
   function at(t: number) {
     const d = new Date(t * 1000);
-    const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
     return d.toDateString() === new Date().toDateString() ? time : `${d.toLocaleDateString([], { weekday: "short" })} ${time}`;
   }
   const where = (x: Slot) => `${x.node}${x.planet ? `, ${x.planet}` : ""}`;
   const kind = (c: Challenge) => (c.daily ? ["daily", "Daily"] : c.elite ? ["elite", "Elite weekly"] : ["weekly", "Weekly"]) as ["daily" | "elite" | "weekly", string];
-  const rolledAt = (t: number | null) => (t ? new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "");
+  const rolledAt = (t: number | null) => (t ? new Date(t * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "");
 </script>
 
 {#snippet lead(pic: Snippet, title: Snippet | string, sub: string, label: string, until: string | number | null | undefined)}
@@ -46,14 +46,14 @@
 {#snippet missions(list: { type: string | null; node: string | null; modifier?: string | null }[])}
   {#each list as m, i}
     <div class="list-row"><span class="step">{i + 1}</span>
-      <div class="main"><div class="t">{m.type}</div><div class="s">{m.node || ""}{#if m.modifier}{" "}· {m.modifier}{/if}</div></div></div>
+      <div class="main"><div class="t">{m.type}</div><div class="s">{m.node || ""}</div>{#if m.modifier}<div class="s wrap">{m.modifier}</div>{/if}</div></div>
   {/each}
 {/snippet}
 
 {#snippet arbRow(x: Slot)}
   <div class="list-row arb"><span class="arb-at num">{at(x.start)}</span>
     <GameImg path={factionIcon(x.faction)} px={20} title={foeName(x.faction)} />
-    <div class="main"><div class="t">{x.mission}</div><div class="s">{where(x)}{#if x.bonus}{" "}· +{x.bonus}% resources{/if}</div></div>
+    <div class="main"><div class="t">{x.mission}</div><div class="s">{where(x)}{#if x.bonus}, +{x.bonus}% resources{/if}</div></div>
     <ArbTier tier={x.tier} /></div>
 {/snippet}
 
@@ -65,13 +65,13 @@
       {@const soon = arbitration.upcoming.slice(0, 5)}
       {#snippet arbPic()}<Emblem path={factionIcon(c.faction)} />{/snippet}
       {#snippet arbTitle()}{c.mission} <ArbTier tier={c.tier} />{/snippet}
-      {@render lead(arbPic, arbTitle, `${where(c)} · ${foeName(c.faction)}${c.bonus ? ` · +${c.bonus}% resources` : ""}`, "ends in", c.end)}
+      {@render lead(arbPic, arbTitle, `${where(c)}, ${foeName(c.faction)}${c.bonus ? `, +${c.bonus}% resources` : ""}`, "ends in", c.end)}
       {#if soon.length}<div class="sublabel">Next hours</div><div class="list">{#each soon as x}{@render arbRow(x)}{/each}</div>{/if}
       {#if arbitration.next.length}
         <div class="sublabel" style="margin-top:12px">Next by tier</div>
         <div class="list">
           {#each arbitration.next as x}
-            <div class="list-row"><ArbTier tier={x.tier} /><div class="main"><div class="t">{x.mission} · {where(x)}</div><div class="s">{at(x.start)}</div></div>
+            <div class="list-row"><ArbTier tier={x.tier} /><div class="main"><div class="t">{x.mission} on {where(x)}</div><div class="s">{at(x.start)}</div></div>
               <span class="muted">in <Countdown until={x.start} /></span></div>
           {/each}
         </div>
@@ -111,7 +111,7 @@
 <Page title="World" {page}>
   {#snippet children(data)}
     <div class="page">
-      <div class="page-head"><div><h1>World</h1><p>Cycles, vendors and rotations. Times update live.</p></div></div>
+      <div class="page-head"><div><h1>World</h1><p>Cycles, traders and rotations, counting down live.</p></div></div>
       {#if !("cycles" in data)}
         <div class="callout">{data.error || "World state unavailable."}</div>
         <!-- The arbitration schedule and the Duviri picks need no world state. -->
@@ -176,7 +176,7 @@
               {#each w.events as e}
                 {@const share = e.goal ? Math.min(100, (100 * (e.score ?? 0)) / e.goal) : null}
                 <div class="list-row"><Emblem path={ICON.alert} cls="sm" />
-                  <div class="main"><div class="t">{e.name}</div><div class="s">{e.node || ""}{#if e.goal}{" "}· {fmt(e.score)} / {fmt(e.goal)}{/if}</div>
+                  <div class="main"><div class="t">{e.name}</div><div class="s">{e.node || ""}{#if e.goal}, {fmt(e.score)} of {fmt(e.goal)}{/if}</div>
                     {#if share != null}<div class="bar thin"><i style:width="{share.toFixed(1)}%"></i></div>{/if}</div>
                   <span class="muted"><Countdown until={e.expiry} done="ending" /></span></div>
               {/each}
@@ -192,7 +192,7 @@
               <div class="duviri-circuit"><div class="row duviri-head"><span class="grow">The Circuit's rewards this week</span>
                 <span class="muted"><Countdown until={w.resets.weekly} /></span></div>
                 {#each w.circuit as c}
-                  <div class="sublabel">{c.steel ? "Steel Path · Incarnon adapters" : "Normal · Warframe parts"}</div>
+                  <div class="sublabel">{c.steel ? "Steel Path: Incarnon adapters" : "Normal: Warframe parts"}</div>
                   <div class="picks compact">{#each c.choices as x}<div class="pick"><Art src={x.image} /><span>{x.name}</span></div>{/each}</div>
                 {/each}
               </div>
@@ -203,12 +203,12 @@
             {@const foes = [...new Set(a.missions.map((m) => m.faction).filter((f): f is string => !!f))]}
             <div class="card"><div class="card-head"><h2>{a.name}</h2></div>
               {#snippet archPic()}<Emblem path={factionIcon(foes[0])} />{/snippet}
-              {@render lead(archPic, foes.map(foeName).join(" and ") || a.name, "Three missions in a row; Elite adds a second risk to each", "ends in", a.expiry)}
+              {@render lead(archPic, foes.map(foeName).join(" and ") || a.name, "Three missions in a row. Elite adds a second risk to each.", "ends in", a.expiry)}
               {#each a.missions as m, i}
                 <div class="arch-mission">
                   <div class="row"><span class="step">{i + 1}</span><b class="grow">{m.type}</b>{#if foes.length > 1}<FactionTag name={m.faction} px={16} />{/if}</div>
                   {#if m.deviation.name}<div class="arch-dev"><b>{m.deviation.name}</b>{#if m.deviation.description}<span>{m.deviation.description}</span>{/if}</div>{/if}
-                  {#if m.risks.length}<div class="chips">{#each m.risks as r}<span class="pill" class:bad={r.elite} title={r.description || ""}>{r.elite ? "Elite · " : ""}{r.name}</span>{/each}</div>{/if}
+                  {#if m.risks.length}<div class="chips">{#each m.risks as r}<span class="pill" class:bad={r.elite} title={r.description || ""}>{r.elite ? "Elite: " : ""}{r.name}</span>{/each}</div>{/if}
                 </div>
               {:else}<div class="muted">No missions listed.</div>{/each}
               {#if a.modifiers.length}
@@ -229,8 +229,8 @@
                 {@const rewards = a.rewards.length ? a.rewards : [{ name: a.reward || a.what || "", count: 1, image: null }]}
                 {@const pic = rewards.find((r) => r.image)?.image}
                 <div class="list-row">{#if pic}<Art src={pic} />{:else}<Emblem path={ICON.alert} />{/if}
-                  <div class="main"><div class="t wrap">{rewards.map((r) => `${r.count > 1 ? `${r.count}× ` : ""}${r.name}`).join(" · ")}</div>
-                    <div class="s">{a.type} · {a.node}</div></div>
+                  <div class="main"><div class="t wrap">{rewards.map((r) => `${r.count > 1 ? `${r.count}× ` : ""}${r.name}`).join(", ")}</div>
+                    <div class="s">{a.type} on {a.node}</div></div>
                   <div class="side"><FactionTag name={a.faction} /><span class="muted"><Countdown until={a.expiry} done="ending" /></span></div></div>
               {:else}<div class="muted">No alerts.</div>{/each}
             </div>
@@ -263,8 +263,8 @@
               {@render lead(noraPic, nw.season != null ? `Season ${nw.season}` : "Nora Night", `${challenges.length} acts`, nw.expiry ? "ends in" : "", nw.expiry)}
               {#if nw.mine}
                 {@const mine = nw.mine}
-                <div class="nw-me"><div class="row"><span class="grow"><b>{mine.rankName}</b><span class="muted"> · rank {fmt(mine.title)}</span></span>
-                  <span class="num muted">{fmt(mine.progress)} / {fmt(mine.size)}</span></div>
+                <div class="nw-me"><div class="row"><span class="grow"><b>{mine.rankName}</b> <span class="muted">rank {fmt(mine.title)}</span></span>
+                  <span class="num muted">{fmt(mine.progress)} of {fmt(mine.size)}</span></div>
                   <div class="bar thin"><i style:width="{mine.size ? Math.max(0, Math.min(100, (100 * mine.progress) / mine.size)).toFixed(1) : 0}%"></i></div></div>
               {/if}
               <div class="list">
@@ -281,7 +281,7 @@
             <div class="card"><div class="card-head"><h2>Steel Path</h2></div>
               {#snippet teshinPic()}{@render portrait(PORTRAIT.teshin)}{/snippet}
               {@render lead(teshinPic, "Teshin's offer", "Steel Path honors", "changes in", w.steelPath.expiry)}
-              <div class="row"><Art src={w.steelPath.image} /><span class="grow" style="font:700 19px/1.2 var(--display)">{w.steelPath.reward || ""}</span>
+              <div class="row"><Art src={w.steelPath.image} /><span class="grow" style="font-weight:680;font-size:var(--t-16)">{w.steelPath.reward || ""}</span>
                 <span class="ftag"><GameImg path={ICON.steel} px={18} />{fmt(w.steelPath.cost)}</span></div>
             </div>
             {#if w.darvo}

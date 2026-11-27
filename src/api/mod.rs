@@ -328,9 +328,7 @@ mod tests {
         // The built UI (web/: npm run build), with what the desktop shells read from it.
         assert!(Web::iter().any(|f| f.starts_with("assets/") && f.ends_with(".js")), "web/dist holds no built UI");
         // What the overlays draw with (crate::overlay).
-        for f in ["fonts/Rajdhani-Bold.ttf", "fonts/Rajdhani-SemiBold.ttf", "fonts/SourceSans3-Variable.ttf"] {
-            assert!(Web::get(f).is_some(), "{f}");
-        }
+        assert!(Web::get("fonts/HubotSans-Variable.ttf").is_some(), "the overlays' font");
         assert!(Web::get("icons/platinum.png").is_some() && Web::get("icons/ducats.png").is_some());
         assert!(Web::get("../Cargo.toml").is_none());
     }

@@ -137,7 +137,7 @@
     {@const m = src.memscan}
     <div class="page"><div class="page-head"><div><h1>Settings</h1><p>Changes save as you make them.</p></div></div>
       <div class="settings-nav">
-        {#each [["sec-accounts", "Accounts"], ["sec-sources", "Sources"], ["sec-memscan", "Memory scan"], ["sec-notifications", "Notifications"], ["sec-overlays", "Overlays"], ["sec-hotkeys", "Tray & hotkeys"], ["sec-files", "Files & platform"]] as [id, label]}
+        {#each [["sec-accounts", "Accounts"], ["sec-sources", "Sources"], ["sec-memscan", "Memory scan"], ["sec-notifications", "Notifications"], ["sec-overlays", "Overlays"], ["sec-hotkeys", "Tray and hotkeys"], ["sec-files", "Account and files"]] as [id, label]}
           <a href="#settings" onclick={(e) => { e.preventDefault(); scrollTo(id); }}>{label}</a>
         {/each}
       </div>
@@ -154,9 +154,9 @@
                 <div class="acct-row" class:on={a.active}>
                   <div class="row"><GameImg path={a.masteryRank == null ? ICON.mastery : mrBadge(a.masteryRankMax ?? a.masteryRank)} px={36} />
                     <div class="grow"><div class="t"><b>{a.name}</b> <span class="muted">{a.masteryRank == null ? "MR unknown" : rankText(a)}</span>
-                        {#if a.active}<span class="pill gold">shown</span>{/if}{#if a.playing}<span class="pill lotus">in game</span>{/if}</div>
-                      <div class="s">{#if a.id}<code>{a.id}</code> · {SOURCE[a.source ?? ""] || a.source || "linked"}{:else}<span class="warn-text">No account id yet</span>{/if}
-                        · profile {a.profile ? ago(a.profile) : "not loaded"} · inventory {a.inventory ? ago(a.inventory) : "none"}</div>
+                        {#if a.active}<span class="pill">Shown</span>{/if}{#if a.playing}<span class="pill lotus">In game</span>{/if}</div>
+                      <div class="s acct-facts">{#if a.id}<span><code>{a.id}</code> {SOURCE[a.source ?? ""] || a.source || "linked"}</span>{:else}<span class="warn-text">No account id yet</span>{/if}
+                        <span>Profile {a.profile ? `read ${ago(a.profile)}` : "not loaded"}</span><span>Inventory {a.inventory ? `read ${ago(a.inventory)}` : "not read"}</span></div>
                       {#if a.profileError}<div class="s warn-text">{a.profileError}</div>{/if}</div>
                     <div class="btn-group">{#if !a.active}<button onclick={() => show(a.key)}>Show</button>{/if}
                       <button class={confirming(a.key) ? "danger" : "ghost"} onclick={() => forget(a)}>{confirming(a.key) ? "Delete its data?" : "Forget"}</button></div></div>
@@ -177,21 +177,21 @@
         <div class="card" id="sec-sources"><div class="card-head"><h2>Sources</h2></div>
           <div class="list">
             <div class="list-row">{@render dot(src.eeLog.path ? "on" : "warn")}<div class="main"><div class="t">Game log</div>
-              <div class="s" style="white-space:normal">{#if src.eeLog.path}<code>{src.eeLog.path}</code>{src.eeLog.active ? " · game running" : ""}{:else}{src.eeLog.searching ? "Searching…" : "Not found - set its path under Files."}{/if}</div></div></div>
+              <div class="s" style="white-space:normal">{#if src.eeLog.path}<code>{src.eeLog.path}</code>{src.eeLog.active ? ", game running" : ""}{:else}{src.eeLog.searching ? "Searching…" : "Not found. Set its path under Account and files."}{/if}</div></div></div>
             <div class="list-row">{@render dot(src.profile.fetched ? "on" : src.profile.error ? "warn" : "")}<div class="main">
-              <div class="t">Public profile{#if S.account.name}<span class="muted" style="font-weight:400"> · {S.account.name}</span>{/if}</div>
-              <div class="s" style="white-space:normal">{src.profile.fetched ? `${fmt(src.profile.items)} items with mastery · ${ago(src.profile.fetched)}` : "Not loaded"}{#if src.profile.error}<br /><span class="warn-text">{src.profile.error}</span>{/if}</div></div>
+              <div class="t">Public profile{#if S.account.name}<span class="muted" style="font-weight:400">{" "}of {S.account.name}</span>{/if}</div>
+              <div class="s" style="white-space:normal">{src.profile.fetched ? `${fmt(src.profile.items)} items with mastery, read ${ago(src.profile.fetched)}` : "Not loaded"}{#if src.profile.error}<br /><span class="warn-text">{src.profile.error}</span>{/if}</div></div>
               <div class="btn-group"><button disabled={!S.account.id} onclick={() => act("profile/refresh", {}, "Profile refreshed")}>Refresh</button>
                 <button onclick={() => importFile("profile/import", "Profile imported")}>Import file</button></div></div>
             <div class="list-row">{@render dot(src.inventory.source ? "on" : "")}<div class="main"><div class="t">Inventory</div>
-              <div class="s" style="white-space:normal">{src.inventory.source ? `${fmt(src.inventory.stacks)} stacks · ${src.inventory.source} · ${ago(src.inventory.imported)}` : m.state === "absent" ? "None - parts, relics, currencies and medallions need an imported inventory.json." : "None - parts, relics, currencies and medallions need one (memory scan or an inventory.json)."}</div></div>
+              <div class="s" style="white-space:normal">{src.inventory.source ? `${fmt(src.inventory.stacks)} stacks from the ${src.inventory.source}, ${ago(src.inventory.imported)}` : m.state === "absent" ? "None yet. Parts, relics, currencies and medallions need an imported inventory.json." : "None yet. Parts, relics, currencies and medallions need one: the memory scan or an inventory.json."}</div></div>
               <div class="btn-group"><button onclick={() => importFile("inventory/import", "Inventory imported")}>Import file</button>
                 {#if src.inventory.source}<button class="ghost" onclick={async () => { if (await act("inventory/clear", {}, "Inventory forgotten")) await changed(); }}>Forget</button>{/if}</div></div>
             <div class="list-row">{@render dot(tools.tesseract && tools.screenshot ? "on" : "warn")}<div class="main"><div class="t">Screen reader</div>
-              <div class="s" style="white-space:normal">{#if tools.tesseract}tesseract{:else}<span class="warn-text">tesseract missing{#if S.os === "windows"}{" "}- install it with <code>winget install UB-Mannheim.TesseractOCR</code>, then restart the app{/if}</span>{/if}
-                · {#if tools.screenshot}{tools.screenshot}{:else}<span class="warn-text">no screenshot tool</span>{/if}</div></div></div>
+              <div class="s" style="white-space:normal">{#if tools.tesseract}tesseract{:else}<span class="warn-text">tesseract is missing{#if S.os === "windows"}. Install it with <code>winget install UB-Mannheim.TesseractOCR</code>, then restart the app{/if}</span>{/if}
+                and {#if tools.screenshot}{tools.screenshot}{:else}<span class="warn-text">no screenshot tool</span>{/if}</div></div></div>
             <div class="list-row">{@render dot(src.market.error ? "warn" : "on")}<div class="main"><div class="t">warframe.market</div>
-              <div class="s" style="white-space:normal">{src.market.error || `Live${src.market.queued ? ` · ${src.market.queued} prices queued` : ""}`}</div></div></div>
+              <div class="s" style="white-space:normal">{src.market.error || `Live${src.market.queued ? `, ${src.market.queued} prices queued` : ""}`}</div></div></div>
           </div>
         </div>
 
@@ -199,7 +199,7 @@
           {#if m.state === "absent"}
             <p class="muted" style="margin:0">{m.detail || "This build of warframeproject was made without the memory scan."}</p>
           {:else}
-            <p class="muted" style="margin:0 0 6px">Reads the inventory the game has already downloaded - parts, relics, currencies, the foundry - straight from its memory, read-only, and keeps nothing else. It runs by itself after you log in and after each mission, because that is when the game holds the whole inventory. Nothing is sent anywhere. Third-party tools are used at your own risk.</p>
+            <p class="muted" style="margin:0 0 6px">Reads the inventory the game has already downloaded (parts, relics, currencies, the foundry) straight from its memory, read-only, and keeps nothing else. It runs by itself after you log in and after each mission, because that is when the game holds the whole inventory. Nothing is sent anywhere. Third-party tools are used at your own risk.</p>
             {@render toggle(s, "memory_scan_enabled", "Read the inventory from game memory", "Off by default.")}
             <div class="memscan-box">
               {#if m.state === "off"}{@render dot("")}<span>Off.</span>
@@ -215,7 +215,7 @@
 
         <div class="card" id="sec-notifications"><div class="card-head"><h2>Notifications</h2></div>
           {#if !tools["notify-send"]}<div class="callout" style="margin-bottom:8px">notify-send was not found, so no notification can be shown.</div>{/if}
-          <div class="setting"><div><div class="l">Watched fissures</div><div class="d">Watch a tier and mission with the bell on the Fissures page. Watching {s.fissure_watch.length}: <a href="#fissures">manage</a>.</div></div>
+          <div class="setting"><div><div class="l">Watched fissures</div><div class="d">Watch a tier and mission with the bell on the Fissures page. You watch {s.fissure_watch.length}: <a href="#fissures">change them</a>.</div></div>
             <div><span class="switch"><input type="checkbox" checked={s.notify_fissures} aria-label="Watched fissures" onchange={onToggle("notify_fissures")} /><span></span></span></div></div>
           {@render toggle(s, "notify_baro", "Baro Ki'Teer arrives", "")}
           {@render toggle(s, "notify_foundry", "Foundry builds finish", "Needs an inventory.")}
@@ -240,7 +240,7 @@
 
         <div class="card" id="sec-hotkeys"><div class="card-head"><h2>Tray and hotkeys</h2></div>
           {@render toggle(s, "minimize_to_tray", "Minimize to system tray", linux
-            ? "Closing the window hides it to your system tray / status bar instead of quitting. Click the tray icon or press the window hotkey below to bring it back."
+            ? "Closing the window hides it to your system tray or status bar instead of quitting. Click the tray icon or press the window hotkey below to bring it back."
             : "Closing the window hides it to the system tray instead of quitting. Click the tray icon or press the window hotkey below to bring it back.")}
           {@render text(s, "hotkey_window", "Show or hide the window", "Toggles the window between the tray and your screen. Clear to disable.", "")}
           {@render text(s, "hotkey_rewards", "Read the reward screen", "", "")}

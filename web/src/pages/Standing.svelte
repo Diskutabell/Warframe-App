@@ -24,7 +24,7 @@
     if (r.steps) return `rank ${fmt(r.progress)} of ${fmt(r.size)}`;
     if (!r.size) return `${fmt(r.standing)} standing`;
     if (r.title < 0) return `${fmt(r.progress)} of −${fmt(r.size)}`;
-    return `${fmt(r.progress)} / ${fmt(r.size)}`;
+    return `${fmt(r.progress)} of ${fmt(r.size)}`;
   }
   const share = (r: SyndicateRow) =>
     ((r.title < 0 ? Math.min(1, -r.progress / r.size) : Math.max(0, Math.min(1, r.progress / r.size))) * 100).toFixed(1) + "%";
@@ -33,7 +33,7 @@
 
 {#snippet status(r: SyndicateRow)}
   {#if r.atCap}<span class="pill gold" title="This rank's standing is full: rank up to earn more">Rank up ready</span>
-  {:else if r.full}<span class="pill warn" title="Top rank and full standing: anything earned now is lost unless you spend some">Full - spend it</span>
+  {:else if r.full}<span class="pill warn" title="Top rank and full standing: anything earned now is lost unless you spend some">Full: spend some</span>
   {:else if r.title < 0}<span class="pill warn">Hostile</span>
   {:else if !r.known}<span class="pill">Not met yet</span>{/if}
 {/snippet}
@@ -48,7 +48,7 @@
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
   <div class="syn-card" class:unmet={!r.known} style={r.colour ? `--syn:${r.colour}` : null} onclick={() => openDetails("syndicate:" + r.tag)}>
     <div class="syn-head"><span class="sigil"><Img src={r.rankIcon || r.icon} px={44} cls="gi" /></span>
-      <div class="grow"><div class="name">{r.name}</div><div class="rank">{r.rankName}{#if r.topRank && !r.steps}<span class="faint"> · rank {r.title} of {r.topRank}</span>{/if}</div></div>
+      <div class="grow"><div class="name">{r.name}</div><div class="rank">{r.rankName}{#if r.topRank && !r.steps}<span class="faint">, rank {r.title} of {r.topRank}</span>{/if}</div></div>
       {@render status(r)}</div>
     {@render bar(r)}
     <div class="row spread syn-nums"><span class="num">{amount(r)}</span>
@@ -62,7 +62,7 @@
         </div></div>
     {/if}
     {#if m.standing}
-      <div class="medals" title={m.items.map((i) => `${fmt(i.count)} ${i.name}`).join(", ")}>{fmt(m.standing)} standing in hand-ins you hold{m.capped ? " · counts toward the daily limit" : " · not limited daily"}</div>
+      <div class="medals" title={m.items.map((i) => `${fmt(i.count)} ${i.name}`).join(", ")}>{fmt(m.standing)} standing in hand-ins you hold, {m.capped ? "counted toward the daily limit" : "not limited daily"}</div>
     {/if}
   </div>
 {/snippet}
@@ -74,7 +74,7 @@
     {@const ready = s.syndicates.filter((r) => r.atCap)}
     {@const full = s.syndicates.filter((r) => r.full)}
     <div class="page">
-      <div class="page-head"><div><h1>Standing</h1><p>{s.account ? `${s.account} · ` : ""}ranks, rank-up costs, the daily limits and what standing buys</p></div></div>
+      <div class="page-head"><div><h1>Standing</h1><p>Ranks, what the next one costs, what is left of today's limits, and what standing buys.</p></div></div>
       {#if !s.loaded}
         <div class="callout">The syndicate data has not been downloaded yet. It comes with the game data (Settings → Re-download game data).</div>
       {:else if !s.account}
@@ -88,20 +88,20 @@
           {/if}
           <div class="pools">
             {#each s.pools as p}
-              <div class="pool" class:empty={p.left === 0} title="{p.name}{p.read ? '' : ' - not read since the daily reset'}">
+              <div class="pool" class:capped={p.left === 0} title="{p.name}{p.read ? '' : ': not read since the daily reset'}">
                 <div class="n ellipsis">{p.name}</div>
-                <div class="v num">{p.left == null ? "?" : fmt(p.left)}<span class="faint"> / {fmt(p.cap)}</span></div>
+                <div class="v num">{p.left == null ? "?" : fmt(p.left)}<span class="faint">{" "}of {fmt(p.cap)}</span></div>
                 <div class="bar thin lotus"><i style:width="{((p.cap ? Math.max(0, Math.min(1, (p.left ?? p.cap) / p.cap)) : 0) * 100).toFixed(1)}%"></i></div></div>
             {/each}
             {#if s.focus.cap}
-              <div class="pool"><div class="n">Focus</div><div class="v num">{fmt(s.focus.left)}<span class="faint"> / {fmt(s.focus.cap)}</span></div>
+              <div class="pool"><div class="n">Focus</div><div class="v num">{fmt(s.focus.left)}<span class="faint">{" "}of {fmt(s.focus.cap)}</span></div>
                 <div class="bar thin"><i style:width="{(Math.max(0, Math.min(1, (s.focus.left ?? s.focus.cap) / s.focus.cap)) * 100).toFixed(1)}%"></i></div></div>
             {/if}
           </div>
           {#if ready.length || full.length || s.universal}
             <div class="hint" style="margin-top:14px;display:block">
               {#if ready.length}<div><b>Rank up ready:</b> {ready.map((r) => r.name).join(", ")}.</div>{/if}
-              {#if full.length}<div><b>Full at the top rank:</b> {full.map((r) => r.name).join(", ")} - spend standing there before earning more.</div>{/if}
+              {#if full.length}<div><b>Full at the top rank:</b> {full.map((r) => r.name).join(", ")}. Spend standing there before earning more.</div>{/if}
               {#if s.universal}<div>You hold <b>{fmt(s.universal)} Universal Medallion{s.universal > 1 ? "s" : ""}</b> (1,000 standing each, for any of several syndicates).</div>{/if}
             </div>
           {/if}
@@ -114,9 +114,9 @@
                 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                 <div class="list-row click syn-row" onclick={() => openDetails("syndicate:" + r.tag)}>
                   <span class="sigil"><Img src={r.rankIcon || r.icon} px={40} cls="gi" /></span>
-                  <div class="main"><div class="t">{r.name} <span class="muted" style="font-weight:400">· {r.rankName}</span></div>
+                  <div class="main"><div class="t">{r.name} <span class="muted" style="font-weight:400;margin-left:4px">{r.rankName}</span></div>
                     {@render bar(r)}
-                    <div class="s">{amount(r)}{#if r.allies.length}{" "}· <span class="allies">{#each r.allies as a}<span class="ally {a.share > 0 ? 'up' : 'down'}" title="Standing gained here gives {a.name} {a.share > 0 ? '+' : ''}{Math.round(a.share * 100)}%">{a.share > 0 ? "+" : "−"}{a.name}</span>{/each}</span>{/if}</div></div>
+                    <div class="s">{amount(r)}{#if r.allies.length}<span class="allies" style="margin-left:12px">{#each r.allies as a}<span class="ally {a.share > 0 ? 'up' : 'down'}" title="Standing gained here gives {a.name} {a.share > 0 ? '+' : ''}{Math.round(a.share * 100)}%">{a.share > 0 ? "+" : "−"}{a.name}</span>{/each}</span>{/if}</div></div>
                   <div class="side">{@render status(r)}</div></div>
               {/each}
             </div></div>

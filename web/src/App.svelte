@@ -46,7 +46,7 @@
       else if (ui.accountMenu) ui.accountMenu = false;
       else if (ui.drawer.length) closeDetails();
     } else if (!typing && !e.ctrlKey && !e.altKey && !e.metaKey && /^[0-9]$/.test(e.key) && !ui.palette) {
-      const p = PAGES.find((pg, i) => pageKey(pg, i) === e.key);
+      const p = PAGES.find((pg) => pageKey(pg) === e.key);
       if (p) location.hash = "#" + p.id;
     }
   }
@@ -59,8 +59,8 @@
   {#if !app.state}
     {#if app.connected}<Skeleton title={page.title} />
     {:else}
-      <div class="page"><div class="page-head"><div><h1>The engine isn't responding</h1>
-        <p>Reconnecting by itself. If it keeps failing, start the app again from a terminal and read its output.</p></div></div></div>
+      <div class="page"><div class="page-head"><div><h1>The engine isn't answering</h1>
+        <p>The window keeps trying to reconnect. If this stays, start the app again from a terminal and read what it prints.</p></div></div></div>
     {/if}
   {:else}
     {#key page.id}<page.component S={app.state} />{/key}

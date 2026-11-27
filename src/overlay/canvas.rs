@@ -24,18 +24,22 @@ impl Colour {
     }
 }
 
-/// The bundled typefaces (web/public/fonts), as the main window uses them.
+/// The bundled typeface (web/public/fonts), as the main window uses it: one variable font, Hubot
+/// Sans, at four widths and weights.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Face {
-    /// Rajdhani SemiBold: names, small figures.
+    /// Semibold and a little narrow: names, small figures.
     Label,
-    /// Rajdhani Bold: prices, grades, the weapon.
+    /// Bold and narrow: prices, grades, the weapon. The window sets its figures the same way.
     Display,
-    /// Source Sans 3 Regular: running text.
+    /// Regular: running text.
     Text,
-    /// Source Sans 3 Bold.
+    /// Bold, at the regular width.
     TextBold,
 }
+
+/// The variable font every face is an instance of.
+const FONT: &str = "HubotSans-Variable.ttf";
 
 struct Fonts {
     label: FontArc,
@@ -49,18 +53,21 @@ fn load(name: &str) -> FontVec {
     FontVec::try_from_vec(file.data.into_owned()).unwrap_or_else(|e| panic!("font {name}: {e}"))
 }
 
+/// The font at a width (75-125, percent of normal) and a weight (200-900).
+fn instance(width: f32, weight: f32) -> FontArc {
+    let mut font = load(FONT);
+    font.set_variation(b"wdth", width);
+    font.set_variation(b"wght", weight);
+    FontArc::new(font)
+}
+
 fn fonts() -> &'static Fonts {
     static FONTS: OnceLock<Fonts> = OnceLock::new();
-    FONTS.get_or_init(|| {
-        let text = load("SourceSans3-Variable.ttf");
-        let mut bold = load("SourceSans3-Variable.ttf");
-        bold.set_variation(b"wght", 700.0);
-        Fonts {
-            label: FontArc::new(load("Rajdhani-SemiBold.ttf")),
-            display: FontArc::new(load("Rajdhani-Bold.ttf")),
-            text: FontArc::new(text),
-            text_bold: FontArc::new(bold),
-        }
+    FONTS.get_or_init(|| Fonts {
+        label: instance(90.0, 600.0),
+        display: instance(87.5, 720.0),
+        text: instance(100.0, 430.0),
+        text_bold: instance(100.0, 680.0),
     })
 }
 
